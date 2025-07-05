@@ -1,0 +1,17 @@
+pandas
+numpy
+matplotlib
+seaborn
+networkx
+scikit-learn
+plotly
+requests
+gseapy
+py2cytoscape
+openpyxl
+biopython
+tqdm
+scipy
+PyYAML
+squarify
+kaleido
