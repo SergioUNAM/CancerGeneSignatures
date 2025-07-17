@@ -2,7 +2,7 @@
 
 # Configuración de rutas
 rutas:
-  datos_crudos: "../raw_data/CG-TEM-difuso.xlsx"  # Ruta relativa al archivo de datos. 
+  datos_crudos: "../raw_data/CG-TEM-intestinal_prueba.xlsx"  # Ruta relativa al archivo de datos. 
                                           # Opciones:
                                           # 1. miR-9.xlsx: "Breast Cancer", Controles: "7BSC", Muestras: "3CM"
                                           # 2. miR-29.xlsx "Breast Cancer", Controles: "7BSC", Muestras: "3CM"
