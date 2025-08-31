@@ -9,7 +9,7 @@ from typing import Optional
 import pandas as pd
 import streamlit as st
 
-from src.core.io import LoadResult, list_excel_sheets, load_table
+from src.core.io import LoadResult, list_excel_sheets, load_table, parse_qpcr_wide
 from src.core.preprocessing import PreprocessConfig, preprocess
 from src.core.analysis import run_basic_analysis
 from src.core.plots import corr_heatmap, histogram, scatter
@@ -28,6 +28,7 @@ with st.sidebar:
     sheet: Optional[str] = None
     if uploaded is not None and uploaded.name.lower().endswith((".xlsx", "xls")):
         try:
+            # Leer nombres de hojas (reabrir el buffer cada vez por seguridad)
             sheets = list_excel_sheets(uploaded)
             if sheets:
                 sheet = st.selectbox("Hoja de Excel", options=sheets, index=0)
@@ -36,6 +37,22 @@ with st.sidebar:
 
     st.header("2) Parámetros")
     normalization = st.selectbox("Normalización", options=["none", "zscore", "minmax"], index=0)
+    data_format = st.radio(
+        "Formato de datos",
+        options=["Tabla simple", "qPCR (Well/Target Name + CT por muestra)"],
+        index=1,
+    )
+    if data_format.startswith("qPCR"):
+        st.caption("Se intentará detectar encabezados con Well/Target Name y nombres de muestras.")
+        undet_policy = st.selectbox(
+            "Tratamiento de 'Undetermined'",
+            options=["nan", "ctmax", "value"],
+            help="nan: deja como faltante; ctmax: reemplaza por el CT máximo observado de la muestra; value: usar un valor fijo.",
+        )
+        undet_value = st.number_input("Valor fijo para 'value'", value=40.0, step=0.5)
+    else:
+        undet_policy = "nan"
+        undet_value = 40.0
     id_cols_input = st.text_input(
         "Columnas ID (opcional, separadas por comas)",
         value="",
@@ -61,7 +78,18 @@ def build_results_zip(df_raw: pd.DataFrame, df_proc: pd.DataFrame, analysis):
 df_loaded: Optional[LoadResult] = None
 if uploaded is not None and (run_btn or st.session_state.get("auto_run", True)):
     try:
-        df_loaded = load_table(uploaded, file_name=uploaded.name, sheet_name=sheet)
+        if data_format.startswith("qPCR") and uploaded.name.lower().endswith((".xlsx", "xls")):
+            df_loaded = parse_qpcr_wide(
+                uploaded,
+                sheet_name=sheet,
+                undetermined_policy=undet_policy,
+                undetermined_value=float(undet_value),
+            )
+            # Autocompletar columnas ID típicas del formato qPCR
+            if not id_columns:
+                id_columns = ["Well", "Target Name"]
+        else:
+            df_loaded = load_table(uploaded, file_name=uploaded.name, sheet_name=sheet)
     except Exception as e:
         st.error(f"Error al cargar el archivo: {e}")
 
@@ -111,4 +139,3 @@ st.markdown(
     4. Revisa tablas y gráficas; descarga resultados en ZIP.
     """
 )
-
