@@ -10,6 +10,7 @@ import pandas as pd
 import streamlit as st
 
 from src.core.io import LoadResult, list_excel_sheets, load_table, parse_qpcr_wide
+from src.core.qpcr import try_extract_template_config, melt_wide_to_long, classify_tests
 from src.core.preprocessing import PreprocessConfig, preprocess
 from src.core.analysis import run_basic_analysis
 from src.core.plots import corr_heatmap, histogram, scatter
@@ -53,6 +54,17 @@ with st.sidebar:
     else:
         undet_policy = "nan"
         undet_value = 40.0
+    # Configuración de contexto biológico / cáncer
+    st.header("3) Configuración (proyecto)")
+    auto_config = False
+    contexto_biologico = st.text_input("Contexto biológico", value="")
+    tipo_cancer = st.text_input("Tipo de cáncer", value="")
+    metodo = st.text_input("Método (descriptivo)", value="")
+
+    st.caption("Prefijos para clasificar pruebas en controles/muestras (p. ej., 4GB, 3CG)")
+    pref_ctrl = st.text_input("Prefijo controles", value="")
+    pref_samp = st.text_input("Prefijo muestras", value="")
+
     id_cols_input = st.text_input(
         "Columnas ID (opcional, separadas por comas)",
         value="",
@@ -62,7 +74,11 @@ with st.sidebar:
     run_btn = st.button("Ejecutar análisis", type="primary")
 
 
-def build_results_zip(df_raw: pd.DataFrame, df_proc: pd.DataFrame, analysis):
+def build_results_zip(df_raw: pd.DataFrame, df_proc: pd.DataFrame, analysis,
+                      cfg: Optional[dict] = None,
+                      qpcr_long: Optional[pd.DataFrame] = None,
+                      controles: Optional[pd.DataFrame] = None,
+                      muestras: Optional[pd.DataFrame] = None):
     mem = io.BytesIO()
     time_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
@@ -71,6 +87,16 @@ def build_results_zip(df_raw: pd.DataFrame, df_proc: pd.DataFrame, analysis):
         z.writestr(f"results_{time_id}/datos_procesados.csv", df_proc.to_csv(index=False))
         z.writestr(f"results_{time_id}/resumen.csv", analysis.summary.to_csv())
         z.writestr(f"results_{time_id}/correlacion.csv", analysis.correlation.to_csv())
+        # Config y qPCR
+        if cfg is not None:
+            import json
+            z.writestr(f"results_{time_id}/config.json", json.dumps(cfg, ensure_ascii=False, indent=2))
+        if qpcr_long is not None:
+            z.writestr(f"results_{time_id}/qpcr_long.csv", qpcr_long.to_csv(index=False))
+        if controles is not None and not controles.empty:
+            z.writestr(f"results_{time_id}/controles.csv", controles.to_csv(index=False))
+        if muestras is not None and not muestras.empty:
+            z.writestr(f"results_{time_id}/muestras.csv", muestras.to_csv(index=False))
     mem.seek(0)
     return mem, f"resultados_{time_id}.zip"
 
@@ -88,6 +114,21 @@ if uploaded is not None and (run_btn or st.session_state.get("auto_run", True)):
             # Autocompletar columnas ID típicas del formato qPCR
             if not id_columns:
                 id_columns = ["Well", "Target Name"]
+            # Intento de autoconfig desde plantilla
+            try:
+                cfg = try_extract_template_config(uploaded, sheet_name=sheet)
+                if cfg.contexto_biologico and not contexto_biologico:
+                    contexto_biologico = cfg.contexto_biologico
+                if cfg.tipo_cancer and not tipo_cancer:
+                    tipo_cancer = cfg.tipo_cancer
+                if cfg.metodo and not metodo:
+                    metodo = cfg.metodo
+                if cfg.prefijo_controles and not pref_ctrl:
+                    pref_ctrl = cfg.prefijo_controles
+                if cfg.prefijo_muestras and not pref_samp:
+                    pref_samp = cfg.prefijo_muestras
+            except Exception:
+                pass
         else:
             df_loaded = load_table(uploaded, file_name=uploaded.name, sheet_name=sheet)
     except Exception as e:
@@ -107,8 +148,16 @@ if df_loaded is not None:
 
     analysis = run_basic_analysis(df_proc)
 
+    st.subheader("Configuración del proyecto")
+    st.json({
+        "contexto_biologico": contexto_biologico or None,
+        "tipo_cancer": tipo_cancer or None,
+        "metodo": metodo or None,
+        "prefijos": {"controles": pref_ctrl or None, "muestras": pref_samp or None},
+    })
+
     st.subheader("Resultados")
-    st.markdown("- Resumen estadístico de variables numéricas\n- Matriz de correlación")
+    st.markdown("- Resumen estadístico de variables numéricas\n- Matriz de correlación\n- Clasificación de pruebas (controles vs. muestras)")
     with st.expander("Resumen (describe)", expanded=True):
         st.dataframe(analysis.summary, use_container_width=True)
     with st.expander("Correlación (tabla)", expanded=False):
@@ -124,8 +173,49 @@ if df_loaded is not None:
         sel_col = st.selectbox("Histograma de columna", options=num_cols)
         st.plotly_chart(histogram(df_proc, sel_col), use_container_width=True)
 
+    # Clasificación qPCR si aplica
+    long_df = None
+    controles_df = None
+    muestras_df = None
+    if data_format.startswith("qPCR"):
+        long_df = melt_wide_to_long(df_loaded.df)
+        controles_df, muestras_df = classify_tests(long_df, pref_ctrl, pref_samp)
+        with st.expander("Controles detectados", expanded=False):
+            if controles_df is not None and not controles_df.empty:
+                st.write(
+                    f"{controles_df['test'].nunique()} pruebas • {controles_df['target'].nunique()} genes"
+                )
+                st.dataframe(controles_df.head(20))
+            else:
+                st.info("No se detectaron controles (verifica el prefijo).")
+        with st.expander("Muestras detectadas", expanded=False):
+            if muestras_df is not None and not muestras_df.empty:
+                st.write(
+                    f"{muestras_df['test'].nunique()} pruebas • {muestras_df['target'].nunique()} genes"
+                )
+                st.dataframe(muestras_df.head(20))
+            else:
+                st.info("No se detectaron muestras (verifica el prefijo).")
+
     # Descarga
-    mem, name = build_results_zip(df_loaded.df, df_proc, analysis)
+    cfg_json = {
+        "contexto_biologico": contexto_biologico or None,
+        "tipo_cancer": tipo_cancer or None,
+        "metodo": metodo or None,
+        "prefijos": {"controles": pref_ctrl or None, "muestras": pref_samp or None},
+        "archivo": df_loaded.source_name,
+        "hoja": df_loaded.sheet_name,
+        "normalizacion": normalization,
+    }
+    mem, name = build_results_zip(
+        df_loaded.df,
+        df_proc,
+        analysis,
+        cfg=cfg_json,
+        qpcr_long=long_df,
+        controles=controles_df,
+        muestras=muestras_df,
+    )
     st.download_button("Descargar resultados (ZIP)", data=mem, file_name=name, mime="application/zip")
 
 
