@@ -26,9 +26,9 @@ from src.core.plots import corr_heatmap, histogram, scatter
 
 st.set_page_config(page_title="CancerGeneSignatures - Web App", layout="wide")
 
-st.title("CancerGeneSignatures • Análisis interactivo")
+st.title("Análisis de datos de expresión diferencial por qPCR para identificar firmas génicas y redes de interacción en cánceres específicos")
 st.write(
-    "Sube un archivo Excel/CSV, elige parámetros y genera resultados con tablas y gráficas."
+    "A partir de datos de qPCR: visualización y redes génicas, sustentadas en evidencia bibliográfica, para profundizar en la comprensión de las vías oncológicas"
 )
 
 # Cargar menú de configuración desde JSON
