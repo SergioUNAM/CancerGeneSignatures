@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
+from collections import Counter
+import re
 
 import pandas as pd
 
@@ -71,3 +73,50 @@ def classify_tests(df_long: pd.DataFrame, ctrl_prefix: str, sample_prefix: str) 
     muestras_df = muestras_df.drop(columns=["test_up"]) if not muestras_df.empty else muestras_df
     return controles_df, muestras_df
 
+
+def suggest_name_affixes(sample_names: List[str], top_n: int = 10) -> Dict[str, List[Tuple[str, int]]]:
+    """
+    Sugiere prefijos y sufijos comunes a partir de los nombres de prueba.
+    - Prefijo: parte antes del primer '-' (o hasta primer '_'); como alternativa, letras iniciales + dígitos iniciales.
+    - Sufijo: dígitos finales o parte después del último '-'.
+    Devuelve listas ordenadas por frecuencia descendente.
+    """
+    prefixes: Counter = Counter()
+    suffixes: Counter = Counter()
+    for name in sample_names:
+        n = str(name).strip()
+        if not n:
+            continue
+        # prefijos candidatos
+        token_dash = n.split('-')[0]
+        token_us = n.split('_')[0]
+        m_lead = re.match(r'^([A-Za-z0-9]+)', n)
+        for cand in {token_dash, token_us, m_lead.group(1) if m_lead else ''}:
+            if cand:
+                prefixes[cand] += 1
+        # sufijos candidatos
+        m_tailnum = re.search(r'(\d+)$', n)
+        token_last_dash = n.split('-')[-1] if '-' in n else ''
+        if m_tailnum:
+            suffixes[m_tailnum.group(1)] += 1
+        if token_last_dash:
+            suffixes[token_last_dash] += 1
+    pref_list = prefixes.most_common(top_n)
+    suff_list = suffixes.most_common(top_n)
+    return {"prefixes": pref_list, "suffixes": suff_list}
+
+
+def classify_by_prefixes(df_long: pd.DataFrame, ctrl_prefixes: List[str], sample_prefixes: List[str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    t = df_long.copy()
+    t["test_str"] = t["test"].astype(str)
+    ctrl = t[t["test_str"].str.startswith(tuple(ctrl_prefixes))] if ctrl_prefixes else t.iloc[0:0]
+    samp = t[t["test_str"].str.startswith(tuple(sample_prefixes))] if sample_prefixes else t.iloc[0:0]
+    return ctrl.drop(columns=["test_str"]) if not ctrl.empty else ctrl, samp.drop(columns=["test_str"]) if not samp.empty else samp
+
+
+def classify_by_suffixes(df_long: pd.DataFrame, ctrl_suffixes: List[str], sample_suffixes: List[str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    t = df_long.copy()
+    t["test_str"] = t["test"].astype(str)
+    ctrl = t[t["test_str"].str.endswith(tuple(ctrl_suffixes))] if ctrl_suffixes else t.iloc[0:0]
+    samp = t[t["test_str"].str.endswith(tuple(sample_suffixes))] if sample_suffixes else t.iloc[0:0]
+    return ctrl.drop(columns=["test_str"]) if not ctrl.empty else ctrl, samp.drop(columns=["test_str"]) if not samp.empty else samp

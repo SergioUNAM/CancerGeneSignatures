@@ -13,6 +13,7 @@ class LoadResult:
     df: pd.DataFrame
     source_name: str
     sheet_name: Optional[str] = None
+    meta: Optional[dict] = None
 
 
 def is_excel(filename: str) -> bool:
@@ -104,14 +105,39 @@ def parse_qpcr_wide(
     candidate_cols = list(range(target_col + 1, raw.shape[1]))
     sample_cols = [c for c in candidate_cols if raw.iloc[data_start:, c].notna().any()]
 
-    # Sample names from the row above (if available)
-    sample_name_row = header_row - 1 if header_row > 0 else None
+    # Heurística para encontrar la fila con nombres de pruebas/muestras:
+    # En muchas plantillas, la fila justo arriba de la cabecera contiene 'CT'.
+    # Los nombres de prueba suelen estar 2 filas arriba de la cabecera.
+    def is_ct_row(ridx: int) -> bool:
+        if ridx is None or ridx < 0:
+            return False
+        vals = [(_cell_str(v).lower()) for v in raw.iloc[ridx, sample_cols].tolist()]
+        nonempty = [v for v in vals if v]
+        if not nonempty:
+            return False
+        ct_ratio = sum(v == "ct" for v in vals) / max(1, len(vals))
+        return ct_ratio >= 0.4  # mayoría son 'CT'
+
+    candidate_rows = [header_row - 1, header_row - 2, header_row - 3]
+    sample_name_row = None
+    for ridx in candidate_rows:
+        if ridx is None or ridx < 0:
+            continue
+        if is_ct_row(ridx):
+            continue
+        # Válido si al menos la mitad de columnas tienen texto no vacío y diferente de 'ct'
+        vals = [(_cell_str(v)) for v in raw.iloc[ridx, sample_cols].tolist()]
+        good = [v for v in vals if v and v.lower() != "ct"]
+        if len(good) >= max(1, int(0.5 * len(sample_cols))):
+            sample_name_row = ridx
+            break
+    if sample_name_row is None and header_row > 1 and not is_ct_row(header_row - 2):
+        sample_name_row = header_row - 2
+
     sample_names: List[str] = []
     for idx, c in enumerate(sample_cols, start=1):
-        name = None
-        if sample_name_row is not None:
-            name = _cell_str(raw.iat[sample_name_row, c])
-        if not name:
+        name = _cell_str(raw.iat[sample_name_row, c]) if sample_name_row is not None else ""
+        if not name or name.lower() == "ct":
             name = f"Sample_{idx}"
         sample_names.append(name)
 
@@ -147,4 +173,9 @@ def parse_qpcr_wide(
             raise ValueError("undetermined_policy debe ser uno de: nan|ctmax|value")
         df[c] = num
 
-    return LoadResult(df=df, source_name=getattr(file, "name", "uploaded"), sheet_name=sheet_name)
+    meta = {
+        "header_row": int(header_row),
+        "sample_name_row": int(sample_name_row) if sample_name_row is not None else None,
+        "sample_names": sample_names,
+    }
+    return LoadResult(df=df, source_name=getattr(file, "name", "uploaded"), sheet_name=sheet_name, meta=meta)

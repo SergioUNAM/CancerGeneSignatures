@@ -11,7 +11,14 @@ import pandas as pd
 import streamlit as st
 
 from src.core.io import LoadResult, list_excel_sheets, load_table, parse_qpcr_wide
-from src.core.qpcr import try_extract_template_config, melt_wide_to_long, classify_tests
+from src.core.qpcr import (
+    try_extract_template_config,
+    melt_wide_to_long,
+    classify_tests,
+    suggest_name_affixes,
+    classify_by_prefixes,
+    classify_by_suffixes,
+)
 from src.core.preprocessing import PreprocessConfig, preprocess
 from src.core.analysis import run_basic_analysis
 from src.core.plots import corr_heatmap, histogram, scatter
@@ -195,7 +202,48 @@ if df_loaded is not None:
     muestras_df = None
     if data_format.startswith("qPCR"):
         long_df = melt_wide_to_long(df_loaded.df)
-        controles_df, muestras_df = classify_tests(long_df, pref_ctrl, pref_samp)
+        # Sugerir prefijos/sufijos a partir de nombres de prueba detectados
+        sample_names = (
+            df_loaded.meta.get("sample_names")
+            if (df_loaded is not None and df_loaded.meta)
+            else [c for c in df_loaded.df.columns if c not in ("Well", "Target Name")]
+        )
+        aff = suggest_name_affixes(sample_names)
+
+        st.markdown("### Sugerencias de nombres")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.caption("Posibles prefijos (frecuentes)")
+            pref_opts = [f"{p} ({n})" for p, n in aff["prefixes"]]
+            sel_ctrl_pref = st.multiselect("Prefijos controles", options=pref_opts, default=[])
+            sel_samp_pref = st.multiselect("Prefijos muestras", options=pref_opts, default=[])
+            def _clean(vals):
+                return [v.split(' (')[0] for v in vals]
+            ctrl_pref_vals = _clean(sel_ctrl_pref)
+            samp_pref_vals = _clean(sel_samp_pref)
+        with col_b:
+            st.caption("Posibles sufijos (frecuentes)")
+            suff_opts = [f"{s} ({n})" for s, n in aff["suffixes"]]
+            sel_ctrl_suff = st.multiselect("Sufijos controles", options=suff_opts, default=[])
+            sel_samp_suff = st.multiselect("Sufijos muestras", options=suff_opts, default=[])
+            def _clean2(vals):
+                return [v.split(' (')[0] for v in vals]
+            ctrl_suff_vals = _clean2(sel_ctrl_suff)
+            samp_suff_vals = _clean2(sel_samp_suff)
+
+        # Combinar entradas manuales y sugeridas
+        ctrl_prefixes = [p for p in [pref_ctrl] if p] + ctrl_pref_vals
+        samp_prefixes = [p for p in [pref_samp] if p] + samp_pref_vals
+        ctrl_suffixes = ctrl_suff_vals
+        samp_suffixes = samp_suff_vals
+
+        # Clasificar por prefijos y/o sufijos
+        by_pref_ctrl, by_pref_samp = classify_by_prefixes(long_df, ctrl_prefixes, samp_prefixes)
+        by_suf_ctrl, by_suf_samp = classify_by_suffixes(long_df, ctrl_suffixes, samp_suffixes)
+        # Unir si se usan ambos métodos
+        import pandas as _pd
+        controles_df = _pd.concat([d for d in [by_pref_ctrl, by_suf_ctrl] if d is not None and not d.empty], ignore_index=True).drop_duplicates() if (not by_pref_ctrl.empty or not by_suf_ctrl.empty) else by_pref_ctrl
+        muestras_df = _pd.concat([d for d in [by_pref_samp, by_suf_samp] if d is not None and not d.empty], ignore_index=True).drop_duplicates() if (not by_pref_samp.empty or not by_suf_samp.empty) else by_pref_samp
         with st.expander("Controles detectados", expanded=False):
             if controles_df is not None and not controles_df.empty:
                 st.write(
