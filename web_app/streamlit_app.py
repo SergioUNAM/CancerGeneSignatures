@@ -4,6 +4,7 @@ import io
 import zipfile
 from datetime import datetime
 from pathlib import Path
+import json
 from typing import Optional
 
 import pandas as pd
@@ -23,6 +24,32 @@ st.write(
     "Sube un archivo Excel/CSV, elige parámetros y genera resultados con tablas y gráficas."
 )
 
+# Cargar menú de configuración desde JSON
+def load_menu() -> dict:
+    default = {
+        "version": 1,
+        "menu": {
+            "cancer_types": ["Breast Cancer", "Melanoma", "Colon Cancer"],
+            "contexts": [
+                {"key": "TEM", "label": "Cáncer y TEM"},
+                {"key": "micro_rnas", "label": "Cáncer y micro RNAs"},
+            ],
+            "normalization_methods": [
+                {"key": "reference_gene", "label": "gen de referencia"},
+                {"key": "means", "label": "promedios"},
+            ],
+        },
+    }
+    cfg_path = Path(__file__).parent / "config" / "menu.json"
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        st.warning("No se pudo cargar web_app/config/menu.json; usando valores por defecto.")
+        return default
+
+MENU = load_menu()
+
 with st.sidebar:
     st.header("1) Datos de entrada")
     uploaded = st.file_uploader("Archivo (.xlsx, .csv, .tsv)", type=["xlsx", "xls", "csv", "tsv"])
@@ -37,7 +64,8 @@ with st.sidebar:
             st.warning(f"No se pudieron listar hojas: {e}")
 
     st.header("2) Parámetros")
-    normalization = st.selectbox("Normalización", options=["none", "zscore", "minmax"], index=0)
+    # Transformación numérica local (independiente del dominio)
+    normalization = st.selectbox("Normalización numérica", options=["none", "zscore", "minmax"], index=0)
     data_format = st.radio(
         "Formato de datos",
         options=["Tabla simple", "qPCR (Well/Target Name + CT por muestra)"],
@@ -54,12 +82,15 @@ with st.sidebar:
     else:
         undet_policy = "nan"
         undet_value = 40.0
-    # Configuración de contexto biológico / cáncer
-    st.header("3) Configuración (proyecto)")
-    auto_config = False
-    contexto_biologico = st.text_input("Contexto biológico", value="")
-    tipo_cancer = st.text_input("Tipo de cáncer", value="")
-    metodo = st.text_input("Método (descriptivo)", value="")
+    # Configuración basada en JSON (no se lee del Excel)
+    st.header("3) Configuración (desde JSON)")
+    cancer_type = st.selectbox("Tipo de cáncer", options=MENU["menu"]["cancer_types"], index=0)
+    context_labels = [c["label"] for c in MENU["menu"]["contexts"]]
+    context_sel_label = st.selectbox("Contexto", options=context_labels, index=0)
+    context_sel = next((c for c in MENU["menu"]["contexts"] if c["label"] == context_sel_label), MENU["menu"]["contexts"][0])
+    norm_labels = [n["label"] for n in MENU["menu"]["normalization_methods"]]
+    norm_sel_label = st.selectbox("Método de normalización (dominio)", options=norm_labels, index=0)
+    norm_sel = next((n for n in MENU["menu"]["normalization_methods"] if n["label"] == norm_sel_label), MENU["menu"]["normalization_methods"][0])
 
     st.caption("Prefijos para clasificar pruebas en controles/muestras (p. ej., 4GB, 3CG)")
     pref_ctrl = st.text_input("Prefijo controles", value="")
@@ -114,21 +145,6 @@ if uploaded is not None and (run_btn or st.session_state.get("auto_run", True)):
             # Autocompletar columnas ID típicas del formato qPCR
             if not id_columns:
                 id_columns = ["Well", "Target Name"]
-            # Intento de autoconfig desde plantilla
-            try:
-                cfg = try_extract_template_config(uploaded, sheet_name=sheet)
-                if cfg.contexto_biologico and not contexto_biologico:
-                    contexto_biologico = cfg.contexto_biologico
-                if cfg.tipo_cancer and not tipo_cancer:
-                    tipo_cancer = cfg.tipo_cancer
-                if cfg.metodo and not metodo:
-                    metodo = cfg.metodo
-                if cfg.prefijo_controles and not pref_ctrl:
-                    pref_ctrl = cfg.prefijo_controles
-                if cfg.prefijo_muestras and not pref_samp:
-                    pref_samp = cfg.prefijo_muestras
-            except Exception:
-                pass
         else:
             df_loaded = load_table(uploaded, file_name=uploaded.name, sheet_name=sheet)
     except Exception as e:
@@ -150,9 +166,9 @@ if df_loaded is not None:
 
     st.subheader("Configuración del proyecto")
     st.json({
-        "contexto_biologico": contexto_biologico or None,
-        "tipo_cancer": tipo_cancer or None,
-        "metodo": metodo or None,
+        "context": {"key": context_sel.get("key"), "label": context_sel.get("label")},
+        "cancer_type": cancer_type,
+        "normalization_method": {"key": norm_sel.get("key"), "label": norm_sel.get("label")},
         "prefijos": {"controles": pref_ctrl or None, "muestras": pref_samp or None},
     })
 
@@ -199,13 +215,14 @@ if df_loaded is not None:
 
     # Descarga
     cfg_json = {
-        "contexto_biologico": contexto_biologico or None,
-        "tipo_cancer": tipo_cancer or None,
-        "metodo": metodo or None,
+        "context": {"key": context_sel.get("key"), "label": context_sel.get("label")},
+        "cancer_type": cancer_type,
+        "normalization_method": {"key": norm_sel.get("key"), "label": norm_sel.get("label")},
         "prefijos": {"controles": pref_ctrl or None, "muestras": pref_samp or None},
         "archivo": df_loaded.source_name,
         "hoja": df_loaded.sheet_name,
-        "normalizacion": normalization,
+        "normalizacion_numerica": normalization,
+        "menu_version": MENU.get("version"),
     }
     mem, name = build_results_zip(
         df_loaded.df,

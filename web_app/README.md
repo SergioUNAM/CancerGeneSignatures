@@ -22,6 +22,6 @@ Flujo
 - Revisa resultados y descarga ZIP.
 
 Notas
+- La configuración de menús (tipos de cáncer, contextos, métodos de normalización de dominio) se carga desde `web_app/config/menu.json`.
 - La app guarda resultados en memoria para descarga; no escribe en disco por defecto.
 - Para Excel se usa openpyxl; si hay formatos antiguos, conviértelos a .xlsx.
-
