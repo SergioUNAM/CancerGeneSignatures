@@ -38,6 +38,8 @@ Fecha: 2025-09-10
 
 **Cambios Recientes (Changelog)**
 - 2025-09-10
+  - Merge a `master` de `feature/webapp-ensembl-integration` (Ensembl interactivo, UX de clasificación mejorada, parser A4/B4 + heurística).
+- 2025-09-10
 - Parser Excel por coordenadas: la app intenta primero encabezado fijo en A4/B4 (fila 4) y cae a detección automática si falla.
   - Compatibilidad: si el entorno aún carga una versión previa del parser sin nuevos parámetros, la app detecta `TypeError` y reintenta con la firma antigua.
   - Integración Ensembl en la UI: anotación de `target` con `ensembl_id` y `description`, tabla y descarga `ensembl_anotado.csv`. Se añadió `requests` a `web_app/requirements.txt`.
@@ -53,7 +55,8 @@ Fecha: 2025-09-10
 
 **Ramas**
 - `master`: actualizado con descargas CSV, clasificación case-insensitive y fix de importaciones.
-- `feature/webapp-ensembl-integration`: nueva rama para integrar enriquecimiento Ensembl en la UI.
+- `feature/webapp-ensembl-integration`: fusionada en `master`.
+- `feature/webapp-string-gsea`: nueva rama para integrar enriquecimiento STRING/GSEA y visualización GO.
 - 2025-08-31
   - MVP de Streamlit con:
     - Carga Excel y selección de hoja (`list_excel_sheets`, `parse_qpcr_wide`).
