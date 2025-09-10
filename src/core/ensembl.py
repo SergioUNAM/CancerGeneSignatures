@@ -16,9 +16,13 @@ HEADERS = {
 }
 
 
+def _with_content_type(url: str) -> str:
+    return url + ("&" if "?" in url else "?") + "content-type=application/json"
+
+
 def _get(session: requests.Session, url: str, timeout: float = 10.0):
     try:
-        return session.get(url, headers=HEADERS, timeout=timeout)
+        return session.get(_with_content_type(url), headers=HEADERS, timeout=timeout)
     except Exception:
         return None
 
@@ -90,8 +94,10 @@ def _fetch_ensembl_id(gene: str) -> Tuple[str, str]:
     gene_str = str(gene).strip()
 
     ensembl_id, desc = _try_xrefs_symbol(s, gene_str)
-    if ensembl_id and not desc:
-        desc = _try_lookup_id_desc(s, ensembl_id)
+    # Siempre intenta completar/refrescar descripción con lookup/id si ya hay ID
+    if ensembl_id:
+        d_lookup = _try_lookup_id_desc(s, ensembl_id)
+        desc = d_lookup or desc
     if (not ensembl_id) or (not desc):
         e2, d2 = _try_lookup_symbol(s, gene_str)
         ensembl_id = ensembl_id or e2

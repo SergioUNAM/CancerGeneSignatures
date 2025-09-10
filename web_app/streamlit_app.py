@@ -336,7 +336,7 @@ if df_loaded is not None:
             try:
                 df_to_annot = df_expr[['target', 'nivel_expresion', 'fold_change']].drop_duplicates(subset=['target']).reset_index(drop=True)
                 with st.spinner("Consultando Ensembl…"):
-                    ensembl_df = add_ensembl_info_batch(df_to_annot, symbol_col='target', max_workers=6)
+                    ensembl_df = add_ensembl_info_batch(df_to_annot, symbol_col='target', max_workers=3)
                 cols_show = ['target', 'nivel_expresion', 'fold_change', 'ensembl_id', 'description']
                 st.dataframe(ensembl_df[cols_show])
                 extras['ensembl_anotado.csv'] = ensembl_df.to_csv(index=False)
