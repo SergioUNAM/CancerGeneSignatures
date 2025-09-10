@@ -20,7 +20,11 @@ Flujo
 - Sube Excel (.xlsx/.xls), selecciona hoja (si aplica).
 - (Opcional) Introduce prefijos de controles/muestras o usa los detectados de la plantilla.
 - Revisa clasificación, Fold Change (promedios y gen de referencia) y gráficas.
+- Anotación Ensembl (IDs/descripciones) y descarga de resultados.
+- Enriquecimiento STRING por nivel de expresión (GO/KEGG/Reactome), filtros y descargas.
+- Bibliografía (PubMed): ingresa tu NCBI Email (obligatorio) y API Key (opcional) directamente en la sección. La app mostrará progreso por gen, tablas y gráficos, y permitirá descargar CSV.
 
 Notas
 - La app lee `web_app/config/menu.json` para los parámetros (contexto, tipo de cáncer, método preferido).
 - Para Excel se usa openpyxl; si hay formatos antiguos, conviértelos a .xlsx.
+- Logs: se puede ajustar el nivel con la variable de entorno `CGS_LOGLEVEL` (INFO por defecto).

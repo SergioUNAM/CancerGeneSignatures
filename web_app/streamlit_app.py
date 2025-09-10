@@ -48,6 +48,29 @@ from src.core.cleaning import drop_machine_controls
 from src.core.fold_change import compute_fold_change
 from src.core.tables import fc_comparison_table
 from src.core.ensembl import add_ensembl_info_batch
+from src.core.string_enrichment import (
+    run_string_enrichment,
+    filter_enrichment,
+    enrich_by_levels,
+    dfs_to_excel_bytes,
+)
+from src.core.bibliography import (
+    search_pubmed_by_genes,
+    classify_bibliography,
+    aggregate_counts_by_level_and_cancer,
+)
+
+# Hot-reload STRING enrichment helpers during dev
+try:
+    import importlib as _importlib
+    import src.core.string_enrichment as _cgs_str
+    _cgs_str = _importlib.reload(_cgs_str)
+    run_string_enrichment = _cgs_str.run_string_enrichment  # type: ignore
+    filter_enrichment = _cgs_str.filter_enrichment  # type: ignore
+    enrich_by_levels = _cgs_str.enrich_by_levels  # type: ignore
+    dfs_to_excel_bytes = _cgs_str.dfs_to_excel_bytes  # type: ignore
+except Exception:
+    pass
 
 # -----------------------------------------------------------------------------
 # Configuración de la página Streamlit
@@ -403,11 +426,17 @@ if df_loaded is not None:
 
             try:
                 df_to_annot = df_expr[['target', 'nivel_expresion', 'fold_change']].drop_duplicates(subset=['target']).reset_index(drop=True)
+                logger.info(f"Ensembl: anotando {len(df_to_annot)} genes (max_workers=3)")
                 with st.spinner("Consultando Ensembl…"):
                     ensembl_df = add_ensembl_info_batch(df_to_annot, symbol_col='target', max_workers=3)
                 desc_series = ensembl_df['description'].fillna('').astype(str).str.strip()
                 ensembl_df['has_desc'] = desc_series.ne('') & desc_series.ne('No description')
                 extras['ensembl_anotado.csv'] = ensembl_df.to_csv(index=False)
+                try:
+                    encontrados = int((ensembl_df['ensembl_id'] != 'Not found').sum())
+                    logger.info(f"Ensembl: completado. IDs encontrados {encontrados}/{len(ensembl_df)}")
+                except Exception:
+                    pass
 
                 tab_resumen, tab_explorar, tab_enlaces = st.tabs(["Resumen", "Explorar", "Enlaces"])
 
@@ -482,8 +511,275 @@ if df_loaded is not None:
 
             except Exception as e:
                 st.warning(f"No se pudo anotar con Ensembl: {e}")
+            
+            # Enriquecimiento funcional (STRING)
+            st.subheader("Enriquecimiento funcional (STRING)")
+            st.caption("Analiza términos GO/KEGG/Reactome enriquecidos por nivel de expresión. Requiere conexión a internet.")
+
+            # Selección de niveles a procesar por separado
+            order_levels = ['subexpresado', 'estable', 'sobreexpresado']
+            sel_levels = st.multiselect(
+                "Niveles a considerar",
+                options=order_levels,
+                default=['subexpresado', 'sobreexpresado']
+            )
+
+            # Fuentes/categorías a consultar en STRING
+            cat_options = ["GO", "GO:BP", "GO:MF", "GO:CC", "KEGG", "Reactome"]
+            sel_cats = st.multiselect(
+                "Categorías (fuentes)",
+                options=cat_options,
+                default=["GO", "KEGG"]
+            )
+
+            cconf1, cconf2, cconf3, cconf4 = st.columns(4)
+            with cconf1:
+                max_fdr = st.number_input("FDR máx.", value=0.05, min_value=0.0, max_value=1.0, step=0.01, format="%.2f")
+            with cconf2:
+                min_size = st.number_input("Mín. genes por término", value=3, min_value=1, max_value=100, step=1)
+            with cconf3:
+                top_n = st.number_input("Top N", value=25, min_value=1, max_value=200, step=1)
+            with cconf4:
+                species = st.selectbox("Especie (NCBI Taxon)", options=[9606], index=0)
+
+            run_enrich = st.button("Ejecutar enriquecimiento (STRING)", type="primary")
+
+            if run_enrich:
+                try:
+                    # Ejecutar enriquecimiento por nivel y concatenar
+                    levels_to_use = sel_levels or order_levels
+                    base = df_expr[df_expr['nivel_expresion'].isin(levels_to_use)].copy()
+                    logger.info(f"STRING: niveles={levels_to_use}, fuentes={sel_cats}, genes_totales={base['target'].nunique()}")
+                    with st.spinner("Consultando STRING por nivel…"):
+                        enr_dict = enrich_by_levels(
+                            base,
+                            symbol_col='target',
+                            level_col='nivel_expresion',
+                            levels=levels_to_use,
+                            species=int(species),
+                            sources=sel_cats,
+                            caller_identity="UIMEO",
+                        )
+                    combined = enr_dict.get('combined')
+                    by_level = enr_dict.get('by_level', {})
+                    try:
+                        logger.info(f"STRING: filas combinadas={0 if combined is None else len(combined)}")
+                    except Exception:
+                        pass
+
+                    if combined is None or combined.empty:
+                        st.info("Sin resultados de enriquecimiento para los parámetros actuales.")
+                    else:
+                        # Filtros comunes
+                        combined_f = filter_enrichment(
+                            combined,
+                            include_categories=sel_cats or None,
+                            max_fdr=float(max_fdr),
+                            min_term_genes=int(min_size),
+                            top_n=int(top_n),
+                        )
+                        st.dataframe(combined_f)
+
+                        # Pestañas por nivel + resumen
+                        tab_res, *tabs_levels = st.tabs(["Resumen"] + [lvl.capitalize() for lvl in levels_to_use])
+
+                        # Resumen: barras -log10(FDR) top N combinadas
+                        with tab_res:
+                            try:
+                                import numpy as np
+                                import plotly.express as px
+                                plot_df = combined_f.copy()
+                                if not plot_df.empty and 'fdr' in plot_df.columns:
+                                    plot_df["neglog10_fdr"] = -np.log10(plot_df["fdr"].clip(lower=1e-300))
+                                    plot_df["label"] = plot_df.apply(lambda r: f"{r.get('term','')} ({r.get('category','')})", axis=1)
+                                    fig = px.bar(
+                                        plot_df.sort_values(["nivel_expresion", "neglog10_fdr"], ascending=[True, True]),
+                                        x="neglog10_fdr",
+                                        y="label",
+                                        color="nivel_expresion",
+                                        orientation="h",
+                                        labels={"neglog10_fdr": "-log10(FDR)", "label": "Término"},
+                                        title="Enriquecimiento combinado por nivel"
+                                    )
+                                    st.plotly_chart(fig, use_container_width=True)
+                            except Exception:
+                                pass
+
+                        # Una pestaña por nivel con su propio gráfico y tabla
+                        for lvl, tab in zip(levels_to_use, tabs_levels):
+                            with tab:
+                                lvl_df = by_level.get(lvl, pd.DataFrame())
+                                if lvl_df is None or lvl_df.empty:
+                                    st.info("Sin términos enriquecidos para este nivel.")
+                                    continue
+                                lvl_df_f = filter_enrichment(
+                                    lvl_df,
+                                    include_categories=sel_cats or None,
+                                    max_fdr=float(max_fdr),
+                                    min_term_genes=int(min_size),
+                                    top_n=int(top_n),
+                                )
+                                st.dataframe(lvl_df_f)
+                                try:
+                                    import numpy as np
+                                    import plotly.express as px
+                                    p = lvl_df_f.copy()
+                                    if not p.empty and 'fdr' in p.columns:
+                                        p["neglog10_fdr"] = -np.log10(p["fdr"].clip(lower=1e-300))
+                                        p["label"] = p.apply(lambda r: f"{r.get('term','')} ({r.get('category','')})", axis=1)
+                                        fig_l = px.bar(
+                                            p.sort_values("neglog10_fdr", ascending=True),
+                                            x="neglog10_fdr",
+                                            y="label",
+                                            orientation="h",
+                                            labels={"neglog10_fdr": "-log10(FDR)", "label": "Término"},
+                                            title=f"Enriquecimiento ({lvl})"
+                                        )
+                                        st.plotly_chart(fig_l, use_container_width=True)
+                                except Exception:
+                                    pass
+
+                        # Descargas: CSV combinado y Excel con hojas por nivel
+                        st.download_button(
+                            label="Descargar enriquecimiento combinado (CSV)",
+                            data=combined_f.to_csv(index=False),
+                            file_name="string_enrichment_combined.csv",
+                            mime="text/csv",
+                            use_container_width=True,
+                        )
+
+                        try:
+                            sheets = [combined_f] + [by_level.get(lvl, pd.DataFrame()) for lvl in levels_to_use]
+                            names = ["combinado"] + [f"{lvl}" for lvl in levels_to_use]
+                            xlsx_bytes = dfs_to_excel_bytes(sheets, names)
+                            st.download_button(
+                                label="Descargar enriquecimiento (Excel, por nivel)",
+                                data=xlsx_bytes,
+                                file_name="string_enrichment_by_level.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                use_container_width=True,
+                            )
+                        except Exception:
+                            pass
+                except Exception as e:
+                    st.warning(f"No se pudo ejecutar el enriquecimiento: {e}")
         except Exception as e:
             st.error(f"Error calculando Fold Change: {e}")
+
+        # Bibliografía (PubMed)
+        st.subheader("Bibliografía (PubMed)")
+        st.caption(
+            "Busca artículos por gen y contexto (TEM o micro RNAs) en PubMed. "
+            "Puedes ingresar tu email/API key aquí para la demo."
+        )
+        # Entrada directa (demo): email y API key NCBI
+        env_email = os.getenv("NCBI_EMAIL", "")
+        env_key = os.getenv("NCBI_API_KEY", "")
+        ccreds1, ccreds2 = st.columns([2, 2])
+        with ccreds1:
+            ncbi_email_input = st.text_input("NCBI Email (obligatorio)", value=env_email, placeholder="tu_email@dominio.com")
+        with ccreds2:
+            ncbi_api_key_input = st.text_input("NCBI API Key (opcional)", value=env_key, placeholder="api_key")
+
+        max_per_gene = st.number_input("Máximo de artículos por gen", value=100, min_value=10, max_value=300, step=10)
+        run_pubmed = st.button("Buscar en PubMed", disabled=not bool(ncbi_email_input.strip()))
+
+        if run_pubmed:
+            try:
+                # Usar el DataFrame anotado si está disponible; si no, usar df_expr
+                if 'ensembl_df' in locals() and isinstance(ensembl_df, pd.DataFrame) and not ensembl_df.empty:
+                    genes_df = ensembl_df[['target', 'ensembl_id', 'nivel_expresion']].drop_duplicates('target')
+                else:
+                    tmp = df_expr[['target', 'nivel_expresion']].drop_duplicates('target')
+                    tmp['ensembl_id'] = ''
+                    genes_df = tmp[['target', 'ensembl_id', 'nivel_expresion']]
+
+                # Para simplificar la demo: setear variables de entorno en tiempo de ejecución
+                os.environ["NCBI_EMAIL"] = ncbi_email_input.strip()
+                if ncbi_api_key_input.strip():
+                    os.environ["NCBI_API_KEY"] = ncbi_api_key_input.strip()
+                logger.info(f"PubMed: consultando {len(genes_df)} genes (contexto={context_sel_label}, max_per_gene={int(max_per_gene)})")
+                prog = st.progress(0)
+                status = st.empty()
+
+                def _on_progress(i: int, total: int, gene: str) -> None:
+                    pct = int((i / max(1, total)) * 100)
+                    prog.progress(pct)
+                    status.info(f"Procesando {i}/{total}: {gene}")
+
+                with st.spinner("Consultando PubMed por gen…"):
+                    bib = search_pubmed_by_genes(
+                        genes_df.rename(columns={'target': 'target'}),
+                        symbol_col='target',
+                        ensembl_col='ensembl_id',
+                        selected_context=context_sel_label,
+                        max_per_gene=int(max_per_gene),
+                        progress=_on_progress,
+                        logger=logger,
+                    )
+                prog.progress(100)
+                status.success("Consulta PubMed finalizada")
+                if bib is None or bib.empty:
+                    st.info("No se encontraron artículos para los parámetros actuales.")
+                else:
+                    # Merge nivel_expresion
+                    bib2 = pd.merge(
+                        bib,
+                        genes_df.rename(columns={'target': 'Gene'})[['Gene', 'nivel_expresion']],
+                        on='Gene', how='left'
+                    )
+                    st.dataframe(bib2.head(50))
+                    st.download_button(
+                        label="Descargar bibliografía (CSV)",
+                        data=bib2.to_csv(index=False),
+                        file_name="bibliografia_pubmed.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                    )
+
+                    # Clasificación
+                    st.markdown("### Clasificación por tipo de cáncer y contexto")
+                    try:
+                        classified = classify_bibliography(bib2)
+                        st.dataframe(classified.head(50))
+                        st.download_button(
+                            label="Descargar bibliografía clasificada (CSV)",
+                            data=classified.to_csv(index=False),
+                            file_name="bibliografia_clasificada.csv",
+                            mime="text/csv",
+                            use_container_width=True,
+                        )
+
+                        # Gráfica de barras: número de estudios por tipo de cáncer y nivel
+                        agg = aggregate_counts_by_level_and_cancer(classified)
+                        if not agg.empty:
+                            import plotly.express as px
+                            order_levels = ['sobreexpresado', 'estable', 'subexpresado']
+                            agg['nivel_expresion'] = pd.Categorical(agg['nivel_expresion'], categories=order_levels, ordered=True)
+                            figb = px.bar(
+                                agg.sort_values(['cancer_type', 'nivel_expresion']),
+                                x='cancer_type', y='count', color='nivel_expresion',
+                                barmode='group',
+                                title=f"Número de estudios por tipo de cáncer y nivel de expresión ({context_sel_label})",
+                                labels={'cancer_type': 'Tipo de cáncer', 'count': 'Número de estudios', 'nivel_expresion': 'Nivel de expresión'},
+                            )
+                            figb.update_layout(xaxis_tickangle=45)
+                            st.plotly_chart(figb, use_container_width=True)
+
+                            # Dispersión (burbujas) alternativa
+                            figs = px.scatter(
+                                agg,
+                                x='count', y='cancer_type', size='count', color='nivel_expresion',
+                                title=f"Artículos por tipo de cáncer y nivel ({context_sel_label})",
+                                labels={'count': 'Número de artículos', 'cancer_type': 'Tipo de cáncer'},
+                            )
+                            st.plotly_chart(figs, use_container_width=True)
+
+                    except Exception as e:
+                        st.warning(f"No se pudo clasificar la bibliografía: {e}")
+
+            except Exception as e:
+                st.warning(f"No se pudo ejecutar la búsqueda en PubMed: {e}")
 
         # Botones de descarga de resultados (si hay datos)
         if extras:
