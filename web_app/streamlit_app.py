@@ -13,13 +13,18 @@
 
 from __future__ import annotations
 
-import io, os, json
+import io, os, json, sys
 from pathlib import Path
 from typing import Optional
 import logging
 
 import pandas as pd
 import streamlit as st
+
+# Ensure project root is importable so `src.*` works when running from web_app/
+_PROJ_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJ_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJ_ROOT))
 
 # Importamos funciones propias del proyecto
 from src.core.io import LoadResult, list_excel_sheets, parse_qpcr_wide
