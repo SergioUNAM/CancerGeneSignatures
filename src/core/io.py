@@ -136,17 +136,26 @@ def parse_qpcr_wide(
 
     candidate_rows = [header_row - 1, header_row - 2, header_row - 3]
     sample_name_row = None
+
+    # Elegir la fila con más patrones de "código de muestra" (con guion),
+    # y en empate, con más dígitos y más no vacíos distintos de 'ct'.
+    eligible: list[tuple[int, int, int, int]] = []  # (ridx, hyphen_count, digit_count, good_count)
     for ridx in candidate_rows:
         if ridx is None or ridx < 0:
             continue
         if is_ct_row(ridx):
             continue
-        # Válido si al menos la mitad de columnas tienen texto no vacío y diferente de 'ct'
         vals = [(_cell_str(v)) for v in raw.iloc[ridx, sample_cols].tolist()]
         good = [v for v in vals if v and v.lower() != "ct"]
-        if len(good) >= max(1, int(0.5 * len(sample_cols))):
-            sample_name_row = ridx
-            break
+        if len(good) >= max(1, int(0.3 * len(sample_cols))):
+            hyphen_count = sum('-' in v for v in good)
+            digit_count = sum(any(ch.isdigit() for ch in v) for v in good)
+            eligible.append((ridx, hyphen_count, digit_count, len(good)))
+
+    if eligible:
+        # Seleccionar con mayor hyphen_count, luego digit_count, luego good_count
+        eligible.sort(key=lambda t: (t[1], t[2], t[3]), reverse=True)
+        sample_name_row = eligible[0][0]
     if sample_name_row is None and header_row > 1 and not is_ct_row(header_row - 2):
         sample_name_row = header_row - 2
 
