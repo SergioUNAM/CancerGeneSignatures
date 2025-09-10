@@ -39,6 +39,7 @@ Fecha: 2025-09-10
 **Cambios Recientes (Changelog)**
 - 2025-09-10
   - Integración Ensembl en la UI: anotación de `target` con `ensembl_id` y `description`, tabla y descarga `ensembl_anotado.csv`. Se añadió `requests` a `web_app/requirements.txt`.
+  - Mejora de anotación Ensembl: fallback para descripción usando `lookup/id/{id}`, `lookup/symbol`, y `mygene.info` si es necesario; cache por símbolo.
 - 2025-09-10
   - Merge a `master` de la rama `feature/webapp-downloads-caseinsensitive` (descargas CSV, clasificación case-insensitive, fix import `src`).
 - 2025-09-10
@@ -70,6 +71,7 @@ Fecha: 2025-09-10
   - `fold_change_consolidado.csv`, `expresion_categorizada.csv`
 - Clasificación case-insensitive: los prefijos de controles y muestras se comparan sin distinción de mayúsculas/minúsculas.
 - Ensembl: nueva sección anota genes con `ensembl_id` y `description`; incluye descarga `ensembl_anotado.csv` (requiere conexión a internet).
+  - Nota: si falta descripción en la primera consulta, se intenta completarla con métodos alternativos.
 
 **Riesgos y Pendientes**
 - Posible omisión del primer nombre de prueba en resumen (`web_app/streamlit_app.py:190`).
