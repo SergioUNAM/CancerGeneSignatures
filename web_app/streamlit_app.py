@@ -28,6 +28,17 @@ if str(_PROJ_ROOT) not in sys.path:
 
 # Importamos funciones propias del proyecto
 from src.core.io import LoadResult, list_excel_sheets, parse_qpcr_wide
+
+# Hot-reload core IO to pick up signature changes during dev sessions
+try:
+    import importlib
+    import src.core.io as _cgs_io
+    _cgs_io = importlib.reload(_cgs_io)
+    LoadResult = _cgs_io.LoadResult  # type: ignore
+    list_excel_sheets = _cgs_io.list_excel_sheets  # type: ignore
+    parse_qpcr_wide = _cgs_io.parse_qpcr_wide  # type: ignore
+except Exception:
+    pass
 from src.core.qpcr import (
     melt_wide_to_long,
     classify_tests,  # case-insensitive

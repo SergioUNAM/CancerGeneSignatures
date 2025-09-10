@@ -67,7 +67,8 @@ Fecha: 2025-09-10
 - Imputación: valores no determinados/NaN se convierten a máximo Ct global antes de FC (`web_app/streamlit_app.py:254-263`).
 - Filtro controles de máquina: en UI se pasan PPC/RTC; función soporta lista por defecto más amplia (`src/core/cleaning.py:18`).
 - Parsing Excel robusto (cabeceras y fila de nombres de prueba) (`src/core/io.py:76`).
- - Encabezados por coordenadas: `parse_qpcr_wide(..., header_mode="coords", header_row_idx=3, well_col_idx=0, target_col_idx=1)` con fallback a `header_mode="auto"`.
+- Encabezados por coordenadas: `parse_qpcr_wide(..., header_mode="coords", header_row_idx=3, well_col_idx=0, target_col_idx=1)` con fallback a `header_mode="auto"`.
+ - Hot-reload en UI para `src.core.io`: se recarga el módulo al iniciar la app para asegurar la firma más reciente del parser.
 
 **Novedades de Uso**
 - Descargas: en la sección de resultados aparecen botones para descargar CSVs:
