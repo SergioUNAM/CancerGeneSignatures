@@ -78,6 +78,10 @@ def parse_qpcr_wide(
     sheet_name: Optional[str] = None,
     undetermined_policy: str = "nan",  # one of: nan|ctmax|value
     undetermined_value: float = 40.0,
+    header_mode: str = "auto",  # one of: auto|coords
+    header_row_idx: Optional[int] = None,  # 0-based; default 3 (A4/B4) when coords
+    well_col_idx: Optional[int] = None,    # 0-based; default 0 (A)
+    target_col_idx: Optional[int] = None,  # 0-based; default 1 (B)
 ) -> LoadResult:
     """
     Parse qPCR-like Excel where headers include a row with sample codes above a row of
@@ -85,20 +89,32 @@ def parse_qpcr_wide(
     with columns: Well, Target Name, <sample1>, <sample2>, ...
     """
     raw = pd.read_excel(file, sheet_name=sheet_name, header=None, dtype=object)
-    # Find header row containing Well and Target Name
+
+    # Determine header by mode
     header_row = None
     well_col = None
     target_col = None
-    for ridx in range(len(raw)):
-        row_vals = [(_cell_str(v).lower()) for v in raw.iloc[ridx].tolist()]
-        if "well" in row_vals and any("target" in v for v in row_vals):
-            header_row = ridx
-            well_col = row_vals.index("well")
-            # First column containing 'target'
-            target_col = next(i for i, v in enumerate(row_vals) if "target" in v)
-            break
-    if header_row is None:
+
+    def _detect_header_auto() -> tuple[int, int, int]:
+        for ridx in range(len(raw)):
+            row_vals = [(_cell_str(v).lower()) for v in raw.iloc[ridx].tolist()]
+            if "well" in row_vals and any("target" in v for v in row_vals):
+                h_row = ridx
+                w_col = row_vals.index("well")
+                t_col = next(i for i, v in enumerate(row_vals) if "target" in v)
+                return h_row, w_col, t_col
         raise ValueError("No se encontró una fila de encabezado con 'Well' y 'Target'.")
+
+    def _detect_header_coords() -> tuple[int, int, int]:
+        h_row = 3 if header_row_idx is None else int(header_row_idx)
+        w_col = 0 if well_col_idx is None else int(well_col_idx)
+        t_col = 1 if target_col_idx is None else int(target_col_idx)
+        return h_row, w_col, t_col
+
+    if header_mode == "coords":
+        header_row, well_col, target_col = _detect_header_coords()
+    else:
+        header_row, well_col, target_col = _detect_header_auto()
 
     # Determine sample columns: those after target_col that have any non-empty value below
     data_start = header_row + 1
