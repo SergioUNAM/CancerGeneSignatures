@@ -38,10 +38,22 @@ Fecha: 2025-09-10
 
 **Cambios Recientes (Changelog)**
 - 2025-09-10
+- Parser Excel por coordenadas: la app intenta primero encabezado fijo en A4/B4 (fila 4) y cae a detección automática si falla.
+  - Compatibilidad: si el entorno aún carga una versión previa del parser sin nuevos parámetros, la app detecta `TypeError` y reintenta con la firma antigua.
+  - Integración Ensembl en la UI: anotación de `target` con `ensembl_id` y `description`, tabla y descarga `ensembl_anotado.csv`. Se añadió `requests` a `web_app/requirements.txt`.
+  - Mejora de anotación Ensembl: fallback para descripción usando `lookup/id/{id}`, `lookup/symbol`, y `mygene.info` si es necesario; cache por símbolo.
+  - UX de clasificación mejorada: pestañas "Por prefijos" (con sugerencias automáticas) y "Selección manual" (multiselect de pruebas) con persistencia en sesión.
+- 2025-09-10
+  - Merge a `master` de la rama `feature/webapp-downloads-caseinsensitive` (descargas CSV, clasificación case-insensitive, fix import `src`).
+- 2025-09-10
   - Añadidos botones de descarga (`st.download_button`) para los CSV generados: controles/muestras limpios, consolidado FC, y expresión categorizada.
   - Clasificación de controles/muestras ahora case-insensitive usando `classify_tests` de `src/core/qpcr.py`.
   - Documentación inicial de seguimiento en `web_app/PROGRESO.md`.
   - Corrección de importaciones de `src`: se añadieron `src/__init__.py` y `src/core/__init__.py`, y se inyectó la raíz del proyecto en `sys.path` en `web_app/streamlit_app.py` para permitir `from src.core...` al ejecutar desde `web_app/`.
+
+**Ramas**
+- `master`: actualizado con descargas CSV, clasificación case-insensitive y fix de importaciones.
+- `feature/webapp-ensembl-integration`: nueva rama para integrar enriquecimiento Ensembl en la UI.
 - 2025-08-31
   - MVP de Streamlit con:
     - Carga Excel y selección de hoja (`list_excel_sheets`, `parse_qpcr_wide`).
@@ -55,12 +67,18 @@ Fecha: 2025-09-10
 - Imputación: valores no determinados/NaN se convierten a máximo Ct global antes de FC (`web_app/streamlit_app.py:254-263`).
 - Filtro controles de máquina: en UI se pasan PPC/RTC; función soporta lista por defecto más amplia (`src/core/cleaning.py:18`).
 - Parsing Excel robusto (cabeceras y fila de nombres de prueba) (`src/core/io.py:76`).
+- Encabezados por coordenadas: `parse_qpcr_wide(..., header_mode="coords", header_row_idx=3, well_col_idx=0, target_col_idx=1)` con fallback a `header_mode="auto"`.
+- Hot-reload en UI para `src.core.io`: se recarga el módulo al iniciar la app para asegurar la firma más reciente del parser.
+ - Heurística de fila de nombres de prueba: se prefieren filas con mayor número de códigos con guion (p.ej., `4GB-001`) y dígitos, para escoger la fila 2 cuando aplica (sobre etiquetas como `C1`, `DGC1`).
 
 **Novedades de Uso**
 - Descargas: en la sección de resultados aparecen botones para descargar CSVs:
   - `controles_limpios.csv`, `muestras_limpias.csv`
   - `fold_change_consolidado.csv`, `expresion_categorizada.csv`
 - Clasificación case-insensitive: los prefijos de controles y muestras se comparan sin distinción de mayúsculas/minúsculas.
+- Ensembl: nueva sección anota genes con `ensembl_id` y `description`; incluye descarga `ensembl_anotado.csv` (requiere conexión a internet).
+  - Nota: si falta descripción en la primera consulta, se intenta completarla con métodos alternativos.
+  - Explorar interactivo: pestañas Resumen (métricas + gráfico), Explorar (filtros por gen/descr./nivel + descarga filtrada) y Enlaces (accesos directos a Ensembl).
 
 **Riesgos y Pendientes**
 - Posible omisión del primer nombre de prueba en resumen (`web_app/streamlit_app.py:190`).
@@ -110,9 +128,9 @@ Plantilla para una nueva entrada:
 - Descarga de resultados: [x] (CSV en app; Excel en notebook)
   - Notebook: `export_dfs_to_excel`
   - App: `st.download_button` para CSV (`web_app/streamlit_app.py:329`)
-- Enriquecimiento Ensembl (IDs/descr.): [ ]
+- Enriquecimiento Ensembl (IDs/descr.): [x]
   - Notebook: `add_ensembl_info_batch` (requests + fallback)
-  - Core: `src/core/ensembl.add_ensembl_info_batch` existe; falta integrar en la app
+  - App: Integrado con `src/core/ensembl.add_ensembl_info_batch` (tabla + descarga)
 - Enriquecimiento STRING y/o GSEA (gseapy): [ ]
   - Notebook: llamadas a STRING/gseapy, preparación y gráficos
   - App: no integrado aún (requiere endpoints/red y UI)
@@ -124,5 +142,9 @@ Plantilla para una nueva entrada:
   - App: no integrado
 
 Siguiente foco propuesto (por orden):
-- Integrar enriquecimiento Ensembl usando `src/core/ensembl.add_ensembl_info_batch` tras la categorización, con tabla y descarga CSV.
 - Esbozar módulo de enriquecimiento STRING (configurable) y documentar requisitos de red/credenciales.
+- Filtrado y visualización GO (desde STRING/gseapy).
+
+**Notas — Ensembl (UI)**
+- Implementado tras la categorización en `web_app/streamlit_app.py`.
+- Consideraciones: requiere red; se captura error y se notifica al usuario.

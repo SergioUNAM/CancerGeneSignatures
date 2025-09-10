@@ -78,6 +78,10 @@ def parse_qpcr_wide(
     sheet_name: Optional[str] = None,
     undetermined_policy: str = "nan",  # one of: nan|ctmax|value
     undetermined_value: float = 40.0,
+    header_mode: str = "auto",  # one of: auto|coords
+    header_row_idx: Optional[int] = None,  # 0-based; default 3 (A4/B4) when coords
+    well_col_idx: Optional[int] = None,    # 0-based; default 0 (A)
+    target_col_idx: Optional[int] = None,  # 0-based; default 1 (B)
 ) -> LoadResult:
     """
     Parse qPCR-like Excel where headers include a row with sample codes above a row of
@@ -85,20 +89,32 @@ def parse_qpcr_wide(
     with columns: Well, Target Name, <sample1>, <sample2>, ...
     """
     raw = pd.read_excel(file, sheet_name=sheet_name, header=None, dtype=object)
-    # Find header row containing Well and Target Name
+
+    # Determine header by mode
     header_row = None
     well_col = None
     target_col = None
-    for ridx in range(len(raw)):
-        row_vals = [(_cell_str(v).lower()) for v in raw.iloc[ridx].tolist()]
-        if "well" in row_vals and any("target" in v for v in row_vals):
-            header_row = ridx
-            well_col = row_vals.index("well")
-            # First column containing 'target'
-            target_col = next(i for i, v in enumerate(row_vals) if "target" in v)
-            break
-    if header_row is None:
+
+    def _detect_header_auto() -> tuple[int, int, int]:
+        for ridx in range(len(raw)):
+            row_vals = [(_cell_str(v).lower()) for v in raw.iloc[ridx].tolist()]
+            if "well" in row_vals and any("target" in v for v in row_vals):
+                h_row = ridx
+                w_col = row_vals.index("well")
+                t_col = next(i for i, v in enumerate(row_vals) if "target" in v)
+                return h_row, w_col, t_col
         raise ValueError("No se encontró una fila de encabezado con 'Well' y 'Target'.")
+
+    def _detect_header_coords() -> tuple[int, int, int]:
+        h_row = 3 if header_row_idx is None else int(header_row_idx)
+        w_col = 0 if well_col_idx is None else int(well_col_idx)
+        t_col = 1 if target_col_idx is None else int(target_col_idx)
+        return h_row, w_col, t_col
+
+    if header_mode == "coords":
+        header_row, well_col, target_col = _detect_header_coords()
+    else:
+        header_row, well_col, target_col = _detect_header_auto()
 
     # Determine sample columns: those after target_col that have any non-empty value below
     data_start = header_row + 1
@@ -120,17 +136,26 @@ def parse_qpcr_wide(
 
     candidate_rows = [header_row - 1, header_row - 2, header_row - 3]
     sample_name_row = None
+
+    # Elegir la fila con más patrones de "código de muestra" (con guion),
+    # y en empate, con más dígitos y más no vacíos distintos de 'ct'.
+    eligible: list[tuple[int, int, int, int]] = []  # (ridx, hyphen_count, digit_count, good_count)
     for ridx in candidate_rows:
         if ridx is None or ridx < 0:
             continue
         if is_ct_row(ridx):
             continue
-        # Válido si al menos la mitad de columnas tienen texto no vacío y diferente de 'ct'
         vals = [(_cell_str(v)) for v in raw.iloc[ridx, sample_cols].tolist()]
         good = [v for v in vals if v and v.lower() != "ct"]
-        if len(good) >= max(1, int(0.5 * len(sample_cols))):
-            sample_name_row = ridx
-            break
+        if len(good) >= max(1, int(0.3 * len(sample_cols))):
+            hyphen_count = sum('-' in v for v in good)
+            digit_count = sum(any(ch.isdigit() for ch in v) for v in good)
+            eligible.append((ridx, hyphen_count, digit_count, len(good)))
+
+    if eligible:
+        # Seleccionar con mayor hyphen_count, luego digit_count, luego good_count
+        eligible.sort(key=lambda t: (t[1], t[2], t[3]), reverse=True)
+        sample_name_row = eligible[0][0]
     if sample_name_row is None and header_row > 1 and not is_ct_row(header_row - 2):
         sample_name_row = header_row - 2
 
