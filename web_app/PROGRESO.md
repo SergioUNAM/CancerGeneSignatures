@@ -32,11 +32,14 @@ Fecha: 2025-09-10
 - [x] Menú configurable con cache y fallback (`web_app/streamlit_app.py:88`, `web_app/config/menu.json`)
 - [x] Botones de descarga para CSV generados
 - [x] Mejora clasificación (case-insensitive)
+- [x] Enriquecimiento STRING (UI + API, filtros GO/KEGG, descarga)
 - [ ] Validaciones y mensajes más específicos
 - [ ] Documentación de plantillas Excel soportadas
 - [ ] Soporte opcional `.xls` (o guía para convertir a `.xlsx`)
 
 **Cambios Recientes (Changelog)**
+- 2025-09-10
+  - Merge a `master` de `feature/webapp-ensembl-integration` (Ensembl interactivo, UX de clasificación mejorada, parser A4/B4 + heurística).
 - 2025-09-10
 - Parser Excel por coordenadas: la app intenta primero encabezado fijo en A4/B4 (fila 4) y cae a detección automática si falla.
   - Compatibilidad: si el entorno aún carga una versión previa del parser sin nuevos parámetros, la app detecta `TypeError` y reintenta con la firma antigua.
@@ -50,10 +53,23 @@ Fecha: 2025-09-10
   - Clasificación de controles/muestras ahora case-insensitive usando `classify_tests` de `src/core/qpcr.py`.
   - Documentación inicial de seguimiento en `web_app/PROGRESO.md`.
   - Corrección de importaciones de `src`: se añadieron `src/__init__.py` y `src/core/__init__.py`, y se inyectó la raíz del proyecto en `sys.path` en `web_app/streamlit_app.py` para permitir `from src.core...` al ejecutar desde `web_app/`.
+ - 2025-09-10
+ - Enriquecimiento STRING integrado en la UI: selección por niveles de expresión, fuentes (GO/KEGG/Reactome), filtros por FDR/tamaño/top-N, tabla, barras (-log10 FDR) y descarga CSV.
+ - Nuevo módulo `src/core/string_enrichment.py` con helpers `run_string_enrichment` y `filter_enrichment` (sin dependencias adicionales, usa `requests`).
+- 2025-09-10
+  - Bibliografía (PubMed) integrada en la web app:
+    - Nuevo módulo `src/core/bibliography.py` con `search_pubmed_by_genes`, `classify_bibliography`, `aggregate_counts_by_level_and_cancer`.
+    - UI con inputs para `NCBI Email` (obligatorio) y `NCBI API Key` (opcional) directamente en la app (demo-friendly, sin necesidad de exportar variables).
+    - Progreso visible por gen (barra + estado) y logs de avance/errores.
+    - Descargas CSV de resultados y de bibliografía clasificada; gráficos por tipo de cáncer y nivel.
+    - Dependencia agregada: `biopython` (para Entrez/Medline).
+  - Logging y trazabilidad:
+    - Logs informativos en puntos largos: anotación Ensembl, enriquecimiento STRING y búsqueda PubMed (inicio/fin, conteos). Se controla por `CGS_LOGLEVEL` (INFO por defecto).
 
 **Ramas**
 - `master`: actualizado con descargas CSV, clasificación case-insensitive y fix de importaciones.
-- `feature/webapp-ensembl-integration`: nueva rama para integrar enriquecimiento Ensembl en la UI.
+- `feature/webapp-ensembl-integration`: fusionada en `master`.
+- `feature/webapp-string-gsea`: nueva rama para integrar enriquecimiento STRING/GSEA y visualización GO.
 - 2025-08-31
   - MVP de Streamlit con:
     - Carga Excel y selección de hoja (`list_excel_sheets`, `parse_qpcr_wide`).
@@ -142,8 +158,8 @@ Plantilla para una nueva entrada:
   - App: no integrado
 
 Siguiente foco propuesto (por orden):
-- Esbozar módulo de enriquecimiento STRING (configurable) y documentar requisitos de red/credenciales.
-- Filtrado y visualización GO (desde STRING/gseapy).
+- Visualización GO detallada (filtros por BP/MF/CC con tooltips, ranking por NES/OR) y enlaces.
+- Explorar integración GSEA (gseapy) usando conjuntos locales en `gen-sets_GSEA_MSigDB/`.
 
 **Notas — Ensembl (UI)**
 - Implementado tras la categorización en `web_app/streamlit_app.py`.
