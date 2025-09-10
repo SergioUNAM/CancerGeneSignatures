@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-import io, os, json
+import io, os, json, sys
 from pathlib import Path
 from typing import Optional
 import logging
@@ -21,11 +21,16 @@ import logging
 import pandas as pd
 import streamlit as st
 
+# Ensure project root is importable so `src.*` works when running from web_app/
+_PROJ_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJ_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJ_ROOT))
+
 # Importamos funciones propias del proyecto
 from src.core.io import LoadResult, list_excel_sheets, parse_qpcr_wide
 from src.core.qpcr import (
     melt_wide_to_long,
-    classify_by_prefixes,
+    classify_tests,  # case-insensitive
 )
 from src.core.cleaning import drop_machine_controls
 from src.core.fold_change import compute_fold_change
@@ -223,10 +228,11 @@ if df_loaded is not None:
     if submitted:
         if not ctrl_prefix and not samp_prefix:
             st.warning("Debes ingresar al menos un prefijo (controles o muestras)")
-        pref_ctrl_df, pref_samp_df = classify_by_prefixes(
+        # Clasificación case-insensitive usando utilitario dedicado
+        pref_ctrl_df, pref_samp_df = classify_tests(
             long_df,
-            [ctrl_prefix] if ctrl_prefix else [],
-            [samp_prefix] if samp_prefix else [],
+            ctrl_prefix,
+            samp_prefix,
         )
         state['ctrl_prefix'] = ctrl_prefix
         state['samp_prefix'] = samp_prefix
@@ -323,6 +329,18 @@ if df_loaded is not None:
             extras['expresion_categorizada.csv'] = df_expr.to_csv(index=False)
         except Exception as e:
             st.error(f"Error calculando Fold Change: {e}")
+
+        # Botones de descarga de resultados (si hay datos)
+        if extras:
+            st.subheader("Descargas")
+            for fname, data in extras.items():
+                st.download_button(
+                    label=f"Descargar {fname}",
+                    data=data,
+                    file_name=fname,
+                    mime="text/csv",
+                    use_container_width=True,
+                )
 
     # (Opcional) Puedes exportar manualmente desde cada tabla mostrada en pantalla.
 
