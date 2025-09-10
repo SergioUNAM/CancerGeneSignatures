@@ -38,7 +38,8 @@ Fecha: 2025-09-10
 
 **Cambios Recientes (Changelog)**
 - 2025-09-10
-  - Parser Excel por coordenadas: la app intenta primero encabezado fijo en A4/B4 (fila 4) y cae a detección automática si falla.
+- Parser Excel por coordenadas: la app intenta primero encabezado fijo en A4/B4 (fila 4) y cae a detección automática si falla.
+  - Compatibilidad: si el entorno aún carga una versión previa del parser sin nuevos parámetros, la app detecta `TypeError` y reintenta con la firma antigua.
   - Integración Ensembl en la UI: anotación de `target` con `ensembl_id` y `description`, tabla y descarga `ensembl_anotado.csv`. Se añadió `requests` a `web_app/requirements.txt`.
   - Mejora de anotación Ensembl: fallback para descripción usando `lookup/id/{id}`, `lookup/symbol`, y `mygene.info` si es necesario; cache por símbolo.
   - UX de clasificación mejorada: pestañas "Por prefijos" (con sugerencias automáticas) y "Selección manual" (multiselect de pruebas) con persistencia en sesión.

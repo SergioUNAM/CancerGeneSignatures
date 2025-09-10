@@ -145,23 +145,30 @@ if uploaded is not None and run_btn:
     try:
         uploaded.seek(0)
         # Primero intentamos con coordenadas fijas (A4/B4)
-        df_loaded = parse_qpcr_wide(
-            uploaded,
-            sheet_name=sheet,
-            header_mode="coords",
-            header_row_idx=3,  # A4/B4
-            well_col_idx=0,
-            target_col_idx=1,
-        )
+        try:
+            df_loaded = parse_qpcr_wide(
+                uploaded,
+                sheet_name=sheet,
+                header_mode="coords",
+                header_row_idx=3,  # A4/B4
+                well_col_idx=0,
+                target_col_idx=1,
+            )
+        except TypeError:
+            # Compatibilidad con versiones antiguas sin nuevos parámetros
+            df_loaded = parse_qpcr_wide(uploaded, sheet_name=sheet)
         logger.info(f"Archivo cargado: name={df_loaded.source_name}, sheet={df_loaded.sheet_name}, shape={df_loaded.df.shape}")
         # Persistir en sesión para evitar perderlo al enviar el formulario
         st.session_state["df_loaded"] = df_loaded
     except Exception as e:
-        st.warning(f"Encabezado A4/B4 no válido ({e}). Probando detección automática…")
+        st.warning(f"Encabezado A4/B4 no válido o firma previa detectada ({e}). Probando detección automática…")
         logger.warning("Fallo modo coords; intentando auto")
         try:
             uploaded.seek(0)
-            df_loaded = parse_qpcr_wide(uploaded, sheet_name=sheet, header_mode="auto")
+            try:
+                df_loaded = parse_qpcr_wide(uploaded, sheet_name=sheet, header_mode="auto")
+            except TypeError:
+                df_loaded = parse_qpcr_wide(uploaded, sheet_name=sheet)
             st.session_state["df_loaded"] = df_loaded
             logger.info("Carga con modo auto exitosa")
         except Exception as e2:
