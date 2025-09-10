@@ -22,29 +22,137 @@ GENERAL_CANCER_TERMS = [
     "cancer", "tumor", "tumour", "neoplasm", "metastasis", "carcinoma"
 ]
 
+from typing import Dict, List
+
 DEFAULT_CANCER_TYPES: Dict[str, List[str]] = {
-    "Breast Cancer": ["breast", "mammary", "mamma"],
-    "Melanoma": ["melanoma", "cutaneous melanoma", "uveal"],
-    "Colon Cancer": ["colon", "colorectal", "rectal", "crc"],
-    "Lung Cancer": ["lung", "pulmonary", "bronchial", "nsclc", "sclc"],
-    "Prostate Cancer": ["prostate", "psa", "androgen"],
-    "Pancreatic Cancer": ["pancreatic", "pancreas", "pdac"],
-    "Leukemia": ["leukemia", "leukaemia", "aml", "cml", "cll"],
-    "Lymphoma": ["lymphoma", "hodgkin", "non-hodgkin", "b-cell", "t-cell"],
-    "Ovarian Cancer": ["ovarian", "ovary"],
-    "Cervical Cancer": ["cervical", "cervix", "hpv"],
-    "Renal Cancer": ["renal", "kidney", "rcc"],
-    "Bladder Cancer": ["bladder", "urothelial"],
-    "Glioblastoma": ["glioblastoma", "gbm", "glioma"],
-    "Thyroid Cancer": ["thyroid"],
-    "Gastric Cancer": ["gastric", "stomach"],
-    "Esophageal Cancer": ["esophageal", "esophagus"],
-    "Skin Cancer": ["basal cell carcinoma", "squamous cell carcinoma of the skin"],
-    "Testicular Cancer": ["testicular", "testis"],
-    "Endometrial Cancer": ["endometrial", "uterine"],
-    "Mesothelioma": ["mesothelioma"],
-    "Head and Neck Cancer": ["head and neck", "laryngeal", "pharyngeal", "oral squamous"],
-    "Bone Cancer": ["osteosarcoma", "chondrosarcoma", "ewing"],
+    "Breast Cancer": [
+        "breast", "mammary", "mamma", "triple negative breast",
+        "er-positive", "pr-positive", "ductal carcinoma",
+        "lobular carcinoma", "estrogen receptor", "progesterone receptor"
+    ],
+    "Melanoma": [
+        "melanoma", "cutaneous melanoma", "skin melanoma",
+        "uveal", "uveal melanoma", "ocular melanoma",
+        "acral melanoma", "braf", "braf mutation"
+    ],
+    "Colon Cancer": [
+        "colon", "colorectal", "rectal", "crc", "intestinal",
+        "intestine", "colon adenocarcinoma", "rectal adenocarcinoma",
+        "lynch syndrome", "hereditary colon cancer"
+    ],
+    "Lung Cancer": [
+        "lung", "pulmonary", "bronchial", "nsclc", "sclc",
+        "non-small cell lung cancer", "small cell lung cancer",
+        "egfr mutation", "alk rearrangement",
+        "lung adenocarcinoma", "lung squamous cell carcinoma", "lung squamous"
+    ],
+    "Prostate Cancer": [
+        "prostate", "prostatic", "psa", "androgen",
+        "androgen receptor", "ar-positive",
+        "prostate-specific antigen", "gleason score",
+        "crpc", "castration-resistant", "prostate carcinoma"
+    ],
+    "Pancreatic Cancer": [
+        "pancreatic", "pancreas", "pdac", "ductal adenocarcinoma",
+        "pancreatic carcinoma", "neuroendocrine tumor",
+        "pancreatic neuroendocrine", "islet cell tumor", "whipple procedure"
+    ],
+    "Leukemia": [
+        "leukemia", "leukaemia", "aml", "cml", "cll",
+        "acute myeloid leukemia", "acute lymphoblastic leukemia",
+        "chronic lymphocytic leukemia", "chronic myeloid leukemia",
+        "philadelphia chromosome", "bcr-abl",
+        "mpn", "myeloproliferative neoplasm"
+    ],
+    "Lymphoma": [
+        "lymphoma", "hodgkin", "non-hodgkin", "b-cell", "t-cell",
+        "nhl", "dlbcl", "diffuse large b-cell lymphoma",
+        "follicular lymphoma", "mantle cell lymphoma",
+        "burkitt lymphoma", "cutaneous lymphoma"
+    ],
+    "Ovarian Cancer": [
+        "ovarian", "ovary", "ovarian carcinoma",
+        "high-grade serous carcinoma", "hgsc", "brca1", "brca2",
+        "ca125", "clear cell carcinoma", "granulosa cell tumor"
+    ],
+    "Cervical Cancer": [
+        "cervical", "cervix", "hpv", "human papillomavirus",
+        "cervical carcinoma", "cervical squamous cell carcinoma",
+        "cervical adenocarcinoma", "pap smear",
+        "cervical dysplasia", "cervical squamous"
+    ],
+    "Renal Cancer": [
+        "renal", "kidney", "rcc", "renal carcinoma",
+        "clear cell carcinoma", "papillary renal carcinoma",
+        "chromophobe renal carcinoma", "von hippel-lindau", "vhl"
+    ],
+    "Bladder Cancer": [
+        "bladder", "urothelial", "bladder carcinoma",
+        "transitional cell carcinoma", "non-muscle invasive",
+        "muscle invasive", "nmibc", "mibc"
+    ],
+    "Glioblastoma": [
+        "glioblastoma", "gbm", "glioma", "astrocytoma",
+        "oligodendroglioma", "brain tumor",
+        "idh", "idh mutation", "mgmt methylation", "temozolomide"
+    ],
+    "Thyroid Cancer": [
+        "thyroid", "thyroid carcinoma", "papillary thyroid",
+        "follicular thyroid", "medullary thyroid",
+        "anaplastic thyroid", "braf", "braf mutation",
+        "ret", "ret mutation"
+    ],
+    "Gastric Cancer": [
+        "gastric", "stomach", "gastric carcinoma",
+        "diffuse gastric cancer", "intestinal metaplasia",
+        "epstein-barr virus", "helicobacter pylori",
+        "h. pylori", "pylori"
+    ],
+    "Esophageal Cancer": [
+        "esophageal", "esophagus", "esophageal carcinoma",
+        "barrett esophagus", "esophageal adenocarcinoma",
+        "esophageal squamous cell carcinoma"
+    ],
+    "Skin Cancer": [
+        "skin cancer", "basal cell carcinoma", "bcc",
+        "squamous cell carcinoma of the skin", "scc",
+        "cutaneous carcinoma", "actinic keratosis",
+        "uv radiation", "squamous-cell carcinoma of the skin"
+    ],
+    "Testicular Cancer": [
+        "testicular", "testis", "germ cell tumor",
+        "seminoma", "non-seminoma", "beta-hcg",
+        "alpha-fetoprotein", "afp"
+    ],
+    "Endometrial Cancer": [
+        "endometrial", "uterine", "endometrial carcinoma",
+        "serous carcinoma", "lynch syndrome", "womb cancer"
+    ],
+    "Mesothelioma": [
+        "mesothelioma", "pleural mesothelioma",
+        "peritoneal mesothelioma", "asbestos",
+        "asbestos exposure", "asbestosis"
+    ],
+    "Head and Neck Cancer": [
+        "head and neck", "laryngeal", "pharyngeal",
+        "oral squamous", "oral squamous cell carcinoma", "oscc",
+        "pharyngeal carcinoma", "laryngeal carcinoma",
+        "hpv-positive", "hpv-negative", "nasopharyngeal carcinoma",
+        "laryngeal squamous cell carcinoma",
+        "naso-oropharyngeal carcinoma", "tongue squamous"
+    ],
+    "Bone Cancer": [
+        "bone cancer", "osteosarcoma", "chondrosarcoma",
+        "ewing", "ewing sarcoma", "primary bone tumor",
+        "metastatic bone cancer", "paget disease",
+        "bone lesion", "osteogenic sarcoma"
+    ],
+    "Hepatocellular Carcinoma": [
+        "hepatocellular", "hcc", "liver cancer", "hepatic carcinoma",
+        "hepatoma", "cirrhosis", "hepatitis b", "hbv",
+        "hepatitis c", "hcv", "fibrolamellar carcinoma",
+        "afp", "alpha-fetoprotein"
+    ]
 }
 
 EMT_KEYWORDS = [
