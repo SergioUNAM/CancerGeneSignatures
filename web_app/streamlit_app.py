@@ -31,6 +31,7 @@ from src.core.io import LoadResult, list_excel_sheets, parse_qpcr_wide
 from src.core.qpcr import (
     melt_wide_to_long,
     classify_tests,  # case-insensitive
+    suggest_name_affixes,
 )
 from src.core.cleaning import drop_machine_controls
 from src.core.fold_change import compute_fold_change
@@ -205,45 +206,78 @@ if df_loaded is not None:
         st.warning(f"No se pudo mostrar el resumen de extracción: {e}")
         logger.warning(f"Fallo en resumen de extracción: {e}")
 
-    # Entrada manual de prefijos y clasificación (formulario con estado persistente)
-    st.subheader("Prefijos (entrada manual)")
-    st.caption("Introduce prefijo de controles y de muestras; se clasifica por coincidencia al inicio del nombre de test")
+    # Clasificación con mejor UX: prefijos sugeridos o selección manual
+    st.subheader("Clasificación de controles y muestras")
+    st.caption("Usa prefijos sugeridos/manuales o selecciona las pruebas directamente.")
 
     file_key = f"assign_{df_loaded.source_name}:{df_loaded.sheet_name}"
     state = st.session_state.setdefault(file_key, {})
 
-    with st.form(f"prefix_form_{file_key}"):
-        ctrl_prefix = st.text_input("Prefijo controles", value=state.get('ctrl_prefix', ''))
-        samp_prefix = st.text_input("Prefijo muestras", value=state.get('samp_prefix', ''))
-        submitted = st.form_submit_button("Clasificar y calcular")
+    unique_tests = sorted(long_df['test'].astype(str).dropna().unique().tolist())
+
+    tab_pref, tab_select = st.tabs(["Por prefijos", "Selección manual"])
+
+    with tab_pref:
+        sugg = suggest_name_affixes(unique_tests, top_n=10)
+        top_prefixes = [p for p, _ in (sugg.get('prefixes') or [])]
+        colp1, colp2 = st.columns(2)
+        with colp1:
+            ctrl_suggest = st.selectbox("Sugerencia (controles)", options=["(vacío)"] + top_prefixes, index=0)
+            ctrl_default = "" if ctrl_suggest == "(vacío)" else ctrl_suggest
+            ctrl_prefix = st.text_input("Prefijo controles", value=state.get('ctrl_prefix', ctrl_default))
+        with colp2:
+            samp_suggest = st.selectbox("Sugerencia (muestras)", options=["(vacío)"] + top_prefixes, index=0)
+            samp_default = "" if samp_suggest == "(vacío)" else samp_suggest
+            samp_prefix = st.text_input("Prefijo muestras", value=state.get('samp_prefix', samp_default))
+        submitted_pref = st.button("Clasificar por prefijos", type="primary")
+
+    with tab_select:
+        colm1, colm2 = st.columns(2)
+        with colm1:
+            selected_ctrl = st.multiselect("Pruebas de controles", options=unique_tests, default=state.get('selected_ctrl', []))
+        with colm2:
+            selected_samp = st.multiselect("Pruebas de muestras", options=unique_tests, default=state.get('selected_samp', []))
+        submitted_sel = st.button("Clasificar por selección", type="secondary")
 
     clear_cls = st.button("Limpiar clasificación")
     if clear_cls:
-        for k in ('ctrl_prefix','samp_prefix','controles_df','muestras_df'):
+        for k in ('ctrl_prefix','samp_prefix','selected_ctrl','selected_samp','controles_df','muestras_df'):
             state.pop(k, None)
         logger.info("Clasificación limpiada por el usuario")
 
     controles_df = state.get('controles_df', pd.DataFrame())
     muestras_df = state.get('muestras_df', pd.DataFrame())
 
-    if submitted:
+    if submitted_pref:
         if not ctrl_prefix and not samp_prefix:
             st.warning("Debes ingresar al menos un prefijo (controles o muestras)")
-        # Clasificación case-insensitive usando utilitario dedicado
-        pref_ctrl_df, pref_samp_df = classify_tests(
-            long_df,
-            ctrl_prefix,
-            samp_prefix,
-        )
+        pref_ctrl_df, pref_samp_df = classify_tests(long_df, ctrl_prefix, samp_prefix)
         state['ctrl_prefix'] = ctrl_prefix
         state['samp_prefix'] = samp_prefix
         state['controles_df'] = pref_ctrl_df
         state['muestras_df'] = pref_samp_df
         controles_df = pref_ctrl_df
         muestras_df = pref_samp_df
-        logger.info(f"Clasificación por prefijos manuales: ctrl='{ctrl_prefix}' -> {len(controles_df)} filas, samp='{samp_prefix}' -> {len(muestras_df)} filas")
+        logger.info(f"Clasificación por prefijos: ctrl='{ctrl_prefix}' -> {len(controles_df)} filas, samp='{samp_prefix}' -> {len(muestras_df)} filas")
         if controles_df.empty or muestras_df.empty:
-            st.warning("Alguna de las categorías resultó vacía. Revisa los prefijos ingresados.")
+            st.warning("Alguna de las categorías resultó vacía. Revisa los prefijos o usa 'Selección manual'.")
+
+    if submitted_sel:
+        # Validar colisiones
+        inter = set(selected_ctrl).intersection(set(selected_samp))
+        if inter:
+            st.warning(f"Hay pruebas en ambas categorías: {', '.join(sorted(inter))}")
+        sel_ctrl_df = long_df[long_df['test'].astype(str).isin(selected_ctrl)] if selected_ctrl else long_df.iloc[0:0]
+        sel_samp_df = long_df[long_df['test'].astype(str).isin(selected_samp)] if selected_samp else long_df.iloc[0:0]
+        state['selected_ctrl'] = selected_ctrl
+        state['selected_samp'] = selected_samp
+        state['controles_df'] = sel_ctrl_df
+        state['muestras_df'] = sel_samp_df
+        controles_df = sel_ctrl_df
+        muestras_df = sel_samp_df
+        logger.info(f"Clasificación por selección: ctrl={len(selected_ctrl)} pruebas -> {len(controles_df)} filas, samp={len(selected_samp)} pruebas -> {len(muestras_df)} filas")
+        if controles_df.empty or muestras_df.empty:
+            st.warning("Alguna de las categorías quedó vacía. Selecciona al menos una prueba en cada lado.")
 
     st.write("Controles clasificados:", len(controles_df))
     st.write("Muestras clasificadas:", len(muestras_df))

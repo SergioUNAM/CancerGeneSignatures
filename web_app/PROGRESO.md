@@ -40,6 +40,7 @@ Fecha: 2025-09-10
 - 2025-09-10
   - Integración Ensembl en la UI: anotación de `target` con `ensembl_id` y `description`, tabla y descarga `ensembl_anotado.csv`. Se añadió `requests` a `web_app/requirements.txt`.
   - Mejora de anotación Ensembl: fallback para descripción usando `lookup/id/{id}`, `lookup/symbol`, y `mygene.info` si es necesario; cache por símbolo.
+  - UX de clasificación mejorada: pestañas "Por prefijos" (con sugerencias automáticas) y "Selección manual" (multiselect de pruebas) con persistencia en sesión.
 - 2025-09-10
   - Merge a `master` de la rama `feature/webapp-downloads-caseinsensitive` (descargas CSV, clasificación case-insensitive, fix import `src`).
 - 2025-09-10
