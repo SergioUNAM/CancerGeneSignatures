@@ -38,10 +38,16 @@ Fecha: 2025-09-10
 
 **Cambios Recientes (Changelog)**
 - 2025-09-10
+  - Merge a `master` de la rama `feature/webapp-downloads-caseinsensitive` (descargas CSV, clasificación case-insensitive, fix import `src`).
+- 2025-09-10
   - Añadidos botones de descarga (`st.download_button`) para los CSV generados: controles/muestras limpios, consolidado FC, y expresión categorizada.
   - Clasificación de controles/muestras ahora case-insensitive usando `classify_tests` de `src/core/qpcr.py`.
   - Documentación inicial de seguimiento en `web_app/PROGRESO.md`.
   - Corrección de importaciones de `src`: se añadieron `src/__init__.py` y `src/core/__init__.py`, y se inyectó la raíz del proyecto en `sys.path` en `web_app/streamlit_app.py` para permitir `from src.core...` al ejecutar desde `web_app/`.
+
+**Ramas**
+- `master`: actualizado con descargas CSV, clasificación case-insensitive y fix de importaciones.
+- `feature/webapp-ensembl-integration`: nueva rama para integrar enriquecimiento Ensembl en la UI.
 - 2025-08-31
   - MVP de Streamlit con:
     - Carga Excel y selección de hoja (`list_excel_sheets`, `parse_qpcr_wide`).
@@ -124,5 +130,16 @@ Plantilla para una nueva entrada:
   - App: no integrado
 
 Siguiente foco propuesto (por orden):
-- Integrar enriquecimiento Ensembl usando `src/core/ensembl.add_ensembl_info_batch` tras la categorización, con tabla y descarga CSV.
+- Integrar enriquecimiento Ensembl usando `src/core/ensembl.add_ensembl_info_batch` tras la categorización, con tabla y descarga CSV. (Se implementará en `feature/webapp-ensembl-integration`)
 - Esbozar módulo de enriquecimiento STRING (configurable) y documentar requisitos de red/credenciales.
+
+**Plan de implementación — Ensembl (UI)**
+- Punto de inserción: después de la sección "Clasificación por nivel de expresión" en `web_app/streamlit_app.py`.
+- Acciones:
+  - Tomar `df_expr` (target + fold_change + nivel_expresion) y derivar listas por categoría.
+  - Llamar `src/core/ensembl.add_ensembl_info_batch` sobre cada subconjunto (o combinado) usando `symbol_col='target'`.
+  - Mostrar tabla consolidada con columnas: `target`, `nivel_expresion`, `ensembl_id`, `description`.
+  - Añadir `st.download_button` para CSV: `ensembl_anotado.csv`.
+- Consideraciones:
+  - Requiere red para Ensembl (documentar fallback/offline si aplica).
+  - Manejar timeouts y mostrar conteo de no encontrados.
