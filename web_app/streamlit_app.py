@@ -337,7 +337,8 @@ if df_loaded is not None:
                 df_to_annot = df_expr[['target', 'nivel_expresion', 'fold_change']].drop_duplicates(subset=['target']).reset_index(drop=True)
                 with st.spinner("Consultando Ensembl…"):
                     ensembl_df = add_ensembl_info_batch(df_to_annot, symbol_col='target', max_workers=3)
-                ensembl_df['has_desc'] = ensembl_df['description'].fillna('').astype(str).str.strip().ne(''). & ensembl_df['description'].ne('No description')
+                desc_series = ensembl_df['description'].fillna('').astype(str).str.strip()
+                ensembl_df['has_desc'] = desc_series.ne('') & desc_series.ne('No description')
                 extras['ensembl_anotado.csv'] = ensembl_df.to_csv(index=False)
 
                 tab_resumen, tab_explorar, tab_enlaces = st.tabs(["Resumen", "Explorar", "Enlaces"])
