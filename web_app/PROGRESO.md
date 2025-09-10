@@ -72,6 +72,7 @@ Fecha: 2025-09-10
 - Clasificación case-insensitive: los prefijos de controles y muestras se comparan sin distinción de mayúsculas/minúsculas.
 - Ensembl: nueva sección anota genes con `ensembl_id` y `description`; incluye descarga `ensembl_anotado.csv` (requiere conexión a internet).
   - Nota: si falta descripción en la primera consulta, se intenta completarla con métodos alternativos.
+  - Explorar interactivo: pestañas Resumen (métricas + gráfico), Explorar (filtros por gen/descr./nivel + descarga filtrada) y Enlaces (accesos directos a Ensembl).
 
 **Riesgos y Pendientes**
 - Posible omisión del primer nombre de prueba en resumen (`web_app/streamlit_app.py:190`).

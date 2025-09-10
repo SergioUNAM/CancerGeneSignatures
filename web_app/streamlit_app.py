@@ -331,15 +331,86 @@ if df_loaded is not None:
 
             # Anotación Ensembl (IDs y descripciones) sobre los targets clasificados
             st.subheader("Anotación Ensembl (IDs y descripciones)")
-            st.caption("Consulta Ensembl para cada gen (requiere conexión a internet).")
+            st.caption("Consulta Ensembl para cada gen (requiere conexión a internet). Incluye exploración interactiva.")
 
             try:
                 df_to_annot = df_expr[['target', 'nivel_expresion', 'fold_change']].drop_duplicates(subset=['target']).reset_index(drop=True)
                 with st.spinner("Consultando Ensembl…"):
                     ensembl_df = add_ensembl_info_batch(df_to_annot, symbol_col='target', max_workers=3)
-                cols_show = ['target', 'nivel_expresion', 'fold_change', 'ensembl_id', 'description']
-                st.dataframe(ensembl_df[cols_show])
+                ensembl_df['has_desc'] = ensembl_df['description'].fillna('').astype(str).str.strip().ne(''). & ensembl_df['description'].ne('No description')
                 extras['ensembl_anotado.csv'] = ensembl_df.to_csv(index=False)
+
+                tab_resumen, tab_explorar, tab_enlaces = st.tabs(["Resumen", "Explorar", "Enlaces"])
+
+                # Resumen: métricas y gráfico de calidad de anotación por nivel de expresión
+                with tab_resumen:
+                    total = len(ensembl_df)
+                    encontrados = int((ensembl_df['ensembl_id'] != 'Not found').sum())
+                    con_desc = int((ensembl_df['has_desc']).sum())
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Genes anotados (totales)", total)
+                    m2.metric("Con Ensembl ID", encontrados)
+                    m3.metric("Con descripción", con_desc)
+
+                    import plotly.express as px
+                    counts = (
+                        ensembl_df.assign(desc=lambda d: d['has_desc'].map({True: 'con_descripción', False: 'sin_descripción'}))
+                        .groupby(['nivel_expresion', 'desc']).size().reset_index(name='n')
+                    )
+                    order_levels = ['estable', 'subexpresado', 'sobreexpresado']
+                    counts['nivel_expresion'] = pd.Categorical(counts['nivel_expresion'], categories=order_levels, ordered=True)
+                    bar = px.bar(
+                        counts.sort_values(['nivel_expresion','desc']),
+                        x='nivel_expresion', y='n', color='desc', barmode='stack',
+                        labels={'nivel_expresion': 'Nivel de expresión', 'n': 'Número de genes', 'desc': 'Descripción'},
+                        title='Cobertura de anotación por nivel de expresión'
+                    )
+                    st.plotly_chart(bar, use_container_width=True)
+
+                # Explorar: filtros por gen, descripción y nivel; descarga del subconjunto
+                with tab_explorar:
+                    f1, f2 = st.columns(2)
+                    with f1:
+                        q_gene = st.text_input("Filtrar por gen (contiene)", "").strip().lower()
+                    with f2:
+                        q_desc = st.text_input("Filtrar por descripción (contiene)", "").strip().lower()
+                    order_levels = ['estable', 'subexpresado', 'sobreexpresado']
+                    sel_levels = st.multiselect("Niveles", order_levels, default=order_levels)
+
+                    filt = ensembl_df.copy()
+                    if q_gene:
+                        filt = filt[filt['target'].astype(str).str.lower().str.contains(q_gene, na=False)]
+                    if q_desc:
+                        filt = filt[filt['description'].astype(str).str.lower().str.contains(q_desc, na=False)]
+                    if sel_levels:
+                        filt = filt[filt['nivel_expresion'].isin(sel_levels)]
+
+                    cols_show = ['target', 'nivel_expresion', 'fold_change', 'ensembl_id', 'description']
+                    st.dataframe(filt[cols_show])
+
+                    st.download_button(
+                        label="Descargar resultado filtrado (CSV)",
+                        data=filt[cols_show].to_csv(index=False),
+                        file_name="ensembl_filtrado.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                    )
+
+                # Enlaces: listado con links a Ensembl y descripciones legibles
+                with tab_enlaces:
+                    st.caption("Navega por enlaces directos a Ensembl (máx. 100 primeros)")
+                    subset = ensembl_df.copy().head(100)
+                    for _, row in subset.iterrows():
+                        gene = str(row['target'])
+                        eid = str(row['ensembl_id'])
+                        desc = str(row['description'])
+                        lvl = str(row['nivel_expresion'])
+                        url = f"https://www.ensembl.org/Homo_sapiens/Gene/Summary?g={eid}" if eid and eid != 'Not found' else None
+                        if url:
+                            st.markdown(f"- [{gene}]({url}) · {lvl} — {desc}")
+                        else:
+                            st.markdown(f"- {gene} · {lvl} — {desc}")
+
             except Exception as e:
                 st.warning(f"No se pudo anotar con Ensembl: {e}")
         except Exception as e:
