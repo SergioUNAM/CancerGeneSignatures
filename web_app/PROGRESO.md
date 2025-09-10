@@ -84,3 +84,45 @@ Plantilla para una nueva entrada:
   - Cambio 1 breve.
   - Cambio 2 breve.
   - Impacto/nota si aplica.
+
+**Cobertura del notebook `notebooks/uimeo_data_analysis.py`**
+- Carga Excel y extracción básica: [x]
+  - Notebook: `cargar_datos_excel`, `extraer_informacion_cg`
+  - App: `src/core/io.parse_qpcr_wide` + vista previa (`web_app/streamlit_app.py:151`), extracción de tests/genes/pozos (`web_app/streamlit_app.py:176`)
+- Clasificación por prefijos (controles/muestras): [x]
+  - Notebook: `procesar_ct` (case-insensitive)
+  - App: `src/core/qpcr.classify_tests` (`web_app/streamlit_app.py:226`)
+- Filtrado de controles de máquina (PPC/RTC): [x]
+  - Notebook: `filtrar_controles_maquina` (PPC/RTC)
+  - App: `src/core/cleaning.drop_machine_controls` (`web_app/streamlit_app.py:169`)
+- Imputación de Ct (NaN → máximo Ct global): [x]
+  - Notebook: `procesar_ct_column` (valor máximo)
+  - App: bloque de imputación (`web_app/streamlit_app.py:254`)
+- Cálculo ΔΔCt y Fold Change (promedios y gen ref): [x]
+  - Notebook: `calcular_fold_change`
+  - App: `src/core/fold_change.compute_fold_change` (`web_app/streamlit_app.py:268`)
+- Categorización de expresión (sub/estable/sobre): [x]
+  - Notebook: `categorizar_expresion`
+  - App: `pd.cut` sobre FC escogido (`web_app/streamlit_app.py:300`)
+- Visualización básica (tabla/plots comparación FC): [x]
+  - Notebook: tablas y gráficos de resumen
+  - App: `src/core/tables.fc_comparison_table` + barras/series Plotly (`web_app/streamlit_app.py:279`, `:283`)
+- Descarga de resultados: [x] (CSV en app; Excel en notebook)
+  - Notebook: `export_dfs_to_excel`
+  - App: `st.download_button` para CSV (`web_app/streamlit_app.py:329`)
+- Enriquecimiento Ensembl (IDs/descr.): [ ]
+  - Notebook: `add_ensembl_info_batch` (requests + fallback)
+  - Core: `src/core/ensembl.add_ensembl_info_batch` existe; falta integrar en la app
+- Enriquecimiento STRING y/o GSEA (gseapy): [ ]
+  - Notebook: llamadas a STRING/gseapy, preparación y gráficos
+  - App: no integrado aún (requiere endpoints/red y UI)
+- Filtrado y visualización GO: [ ]
+  - Notebook: `filtrar_enriquecimiento_terminos_GO` y gráficos
+  - App: no integrado
+- Redes/interacción (networkx/cytoscape): [ ]
+  - Notebook: construcción de redes y exportaciones
+  - App: no integrado
+
+Siguiente foco propuesto (por orden):
+- Integrar enriquecimiento Ensembl usando `src/core/ensembl.add_ensembl_info_batch` tras la categorización, con tabla y descarga CSV.
+- Esbozar módulo de enriquecimiento STRING (configurable) y documentar requisitos de red/credenciales.
