@@ -35,6 +35,7 @@ from src.core.qpcr import (
 from src.core.cleaning import drop_machine_controls
 from src.core.fold_change import compute_fold_change
 from src.core.tables import fc_comparison_table
+from src.core.ensembl import add_ensembl_info_batch
 
 # -----------------------------------------------------------------------------
 # Configuración de la página Streamlit
@@ -327,6 +328,20 @@ if df_loaded is not None:
 
             extras['fold_change_consolidado.csv'] = fc.consolidated.to_csv(index=False)
             extras['expresion_categorizada.csv'] = df_expr.to_csv(index=False)
+
+            # Anotación Ensembl (IDs y descripciones) sobre los targets clasificados
+            st.subheader("Anotación Ensembl (IDs y descripciones)")
+            st.caption("Consulta Ensembl para cada gen (requiere conexión a internet).")
+
+            try:
+                df_to_annot = df_expr[['target', 'nivel_expresion', 'fold_change']].drop_duplicates(subset=['target']).reset_index(drop=True)
+                with st.spinner("Consultando Ensembl…"):
+                    ensembl_df = add_ensembl_info_batch(df_to_annot, symbol_col='target', max_workers=6)
+                cols_show = ['target', 'nivel_expresion', 'fold_change', 'ensembl_id', 'description']
+                st.dataframe(ensembl_df[cols_show])
+                extras['ensembl_anotado.csv'] = ensembl_df.to_csv(index=False)
+            except Exception as e:
+                st.warning(f"No se pudo anotar con Ensembl: {e}")
         except Exception as e:
             st.error(f"Error calculando Fold Change: {e}")
 

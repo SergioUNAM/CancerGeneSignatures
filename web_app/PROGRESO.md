@@ -38,6 +38,8 @@ Fecha: 2025-09-10
 
 **Cambios Recientes (Changelog)**
 - 2025-09-10
+  - Integración Ensembl en la UI: anotación de `target` con `ensembl_id` y `description`, tabla y descarga `ensembl_anotado.csv`. Se añadió `requests` a `web_app/requirements.txt`.
+- 2025-09-10
   - Merge a `master` de la rama `feature/webapp-downloads-caseinsensitive` (descargas CSV, clasificación case-insensitive, fix import `src`).
 - 2025-09-10
   - Añadidos botones de descarga (`st.download_button`) para los CSV generados: controles/muestras limpios, consolidado FC, y expresión categorizada.
@@ -67,6 +69,7 @@ Fecha: 2025-09-10
   - `controles_limpios.csv`, `muestras_limpias.csv`
   - `fold_change_consolidado.csv`, `expresion_categorizada.csv`
 - Clasificación case-insensitive: los prefijos de controles y muestras se comparan sin distinción de mayúsculas/minúsculas.
+- Ensembl: nueva sección anota genes con `ensembl_id` y `description`; incluye descarga `ensembl_anotado.csv` (requiere conexión a internet).
 
 **Riesgos y Pendientes**
 - Posible omisión del primer nombre de prueba en resumen (`web_app/streamlit_app.py:190`).
@@ -116,9 +119,9 @@ Plantilla para una nueva entrada:
 - Descarga de resultados: [x] (CSV en app; Excel en notebook)
   - Notebook: `export_dfs_to_excel`
   - App: `st.download_button` para CSV (`web_app/streamlit_app.py:329`)
-- Enriquecimiento Ensembl (IDs/descr.): [ ]
+- Enriquecimiento Ensembl (IDs/descr.): [x]
   - Notebook: `add_ensembl_info_batch` (requests + fallback)
-  - Core: `src/core/ensembl.add_ensembl_info_batch` existe; falta integrar en la app
+  - App: Integrado con `src/core/ensembl.add_ensembl_info_batch` (tabla + descarga)
 - Enriquecimiento STRING y/o GSEA (gseapy): [ ]
   - Notebook: llamadas a STRING/gseapy, preparación y gráficos
   - App: no integrado aún (requiere endpoints/red y UI)
@@ -130,16 +133,9 @@ Plantilla para una nueva entrada:
   - App: no integrado
 
 Siguiente foco propuesto (por orden):
-- Integrar enriquecimiento Ensembl usando `src/core/ensembl.add_ensembl_info_batch` tras la categorización, con tabla y descarga CSV. (Se implementará en `feature/webapp-ensembl-integration`)
 - Esbozar módulo de enriquecimiento STRING (configurable) y documentar requisitos de red/credenciales.
+- Filtrado y visualización GO (desde STRING/gseapy).
 
-**Plan de implementación — Ensembl (UI)**
-- Punto de inserción: después de la sección "Clasificación por nivel de expresión" en `web_app/streamlit_app.py`.
-- Acciones:
-  - Tomar `df_expr` (target + fold_change + nivel_expresion) y derivar listas por categoría.
-  - Llamar `src/core/ensembl.add_ensembl_info_batch` sobre cada subconjunto (o combinado) usando `symbol_col='target'`.
-  - Mostrar tabla consolidada con columnas: `target`, `nivel_expresion`, `ensembl_id`, `description`.
-  - Añadir `st.download_button` para CSV: `ensembl_anotado.csv`.
-- Consideraciones:
-  - Requiere red para Ensembl (documentar fallback/offline si aplica).
-  - Manejar timeouts y mostrar conteo de no encontrados.
+**Notas — Ensembl (UI)**
+- Implementado tras la categorización en `web_app/streamlit_app.py`.
+- Consideraciones: requiere red; se captura error y se notifica al usuario.
