@@ -41,6 +41,7 @@ Fecha: 2025-09-10
   - Añadidos botones de descarga (`st.download_button`) para los CSV generados: controles/muestras limpios, consolidado FC, y expresión categorizada.
   - Clasificación de controles/muestras ahora case-insensitive usando `classify_tests` de `src/core/qpcr.py`.
   - Documentación inicial de seguimiento en `web_app/PROGRESO.md`.
+  - Corrección de importaciones de `src`: se añadieron `src/__init__.py` y `src/core/__init__.py`, y se inyectó la raíz del proyecto en `sys.path` en `web_app/streamlit_app.py` para permitir `from src.core...` al ejecutar desde `web_app/`.
 - 2025-08-31
   - MVP de Streamlit con:
     - Carga Excel y selección de hoja (`list_excel_sheets`, `parse_qpcr_wide`).
@@ -83,4 +84,3 @@ Plantilla para una nueva entrada:
   - Cambio 1 breve.
   - Cambio 2 breve.
   - Impacto/nota si aplica.
-
