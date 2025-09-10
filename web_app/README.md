@@ -17,11 +17,10 @@ streamlit run web_app/streamlit_app.py
 ```
 
 Flujo
-- Sube Excel/CSV, selecciona hoja (si aplica).
-- Define columnas ID (opcional) y normalización.
-- Revisa resultados y descarga ZIP.
+- Sube Excel (.xlsx/.xls), selecciona hoja (si aplica).
+- (Opcional) Introduce prefijos de controles/muestras o usa los detectados de la plantilla.
+- Revisa clasificación, Fold Change (promedios y gen de referencia) y gráficas.
 
 Notas
-- La configuración de menús (tipos de cáncer, contextos, métodos de normalización de dominio) se carga desde `web_app/config/menu.json`.
-- La app guarda resultados en memoria para descarga; no escribe en disco por defecto.
+- La app lee `web_app/config/menu.json` para los parámetros (contexto, tipo de cáncer, método preferido).
 - Para Excel se usa openpyxl; si hay formatos antiguos, conviértelos a .xlsx.

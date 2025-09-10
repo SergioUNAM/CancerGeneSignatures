@@ -1,39 +1,76 @@
+# -*- coding: utf-8 -*-
+# -----------------------------------------------------------------------------
+# CancerGeneSignatures - Web App
+# -----------------------------------------------------------------------------
+# Esta app de Streamlit implementa el flujo del notebook de análisis qPCR:
+#   1) Carga de Excel (.xlsx/.xls)
+#   2) Selección de parámetros desde menu.json
+#   3) Filtrado de controles de máquina (PPC, RTC)
+#   4) Selección de controles/muestras (tests o prefijos sugeridos)
+#   5) Cálculo de Fold Change (promedios vs gen de referencia)
+#   6) Visualizaciones y descarga de resultados
+# -----------------------------------------------------------------------------
+
 from __future__ import annotations
 
-import io
-import zipfile
-from datetime import datetime
+import io, os, json
 from pathlib import Path
-import json
 from typing import Optional
+import logging
 
 import pandas as pd
 import streamlit as st
 
-from src.core.io import LoadResult, list_excel_sheets, load_table, parse_qpcr_wide
+# Importamos funciones propias del proyecto
+from src.core.io import LoadResult, list_excel_sheets, parse_qpcr_wide
 from src.core.qpcr import (
-    try_extract_template_config,
     melt_wide_to_long,
-    classify_tests,
-    suggest_name_affixes,
     classify_by_prefixes,
-    classify_by_suffixes,
 )
-from src.core.preprocessing import PreprocessConfig, preprocess
-from src.core.analysis import run_basic_analysis
-from src.core.plots import corr_heatmap, histogram, scatter
+from src.core.cleaning import drop_machine_controls
+from src.core.fold_change import compute_fold_change
+from src.core.tables import fc_comparison_table
 
+# -----------------------------------------------------------------------------
+# Configuración de la página Streamlit
+# -----------------------------------------------------------------------------
+st.set_page_config(
+    page_title="CancerGeneSignatures - Web App",
+    page_icon="🧬",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-st.set_page_config(page_title="CancerGeneSignatures - Web App", layout="wide")
-
-st.title("Análisis de datos de expresión diferencial por qPCR para identificar firmas génicas y redes de interacción en cánceres específicos")
+st.title("Análisis de datos de expresión diferencial por qPCR")
 st.write(
-    "A partir de datos de qPCR: visualización y redes génicas, sustentadas en evidencia bibliográfica, para profundizar en la comprensión de las vías oncológicas"
+    "De datos de qPCR a redes génicas sustentadas en evidencia bibliográfica "
+    "para profundizar en la comprensión de las vías oncológicas."
 )
 
-# Cargar menú de configuración desde JSON
-def load_menu() -> dict:
-    default = {
+# -----------------------------------------------------------------------------
+# Funciones auxiliares
+# -----------------------------------------------------------------------------
+def _safe_concat(*dfs: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """Une varios DataFrames ignorando los que estén vacíos o None."""
+    parts = [d for d in dfs if d is not None and isinstance(d, pd.DataFrame) and not d.empty]
+    return pd.concat(parts, ignore_index=True).drop_duplicates() if parts else pd.DataFrame()
+
+# -----------------------------------------------------------------------------
+# Logging
+# Configure a basic logger once; use env CGS_LOGLEVEL to override
+if "_log_configured" not in st.session_state:
+    level_name = os.getenv("CGS_LOGLEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(level=level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    st.session_state["_log_configured"] = True
+logger = logging.getLogger("cgs.web_app")
+
+ 
+# -----------------------------------------------------------------------------
+# Menú de configuración (JSON con fallback)
+# -----------------------------------------------------------------------------
+def _default_menu() -> dict:
+    return {
         "version": 1,
         "menu": {
             "cancer_types": ["Breast Cancer", "Melanoma", "Colon Cancer"],
@@ -47,250 +84,257 @@ def load_menu() -> dict:
             ],
         },
     }
+
+@st.cache_data
+def load_menu() -> dict:
+    env_path = os.getenv("CGS_MENU_PATH")
+    if env_path:
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            st.warning("No se pudo cargar menú desde CGS_MENU_PATH; usando valores por defecto.")
+            return _default_menu()
     cfg_path = Path(__file__).parent / "config" / "menu.json"
     try:
         with open(cfg_path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        st.warning("No se pudo cargar web_app/config/menu.json; usando valores por defecto.")
-        return default
+        st.warning("No se encontró config/menu.json; usando valores por defecto.")
+        return _default_menu()
 
 MENU = load_menu()
 
+ 
+
+# -----------------------------------------------------------------------------
+# Sidebar: parámetros de entrada y configuración
+# -----------------------------------------------------------------------------
 with st.sidebar:
-    st.header("1) Datos de entrada")
-    uploaded = st.file_uploader("Archivo (.xlsx, .csv, .tsv)", type=["xlsx", "xls", "csv", "tsv"])
+    st.header("1) Datos de entrada (Excel qPCR)")
+    uploaded = st.file_uploader("Archivo (.xlsx, .xls)", type=["xlsx", "xls"])
     sheet: Optional[str] = None
-    if uploaded is not None and uploaded.name.lower().endswith((".xlsx", "xls")):
-        try:
-            # Leer nombres de hojas (reabrir el buffer cada vez por seguridad)
-            sheets = list_excel_sheets(uploaded)
-            if sheets:
-                sheet = st.selectbox("Hoja de Excel", options=sheets, index=0)
-        except Exception as e:
-            st.warning(f"No se pudieron listar hojas: {e}")
+    if uploaded is not None:
+        uploaded.seek(0)  # Reinicia el buffer
+        if uploaded.name.lower().endswith((".xlsx", ".xls")):
+            try:
+                sheets = list_excel_sheets(uploaded)
+                if sheets:
+                    sheet = st.selectbox("Hoja de Excel", options=sheets, index=0)
+            except Exception as e:
+                st.warning(f"No se pudieron listar hojas: {e}")
 
-    st.header("2) Parámetros")
-    # Transformación numérica local (independiente del dominio)
-    normalization = st.selectbox("Normalización numérica", options=["none", "zscore", "minmax"], index=0)
-    data_format = st.radio(
-        "Formato de datos",
-        options=["Tabla simple", "qPCR (Well/Target Name + CT por muestra)"],
-        index=1,
-    )
-    if data_format.startswith("qPCR"):
-        st.caption("Se intentará detectar encabezados con Well/Target Name y nombres de muestras.")
-        undet_policy = st.selectbox(
-            "Tratamiento de 'Undetermined'",
-            options=["nan", "ctmax", "value"],
-            help="nan: deja como faltante; ctmax: reemplaza por el CT máximo observado de la muestra; value: usar un valor fijo.",
-        )
-        undet_value = st.number_input("Valor fijo para 'value'", value=40.0, step=0.5)
-    else:
-        undet_policy = "nan"
-        undet_value = 40.0
-    # Configuración basada en JSON (no se lee del Excel)
-    st.header("3) Configuración (desde JSON)")
-    cancer_type = st.selectbox("Tipo de cáncer", options=MENU["menu"]["cancer_types"], index=0)
-    context_labels = [c["label"] for c in MENU["menu"]["contexts"]]
-    context_sel_label = st.selectbox("Contexto", options=context_labels, index=0)
-    context_sel = next((c for c in MENU["menu"]["contexts"] if c["label"] == context_sel_label), MENU["menu"]["contexts"][0])
-    norm_labels = [n["label"] for n in MENU["menu"]["normalization_methods"]]
-    norm_sel_label = st.selectbox("Método de normalización (dominio)", options=norm_labels, index=0)
-    norm_sel = next((n for n in MENU["menu"]["normalization_methods"] if n["label"] == norm_sel_label), MENU["menu"]["normalization_methods"][0])
+    st.header("2) Parámetros del estudio")
+    cancer_type = st.selectbox("Tipo de cáncer", MENU["menu"]["cancer_types"], index=0)
+    context_sel_label = st.selectbox("Contexto", [c["label"] for c in MENU["menu"]["contexts"]], index=0)
+    norm_sel_label = st.selectbox("Método preferido", [n["label"] for n in MENU["menu"]["normalization_methods"]], index=1)
+    run_btn = st.button("Procesar archivo", type="primary")
 
-    st.caption("Prefijos para clasificar pruebas en controles/muestras (p. ej., 4GB, 3CG)")
-    pref_ctrl = st.text_input("Prefijo controles", value="")
-    pref_samp = st.text_input("Prefijo muestras", value="")
-
-    id_cols_input = st.text_input(
-        "Columnas ID (opcional, separadas por comas)",
-        value="",
-        help="Ej.: muestra, grupo"
-    )
-    id_columns = [c.strip() for c in id_cols_input.split(",") if c.strip()]
-    run_btn = st.button("Ejecutar análisis", type="primary")
-
-
-def build_results_zip(df_raw: pd.DataFrame, df_proc: pd.DataFrame, analysis,
-                      cfg: Optional[dict] = None,
-                      qpcr_long: Optional[pd.DataFrame] = None,
-                      controles: Optional[pd.DataFrame] = None,
-                      muestras: Optional[pd.DataFrame] = None):
-    mem = io.BytesIO()
-    time_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
-        # Datos
-        z.writestr(f"results_{time_id}/datos_raw.csv", df_raw.to_csv(index=False))
-        z.writestr(f"results_{time_id}/datos_procesados.csv", df_proc.to_csv(index=False))
-        z.writestr(f"results_{time_id}/resumen.csv", analysis.summary.to_csv())
-        z.writestr(f"results_{time_id}/correlacion.csv", analysis.correlation.to_csv())
-        # Config y qPCR
-        if cfg is not None:
-            import json
-            z.writestr(f"results_{time_id}/config.json", json.dumps(cfg, ensure_ascii=False, indent=2))
-        if qpcr_long is not None:
-            z.writestr(f"results_{time_id}/qpcr_long.csv", qpcr_long.to_csv(index=False))
-        if controles is not None and not controles.empty:
-            z.writestr(f"results_{time_id}/controles.csv", controles.to_csv(index=False))
-        if muestras is not None and not muestras.empty:
-            z.writestr(f"results_{time_id}/muestras.csv", muestras.to_csv(index=False))
-    mem.seek(0)
-    return mem, f"resultados_{time_id}.zip"
-
-
-df_loaded: Optional[LoadResult] = None
-if uploaded is not None and (run_btn or st.session_state.get("auto_run", True)):
+# -----------------------------------------------------------------------------
+# Carga de archivo y preprocesamiento
+# -----------------------------------------------------------------------------
+df_loaded: Optional[LoadResult] = st.session_state.get("df_loaded")
+if uploaded is not None and run_btn:
     try:
-        if data_format.startswith("qPCR") and uploaded.name.lower().endswith((".xlsx", "xls")):
-            df_loaded = parse_qpcr_wide(
-                uploaded,
-                sheet_name=sheet,
-                undetermined_policy=undet_policy,
-                undetermined_value=float(undet_value),
-            )
-            # Autocompletar columnas ID típicas del formato qPCR
-            if not id_columns:
-                id_columns = ["Well", "Target Name"]
-        else:
-            df_loaded = load_table(uploaded, file_name=uploaded.name, sheet_name=sheet)
+        uploaded.seek(0)
+        df_loaded = parse_qpcr_wide(uploaded, sheet_name=sheet)
+        logger.info(f"Archivo cargado: name={df_loaded.source_name}, sheet={df_loaded.sheet_name}, shape={df_loaded.df.shape}")
+        # Persistir en sesión para evitar perderlo al enviar el formulario
+        st.session_state["df_loaded"] = df_loaded
     except Exception as e:
         st.error(f"Error al cargar el archivo: {e}")
+        logger.exception("Fallo al cargar archivo")
 
+# -----------------------------------------------------------------------------
+# Vista previa, análisis y gráficas
+# -----------------------------------------------------------------------------
 if df_loaded is not None:
-    st.subheader("Vista previa de datos")
-    st.caption(f"Fuente: {df_loaded.source_name} | Hoja: {df_loaded.sheet_name or '-'} | Forma: {df_loaded.df.shape}")
-    st.dataframe(df_loaded.df.head(20), use_container_width=True)
+    logger.debug("Usando df_loaded desde sesión para renderizado")
+    st.subheader("Vista previa de datos (qPCR)")
+    st.caption(f"Archivo: {df_loaded.source_name} | Hoja: {df_loaded.sheet_name or '-'} | Forma: {df_loaded.df.shape}")
+    st.dataframe(df_loaded.df.head(20))
 
-    cfg = PreprocessConfig(id_columns=id_columns or None, numeric_only=True, normalization=normalization)
+    # Mostrar parámetros elegidos desde menú
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.info(f"Contexto: {context_sel_label}")
+    with c2:
+        st.info(f"Método preferido: {norm_sel_label}")
+    with c3:
+        st.info(f"Tipo cáncer: {cancer_type}")
+
+    # Construir largo y filtrar controles de máquina por defecto
+    long_df = melt_wide_to_long(df_loaded.df)
     try:
-        df_proc = preprocess(df_loaded.df, cfg)
+        long_df = drop_machine_controls(long_df, column="target", controls=["PPC", "RTC"])  # como en el notebook
     except Exception as e:
-        st.error(f"Error en preprocesamiento: {e}")
-        st.stop()
+        st.warning(f"No se pudieron filtrar controles de máquina: {e}")
+        logger.warning(f"No se filtraron controles de máquina: {e}")
 
-    analysis = run_basic_analysis(df_proc)
+    # Resultados de la extracción (análogos al notebook)
+    st.subheader("Resultados de la extracción")
+    try:
+        # Nombres de pruebas (desde meta o columnas)
+        sample_names = []
+        if isinstance(df_loaded.meta, dict):
+            sample_names = df_loaded.meta.get('sample_names') or []
+        if not sample_names:
+            sample_names = [c for c in df_loaded.df.columns if c not in ("Well", "Target Name")]
+        # Genes y pozos desde el dataframe ancho
+        genes_col = df_loaded.df.get('Target Name')
+        genes = [str(g).strip() for g in genes_col.dropna().unique().tolist()] if genes_col is not None else []
+        wells_col = df_loaded.df.get('Well')
+        pozos = [str(w).strip() for w in wells_col.dropna().unique().tolist()] if wells_col is not None else []
 
-    st.subheader("Configuración del proyecto")
-    st.json({
-        "context": {"key": context_sel.get("key"), "label": context_sel.get("label")},
-        "cancer_type": cancer_type,
-        "normalization_method": {"key": norm_sel.get("key"), "label": norm_sel.get("label")},
-        "prefijos": {"controles": pref_ctrl or None, "muestras": pref_samp or None},
-    })
+        st.markdown("- Nombres de las pruebas realizadas")
+        tests_filtered = sample_names[1:] if len(sample_names) > 1 else sample_names
+        st.info(f"Total {len(tests_filtered)}: {', '.join(tests_filtered)}")
+        st.markdown("- Genes objetivo analizados")
+        genes_filtered = [g for g in genes if g]
+        st.info(f"Total {len(genes_filtered)}: {', '.join(genes_filtered)}")
+        st.markdown("- Pozos detectados")
+        st.info(f"Total {len(pozos)}: {', '.join(pozos)}")
+        logger.debug(f"Extracción -> tests={len(sample_names)}, genes={len(genes_filtered)}, pozos={len(pozos)}")
+    except Exception as e:
+        st.warning(f"No se pudo mostrar el resumen de extracción: {e}")
+        logger.warning(f"Fallo en resumen de extracción: {e}")
 
-    st.subheader("Resultados")
-    st.markdown("- Resumen estadístico de variables numéricas\n- Matriz de correlación\n- Clasificación de pruebas (controles vs. muestras)")
-    with st.expander("Resumen (describe)", expanded=True):
-        st.dataframe(analysis.summary, use_container_width=True)
-    with st.expander("Correlación (tabla)", expanded=False):
-        st.dataframe(analysis.correlation, use_container_width=True)
+    # Entrada manual de prefijos y clasificación (formulario con estado persistente)
+    st.subheader("Prefijos (entrada manual)")
+    st.caption("Introduce prefijo de controles y de muestras; se clasifica por coincidencia al inicio del nombre de test")
 
-    st.subheader("Visualizaciones")
-    # Correlación
-    st.plotly_chart(corr_heatmap(analysis.correlation), use_container_width=True)
+    file_key = f"assign_{df_loaded.source_name}:{df_loaded.sheet_name}"
+    state = st.session_state.setdefault(file_key, {})
 
-    # Histograma rápido si hay columnas numéricas
-    num_cols = df_proc.select_dtypes(include=["number"]).columns.tolist()
-    if num_cols:
-        sel_col = st.selectbox("Histograma de columna", options=num_cols)
-        st.plotly_chart(histogram(df_proc, sel_col), use_container_width=True)
+    with st.form(f"prefix_form_{file_key}"):
+        ctrl_prefix = st.text_input("Prefijo controles", value=state.get('ctrl_prefix', ''))
+        samp_prefix = st.text_input("Prefijo muestras", value=state.get('samp_prefix', ''))
+        submitted = st.form_submit_button("Clasificar y calcular")
 
-    # Clasificación qPCR si aplica
-    long_df = None
-    controles_df = None
-    muestras_df = None
-    if data_format.startswith("qPCR"):
-        long_df = melt_wide_to_long(df_loaded.df)
-        # Sugerir prefijos/sufijos a partir de nombres de prueba detectados
-        sample_names = (
-            df_loaded.meta.get("sample_names")
-            if (df_loaded is not None and df_loaded.meta)
-            else [c for c in df_loaded.df.columns if c not in ("Well", "Target Name")]
+    clear_cls = st.button("Limpiar clasificación")
+    if clear_cls:
+        for k in ('ctrl_prefix','samp_prefix','controles_df','muestras_df'):
+            state.pop(k, None)
+        logger.info("Clasificación limpiada por el usuario")
+
+    controles_df = state.get('controles_df', pd.DataFrame())
+    muestras_df = state.get('muestras_df', pd.DataFrame())
+
+    if submitted:
+        if not ctrl_prefix and not samp_prefix:
+            st.warning("Debes ingresar al menos un prefijo (controles o muestras)")
+        pref_ctrl_df, pref_samp_df = classify_by_prefixes(
+            long_df,
+            [ctrl_prefix] if ctrl_prefix else [],
+            [samp_prefix] if samp_prefix else [],
         )
-        aff = suggest_name_affixes(sample_names)
+        state['ctrl_prefix'] = ctrl_prefix
+        state['samp_prefix'] = samp_prefix
+        state['controles_df'] = pref_ctrl_df
+        state['muestras_df'] = pref_samp_df
+        controles_df = pref_ctrl_df
+        muestras_df = pref_samp_df
+        logger.info(f"Clasificación por prefijos manuales: ctrl='{ctrl_prefix}' -> {len(controles_df)} filas, samp='{samp_prefix}' -> {len(muestras_df)} filas")
+        if controles_df.empty or muestras_df.empty:
+            st.warning("Alguna de las categorías resultó vacía. Revisa los prefijos ingresados.")
 
-        st.markdown("### Sugerencias de nombres")
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.caption("Posibles prefijos (frecuentes)")
-            pref_opts = [f"{p} ({n})" for p, n in aff["prefixes"]]
-            sel_ctrl_pref = st.multiselect("Prefijos controles", options=pref_opts, default=[])
-            sel_samp_pref = st.multiselect("Prefijos muestras", options=pref_opts, default=[])
-            def _clean(vals):
-                return [v.split(' (')[0] for v in vals]
-            ctrl_pref_vals = _clean(sel_ctrl_pref)
-            samp_pref_vals = _clean(sel_samp_pref)
-        with col_b:
-            st.caption("Posibles sufijos (frecuentes)")
-            suff_opts = [f"{s} ({n})" for s, n in aff["suffixes"]]
-            sel_ctrl_suff = st.multiselect("Sufijos controles", options=suff_opts, default=[])
-            sel_samp_suff = st.multiselect("Sufijos muestras", options=suff_opts, default=[])
-            def _clean2(vals):
-                return [v.split(' (')[0] for v in vals]
-            ctrl_suff_vals = _clean2(sel_ctrl_suff)
-            samp_suff_vals = _clean2(sel_samp_suff)
-
-        # Combinar entradas manuales y sugeridas
-        ctrl_prefixes = [p for p in [pref_ctrl] if p] + ctrl_pref_vals
-        samp_prefixes = [p for p in [pref_samp] if p] + samp_pref_vals
-        ctrl_suffixes = ctrl_suff_vals
-        samp_suffixes = samp_suff_vals
-
-        # Clasificar por prefijos y/o sufijos
-        by_pref_ctrl, by_pref_samp = classify_by_prefixes(long_df, ctrl_prefixes, samp_prefixes)
-        by_suf_ctrl, by_suf_samp = classify_by_suffixes(long_df, ctrl_suffixes, samp_suffixes)
-        # Unir si se usan ambos métodos
-        import pandas as _pd
-        controles_df = _pd.concat([d for d in [by_pref_ctrl, by_suf_ctrl] if d is not None and not d.empty], ignore_index=True).drop_duplicates() if (not by_pref_ctrl.empty or not by_suf_ctrl.empty) else by_pref_ctrl
-        muestras_df = _pd.concat([d for d in [by_pref_samp, by_suf_samp] if d is not None and not d.empty], ignore_index=True).drop_duplicates() if (not by_pref_samp.empty or not by_suf_samp.empty) else by_pref_samp
-        with st.expander("Controles detectados", expanded=False):
-            if controles_df is not None and not controles_df.empty:
-                st.write(
-                    f"{controles_df['test'].nunique()} pruebas • {controles_df['target'].nunique()} genes"
-                )
-                st.dataframe(controles_df.head(20))
+    st.write("Controles clasificados:", len(controles_df))
+    st.write("Muestras clasificadas:", len(muestras_df))
+    # Resumen de clasificación (análogos al notebook)
+    if not controles_df.empty or not muestras_df.empty:
+        st.subheader("Resumen de clasificación")
+        for tipo, df_tipo in [("Controles", controles_df), ("Muestras", muestras_df)]:
+            if not df_tipo.empty:
+                uniq = df_tipo['test'].astype(str).unique().tolist()
+                st.success(f"{tipo}: {len(uniq)} pruebas → {', '.join(uniq)}")
             else:
-                st.info("No se detectaron controles (verifica el prefijo).")
-        with st.expander("Muestras detectadas", expanded=False):
-            if muestras_df is not None and not muestras_df.empty:
-                st.write(
-                    f"{muestras_df['test'].nunique()} pruebas • {muestras_df['target'].nunique()} genes"
-                )
-                st.dataframe(muestras_df.head(20))
-            else:
-                st.info("No se detectaron muestras (verifica el prefijo).")
+                st.warning(f"No se detectaron {tipo.lower()} con los prefijos actuales.")
 
-    # Descarga
-    cfg_json = {
-        "context": {"key": context_sel.get("key"), "label": context_sel.get("label")},
-        "cancer_type": cancer_type,
-        "normalization_method": {"key": norm_sel.get("key"), "label": norm_sel.get("label")},
-        "prefijos": {"controles": pref_ctrl or None, "muestras": pref_samp or None},
-        "archivo": df_loaded.source_name,
-        "hoja": df_loaded.sheet_name,
-        "normalizacion_numerica": normalization,
-        "menu_version": MENU.get("version"),
-    }
-    mem, name = build_results_zip(
-        df_loaded.df,
-        df_proc,
-        analysis,
-        cfg=cfg_json,
-        qpcr_long=long_df,
-        controles=controles_df,
-        muestras=muestras_df,
-    )
-    st.download_button("Descargar resultados (ZIP)", data=mem, file_name=name, mime="application/zip")
+    extras = {}
+    # Imputación estilo notebook: NaN -> valor máximo global de CT
+    if not controles_df.empty and not muestras_df.empty:
+        import pandas as pd
+        v_max = pd.concat([controles_df['ct'], muestras_df['ct']]).max()
+        # Mensaje informativo del valor máximo usado (estilo notebook)
+        max_str = f"{v_max:.2f}" if pd.notna(v_max) else "NaN"
+        st.info(f"Valor máximo usado para imputación de Ct: {max_str}")
+        controles_df['ct'] = pd.to_numeric(controles_df['ct'], errors='coerce').fillna(v_max)
+        muestras_df['ct'] = pd.to_numeric(muestras_df['ct'], errors='coerce').fillna(v_max)
 
+        # Guardar CSV limpios
+        extras['controles_limpios.csv'] = controles_df.to_csv(index=False)
+        extras['muestras_limpias.csv'] = muestras_df.to_csv(index=False)
 
+        # Calcular Fold Change (promedio y gen de referencia)
+        try:
+            fc = compute_fold_change(controles_df, muestras_df)
+            logger.info(f"FC consolidado shape: {fc.consolidated.shape}")
+            st.subheader("Fold Change y ΔΔCt")
+            m1, m2 = st.columns(2)
+            with m1:
+                st.metric("Gen de referencia (automático)", fc.reference_gene)
+            with m2:
+                st.caption("Elegido por menor desviación estándar promedio")
+
+            with st.expander("Tabla consolidada", expanded=False):
+                st.dataframe(fc.consolidated)
+            st.plotly_chart(fc_comparison_table(fc.consolidated), use_container_width=True)
+
+            import plotly.graph_objects as go
+            fig = go.Figure()
+            x_vals = fc.consolidated['target']
+            fig.add_trace(go.Bar(x=x_vals, y=fc.consolidated['delta_delta_ct_promedio'], name='ΔΔCT (Promedios)', marker_color='#1f77b4', opacity=0.85, yaxis='y'))
+            fig.add_trace(go.Bar(x=x_vals, y=fc.consolidated['delta_delta_ct_gen_ref'], name='ΔΔCT (Gen Ref)', marker_color='#ff7f0e', opacity=0.85, yaxis='y'))
+            fig.add_trace(go.Scatter(x=x_vals, y=fc.consolidated['fold_change_promedio'], name='Fold Change (Promedios)', mode='markers+lines', marker=dict(color='#2ca02c', size=8, symbol='diamond'), line=dict(color='#2ca02c', width=2, dash='dot'), yaxis='y2'))
+            fig.add_trace(go.Scatter(x=x_vals, y=fc.consolidated['fold_change_gen_ref'], name='Fold Change (Gen Ref)', mode='markers+lines', marker=dict(color='#d62728', size=8, symbol='diamond'), line=dict(color='#d62728', width=2, dash='dot'), yaxis='y2'))
+            fig.update_layout(
+                title=dict(text='Análisis comparativo de métodos de cálculo', x=0.5),
+                template='plotly_white', barmode='group',
+                yaxis=dict(title='ΔΔCT', showgrid=True, gridcolor='lightgray'),
+                yaxis2=dict(title='Fold Change (log)', overlaying='y', side='right', type='log', showgrid=False),
+                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+                height=600, margin=dict(b=80, t=80, l=60, r=60)
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Clasificación por nivel de expresión (por método preferido del menú)
+            st.subheader("Clasificación por nivel de expresión")
+            default_idx = 1 if norm_sel_label == 'gen de referencia' else 0
+            fc_source = st.radio("Fuente de Fold Change", ["promedios", "gen de referencia"], horizontal=True, index=default_idx)
+            use_col = 'fold_change_promedio' if fc_source == 'promedios' else 'fold_change_gen_ref'
+            df_expr = fc.consolidated[['target', use_col]].rename(columns={use_col: 'fold_change'}).copy()
+            df_expr['nivel_expresion'] = pd.cut(
+                df_expr['fold_change'],
+                bins=[-float('inf'), 1.0, 2.0, float('inf')],
+                labels=['subexpresado', 'estable', 'sobreexpresado'],
+                right=False,
+            )
+            cexp1, cexp2 = st.columns(2)
+            with cexp1:
+                st.dataframe(df_expr)
+            with cexp2:
+                import plotly.express as px
+                order_levels = ['estable', 'subexpresado', 'sobreexpresado']
+                counts = df_expr['nivel_expresion'].value_counts().reindex(order_levels, fill_value=0)
+                bar = px.bar(x=counts.index, y=counts.values, labels={'x': 'Nivel de expresión', 'y': 'Frecuencia'}, title='Distribución de niveles de expresión')
+                st.plotly_chart(bar, use_container_width=True)
+
+            extras['fold_change_consolidado.csv'] = fc.consolidated.to_csv(index=False)
+            extras['expresion_categorizada.csv'] = df_expr.to_csv(index=False)
+        except Exception as e:
+            st.error(f"Error calculando Fold Change: {e}")
+
+    # (Opcional) Puedes exportar manualmente desde cada tabla mostrada en pantalla.
+
+# -----------------------------------------------------------------------------
+# Guía rápida
+# -----------------------------------------------------------------------------
 st.markdown("---")
-st.markdown(
-    """
-    Sugerencias de uso:
-    1. Sube un archivo Excel (elige la hoja) o CSV/TSV.
-    2. Opcionalmente indica columnas ID (no numéricas) separadas por coma.
-    3. Elige la normalización y ejecuta el análisis.
-    4. Revisa tablas y gráficas; descarga resultados en ZIP.
-    """
-)
+st.markdown("""
+**Cómo usar la aplicación**
+1. Sube un archivo Excel (.xlsx/.xls) con formato qPCR y elige la hoja.
+2. Selecciona parámetros del estudio desde el menú (contexto, tipo de cáncer, método preferido).
+3. Ingresa manualmente los prefijos de controles y muestras y presiona "Clasificar y calcular".
+4. Revisa Fold Change (promedios vs gen de referencia), gráficas y la clasificación por nivel de expresión.
+5. Exporta desde los widgets (descarga en cada tabla/gráfico) según necesidad.
+""")
