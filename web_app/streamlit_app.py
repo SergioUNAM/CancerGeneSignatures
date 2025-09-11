@@ -847,6 +847,10 @@ if df_loaded is not None:
                 if df_sigs is None or df_sigs.empty:
                     st.info("No se generaron firmas para los datos disponibles.")
                 else:
+                    try:
+                        st.session_state["df_signatures"] = df_sigs.copy()
+                    except Exception:
+                        pass
                     st.success(f"Firmas generadas: {len(df_sigs)} filas")
                     # Vista segura para Streamlit/Arrow: convertir columnas *_genes (listas) a string
                     df_sigs_display = df_sigs.copy()
@@ -866,58 +870,64 @@ if df_loaded is not None:
                         use_container_width=True,
                     )
 
-                    # Visualización rápida: Sunburst por tipo seleccionado
-                    tipos = sorted(df_sigs['cancer_type'].dropna().astype(str).unique().tolist())
-                    sel_tipo = st.selectbox("Tipo de cáncer para visualizar", tipos, index=0 if tipos else None)
-                    if sel_tipo:
-                        try:
-                            import plotly.express as px
-                            # construir registros planos: por nivel, gene y hallmark presentes
-                            recs = []
-                            for _, row in df_sigs[df_sigs['cancer_type'] == sel_tipo].iterrows():
-                                nivel = row.get('nivel_expresion')
-                                genes_firma = row.get('genes', []) if isinstance(row.get('genes'), list) else []
-                                counts_firma = row.get('conteo_articulos_por_gene', []) if isinstance(row.get('conteo_articulos_por_gene'), list) else []
-                                gene_to_count = dict(zip(genes_firma, counts_firma))
-                                # detectar columnas hallmark
-                                for col in row.index:
-                                    if col.startswith('hallmark_') and col.endswith('_genes'):
-                                        term = col[len('hallmark_'):-len('_genes')]
-                                        genes_hm = row[col] if isinstance(row[col], list) else []
-                                        pval_col = f"hallmark_{term}_pvalue"
-                                        pval = row.get(pval_col, None)
-                                        for g in genes_hm:
-                                            recs.append({
-                                                'nivel_expresion': nivel,
-                                                'gene': g,
-                                                'hallmark': term.replace('HALLMARK_', '').replace('_', ' '),
-                                                'articles': gene_to_count.get(g, 0),
-                                                'pvalue': pval if pd.notna(pval) else 1.0,
-                                            })
-                            if recs:
-                                flat = pd.DataFrame(recs)
-                                flat['log_p'] = -np.log10(flat['pvalue'].replace(0, 1e-300))
-                                tabs = st.tabs([f"{lvl}" for lvl in sorted(flat['nivel_expresion'].dropna().unique().tolist())])
-                                for lvl, tab in zip(sorted(flat['nivel_expresion'].dropna().unique().tolist()), tabs):
-                                    with tab:
-                                        d = flat[flat['nivel_expresion'] == lvl]
-                                        if d.empty:
-                                            st.info("Sin datos para este nivel.")
-                                            continue
-                                        # Sunburst gene -> hallmark
-                                        fig = px.sunburst(
-                                            d,
-                                            path=['gene', 'hallmark'],
-                                            values='articles',
-                                            color='log_p',
-                                            color_continuous_scale='RdBu_r',
-                                            title=f"Firmas - {sel_tipo} - {lvl}",
-                                        )
-                                        st.plotly_chart(fig, use_container_width=True)
-                        except Exception as e:
-                            st.warning(f"No se pudo renderizar la visualización de firmas: {e}")
+                    # Visualización se realiza debajo usando datos en sesión
             except Exception as e:
                 st.error(f"No se pudieron generar las firmas: {e}")
+
+        # Visualización: disponible siempre que existan firmas en sesión
+        df_sigs_viz = st.session_state.get("df_signatures")
+        if isinstance(df_sigs_viz, pd.DataFrame) and not df_sigs_viz.empty:
+            st.subheader("Visualización de firmas")
+            tipos = sorted(df_sigs_viz['cancer_type'].dropna().astype(str).unique().tolist())
+            sel_tipo = st.selectbox("Tipo de cáncer para visualizar", tipos, index=0 if tipos else None, key="sig_tipo")
+            if sel_tipo:
+                try:
+                    import plotly.express as px
+                    recs = []
+                    for _, row in df_sigs_viz[df_sigs_viz['cancer_type'] == sel_tipo].iterrows():
+                        nivel = row.get('nivel_expresion')
+                        genes_firma = row.get('genes', []) if isinstance(row.get('genes'), list) else []
+                        counts_firma = row.get('conteo_articulos_por_gene', []) if isinstance(row.get('conteo_articulos_por_gene'), list) else []
+                        gene_to_count = dict(zip(genes_firma, counts_firma))
+                        for col in row.index:
+                            if col.startswith('hallmark_') and col.endswith('_genes'):
+                                term = col[len('hallmark_'):-len('_genes')]
+                                genes_hm = row[col] if isinstance(row[col], list) else []
+                                pval_col = f"hallmark_{term}_pvalue"
+                                pval = row.get(pval_col, None)
+                                for g in genes_hm:
+                                    recs.append({
+                                        'nivel_expresion': nivel,
+                                        'gene': g,
+                                        'hallmark': term.replace('HALLMARK_', '').replace('_', ' '),
+                                        'articles': gene_to_count.get(g, 0),
+                                        'pvalue': pval if pd.notna(pval) else 1.0,
+                                    })
+                    if not recs:
+                        st.info("No hay hallmarks asociados para este tipo de cáncer.")
+                    else:
+                        flat = pd.DataFrame(recs)
+                        flat['log_p'] = -np.log10(flat['pvalue'].replace(0, 1e-300))
+                        levels_sorted = sorted(flat['nivel_expresion'].dropna().unique().tolist())
+                        tabs = st.tabs([f"{lvl}" for lvl in levels_sorted])
+                        for lvl, tab in zip(levels_sorted, tabs):
+                            with tab:
+                                d = flat[flat['nivel_expresion'] == lvl]
+                                if d.empty:
+                                    st.info("Sin datos para este nivel.")
+                                    continue
+                                fig = px.sunburst(
+                                    d,
+                                    path=['gene', 'hallmark'],
+                                    values='articles',
+                                    color='log_p',
+                                    color_continuous_scale='RdBu_r',
+                                    title=f"Firmas - {sel_tipo} - {lvl}",
+                                )
+                                fig.update_layout(height=800, margin=dict(t=60, b=20, l=20, r=20))
+                                st.plotly_chart(fig, use_container_width=True)
+                except Exception as e:
+                    st.warning(f"No se pudo renderizar la visualización de firmas: {e}")
 
 
 # -----------------------------------------------------------------------------
