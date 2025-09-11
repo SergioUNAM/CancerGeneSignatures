@@ -19,6 +19,7 @@ from typing import Optional
 import logging
 
 import pandas as pd
+import numpy as np
 import streamlit as st
 
 # Ensure project root is importable so `src.*` works when running from web_app/
@@ -847,7 +848,15 @@ if df_loaded is not None:
                     st.info("No se generaron firmas para los datos disponibles.")
                 else:
                     st.success(f"Firmas generadas: {len(df_sigs)} filas")
-                    st.dataframe(df_sigs)
+                    # Vista segura para Streamlit/Arrow: convertir columnas *_genes (listas) a string
+                    df_sigs_display = df_sigs.copy()
+                    try:
+                        list_cols = [c for c in df_sigs_display.columns if c.startswith('hallmark_') and c.endswith('_genes')]
+                        for c in list_cols:
+                            df_sigs_display[c] = df_sigs_display[c].apply(lambda v: ", ".join(v) if isinstance(v, list) else (str(v) if pd.notna(v) else ""))
+                    except Exception:
+                        pass
+                    st.dataframe(df_sigs_display)
                     # Descarga CSV
                     st.download_button(
                         label="Descargar firmas (CSV)",
@@ -907,6 +916,8 @@ if df_loaded is not None:
                                         st.plotly_chart(fig, use_container_width=True)
                         except Exception as e:
                             st.warning(f"No se pudo renderizar la visualización de firmas: {e}")
+            except Exception as e:
+                st.error(f"No se pudieron generar las firmas: {e}")
 
 
 # -----------------------------------------------------------------------------

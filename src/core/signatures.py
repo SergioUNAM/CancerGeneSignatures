@@ -150,9 +150,8 @@ def create_signatures(
 
     result = pd.DataFrame(rows)
     if not result.empty:
-        # fill NaN in hallmark pvalues to 0 (for ML friendliness)
-        hm_cols = [c for c in result.columns if c.startswith("hallmark_")]
-        if hm_cols:
-            result[hm_cols] = result[hm_cols].fillna(0)
+        # fill NaN only in pvalue columns to 0; keep *_genes as lists to avoid mixing types
+        pval_cols = [c for c in result.columns if c.startswith("hallmark_") and c.endswith("_pvalue")]
+        if pval_cols:
+            result[pval_cols] = result[pval_cols].fillna(0)
     return result
-
