@@ -816,27 +816,61 @@ if df_loaded is not None:
         bib_class = classified.copy()
         st.session_state["bibliografia_clasificada"] = bib_class
 
-    if bib_class is None or bib_class.empty:
-        st.info("Ejecuta primero la sección 'Bibliografía (PubMed)' y clasificación para habilitar firmas. O bien, sube un CSV clasificado.")
-        uploaded_bib = st.file_uploader("Opcional: subir bibliografía clasificada (CSV)", type=["csv"])
-        if uploaded_bib is not None:
-            try:
-                bib_class = pd.read_csv(uploaded_bib)
-                st.session_state["bibliografia_clasificada"] = bib_class
-                st.success("Bibliografía cargada correctamente.")
-            except Exception as e:
-                st.error(f"No se pudo leer el CSV: {e}")
+    # Controles unificados (siempre visibles). El botón se desactiva si falta bibliografía.
+    ready_bib = isinstance(bib_class, pd.DataFrame) and not bib_class.empty
+    if not ready_bib:
+        st.info("Ejecuta primero 'Bibliografía (PubMed)' y clasificación, o sube un CSV clasificado.")
+    uploaded_bib = st.file_uploader("Opcional: subir bibliografía clasificada (CSV)", type=["csv"], key="upl_bib_class")
+    if uploaded_bib is not None:
+        try:
+            bib_class = pd.read_csv(uploaded_bib)
+            st.session_state["bibliografia_clasificada"] = bib_class
+            ready_bib = True
+            st.success("Bibliografía cargada correctamente.")
+        except Exception as e:
+            st.error(f"No se pudo leer el CSV: {e}")
 
-    if bib_class is not None and not bib_class.empty:
-        c1, c2, c3 = st.columns([2, 2, 2])
-        with c1:
-            hall_gmt = st.text_input("Ruta GMT Hallmarks", value=str(_PROJ_ROOT / "gen-sets_GSEA_MSigDB/gsea_hallmarks_formatted.gmt"))
-        with c2:
-            back_gmt = st.text_input("Ruta GMT background (opcional)", value=str(_PROJ_ROOT / "gen-sets_GSEA_MSigDB/C5- ontology gene sets.gmt"))
-        with c3:
-            ctx = st.selectbox("Contexto biológico", ["Cáncer y TEM", "Cáncer y micro RNAs"], index=0)
+    import os as _os
+    def_hall = str(_PROJ_ROOT / "gen-sets_GSEA_MSigDB/gsea_hallmarks_formatted.gmt")
+    def_back = str(_PROJ_ROOT / "gen-sets_GSEA_MSigDB/C5- ontology gene sets.gmt")
+    hall_gmt = st.session_state.get("hall_gmt_path", def_hall)
+    back_gmt = st.session_state.get("back_gmt_path", def_back)
 
-        run_sig = st.button("Generar firmas")
+    c1, c2, c3 = st.columns([2, 2, 2])
+    with c1:
+        hall_gmt = st.text_input("Ruta GMT Hallmarks", value=hall_gmt)
+        st.session_state["hall_gmt_path"] = hall_gmt
+        if not _os.path.exists(hall_gmt):
+            upl = st.file_uploader("Subir GMT de Hallmarks", type=["gmt"], key="upl_hallmark_gmt")
+            if upl is not None:
+                try:
+                    tmp_path = str(_PROJ_ROOT / "gen-sets_GSEA_MSigDB/_uploaded_hallmarks.gmt")
+                    with open(tmp_path, "wb") as fh:
+                        fh.write(upl.getbuffer())
+                    hall_gmt = tmp_path
+                    st.session_state["hall_gmt_path"] = hall_gmt
+                    st.success("Hallmarks GMT cargado.")
+                except Exception as e:
+                    st.error(f"No se pudo guardar el GMT de Hallmarks: {e}")
+    with c2:
+        back_gmt = st.text_input("Ruta GMT background (opcional)", value=back_gmt)
+        st.session_state["back_gmt_path"] = back_gmt
+        if back_gmt and not _os.path.exists(back_gmt):
+            upl_b = st.file_uploader("Subir GMT de background (opcional)", type=["gmt"], key="upl_back_gmt")
+            if upl_b is not None:
+                try:
+                    tmp_path_b = str(_PROJ_ROOT / "gen-sets_GSEA_MSigDB/_uploaded_background.gmt")
+                    with open(tmp_path_b, "wb") as fh:
+                        fh.write(upl_b.getbuffer())
+                    back_gmt = tmp_path_b
+                    st.session_state["back_gmt_path"] = back_gmt
+                    st.success("Background GMT cargado.")
+                except Exception as e:
+                    st.error(f"No se pudo guardar el GMT de background: {e}")
+    with c3:
+        ctx = st.selectbox("Contexto biológico", ["Cáncer y TEM", "Cáncer y micro RNAs"], index=0, key="sig_ctx")
+
+    run_sig = st.button("Generar firmas", disabled=not ready_bib, key="btn_run_signatures")
 
         if run_sig:
             try:
