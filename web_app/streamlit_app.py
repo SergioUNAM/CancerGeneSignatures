@@ -59,6 +59,9 @@ from src.core.bibliography import (
     classify_bibliography,
     aggregate_counts_by_level_and_cancer,
 )
+from src.core.signatures import (
+    create_signatures,
+)
 
 # Hot-reload STRING enrichment helpers during dev
 try:
@@ -741,6 +744,10 @@ if df_loaded is not None:
                     st.markdown("### Clasificación por tipo de cáncer y contexto")
                     try:
                         classified = classify_bibliography(bib2)
+                        try:
+                            st.session_state["bibliografia_clasificada"] = classified.copy()
+                        except Exception:
+                            pass
                         st.dataframe(classified.head(50))
                         st.download_button(
                             label="Descargar bibliografía clasificada (CSV)",
@@ -794,6 +801,113 @@ if df_loaded is not None:
                 )
 
     # (Opcional) Puedes exportar manualmente desde cada tabla mostrada en pantalla.
+
+    # -------------------------------------------------------------------------
+    # Firmas genéticas (a partir de bibliografía clasificada)
+    # -------------------------------------------------------------------------
+    st.markdown("---")
+    st.header("Firmas genéticas")
+    st.caption("Genera firmas por tipo de cáncer y nivel, con enriquecimiento de Hallmarks (MSigDB). Requiere gseapy y acceso a los GMT locales.")
+
+    # Intentar recuperar bibliografía clasificada de esta sesión
+    bib_class = st.session_state.get("bibliografia_clasificada")
+    if 'classified' in locals() and isinstance(classified, pd.DataFrame) and not classified.empty:
+        bib_class = classified.copy()
+        st.session_state["bibliografia_clasificada"] = bib_class
+
+    if bib_class is None or bib_class.empty:
+        st.info("Ejecuta primero la sección 'Bibliografía (PubMed)' y clasificación para habilitar firmas. O bien, sube un CSV clasificado.")
+        uploaded_bib = st.file_uploader("Opcional: subir bibliografía clasificada (CSV)", type=["csv"])
+        if uploaded_bib is not None:
+            try:
+                bib_class = pd.read_csv(uploaded_bib)
+                st.session_state["bibliografia_clasificada"] = bib_class
+                st.success("Bibliografía cargada correctamente.")
+            except Exception as e:
+                st.error(f"No se pudo leer el CSV: {e}")
+
+    if bib_class is not None and not bib_class.empty:
+        c1, c2, c3 = st.columns([2, 2, 2])
+        with c1:
+            hall_gmt = st.text_input("Ruta GMT Hallmarks", value=str(_PROJ_ROOT / "gen-sets_GSEA_MSigDB/gsea_hallmarks_formatted.gmt"))
+        with c2:
+            back_gmt = st.text_input("Ruta GMT background (opcional)", value=str(_PROJ_ROOT / "gen-sets_GSEA_MSigDB/C5- ontology gene sets.gmt"))
+        with c3:
+            ctx = st.selectbox("Contexto biológico", ["Cáncer y TEM", "Cáncer y micro RNAs"], index=0)
+
+        run_sig = st.button("Generar firmas")
+
+        if run_sig:
+            try:
+                from src.core.signatures import HallmarkConfig
+                cfg = HallmarkConfig(hallmark_gmt=hall_gmt, background_gmt=back_gmt)
+                with st.spinner("Calculando firmas (incluye enriquecimiento de Hallmarks)…"):
+                    df_sigs = create_signatures(bib_class, contexto_biologico=ctx, hallmark_cfg=cfg)
+                if df_sigs is None or df_sigs.empty:
+                    st.info("No se generaron firmas para los datos disponibles.")
+                else:
+                    st.success(f"Firmas generadas: {len(df_sigs)} filas")
+                    st.dataframe(df_sigs)
+                    # Descarga CSV
+                    st.download_button(
+                        label="Descargar firmas (CSV)",
+                        data=df_sigs.to_csv(index=False),
+                        file_name="firmas_geneticas.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                    )
+
+                    # Visualización rápida: Sunburst por tipo seleccionado
+                    tipos = sorted(df_sigs['cancer_type'].dropna().astype(str).unique().tolist())
+                    sel_tipo = st.selectbox("Tipo de cáncer para visualizar", tipos, index=0 if tipos else None)
+                    if sel_tipo:
+                        try:
+                            import plotly.express as px
+                            # construir registros planos: por nivel, gene y hallmark presentes
+                            recs = []
+                            for _, row in df_sigs[df_sigs['cancer_type'] == sel_tipo].iterrows():
+                                nivel = row.get('nivel_expresion')
+                                genes_firma = row.get('genes', []) if isinstance(row.get('genes'), list) else []
+                                counts_firma = row.get('conteo_articulos_por_gene', []) if isinstance(row.get('conteo_articulos_por_gene'), list) else []
+                                gene_to_count = dict(zip(genes_firma, counts_firma))
+                                # detectar columnas hallmark
+                                for col in row.index:
+                                    if col.startswith('hallmark_') and col.endswith('_genes'):
+                                        term = col[len('hallmark_'):-len('_genes')]
+                                        genes_hm = row[col] if isinstance(row[col], list) else []
+                                        pval_col = f"hallmark_{term}_pvalue"
+                                        pval = row.get(pval_col, None)
+                                        for g in genes_hm:
+                                            recs.append({
+                                                'nivel_expresion': nivel,
+                                                'gene': g,
+                                                'hallmark': term.replace('HALLMARK_', '').replace('_', ' '),
+                                                'articles': gene_to_count.get(g, 0),
+                                                'pvalue': pval if pd.notna(pval) else 1.0,
+                                            })
+                            if recs:
+                                flat = pd.DataFrame(recs)
+                                flat['log_p'] = -np.log10(flat['pvalue'].replace(0, 1e-300))
+                                tabs = st.tabs([f"{lvl}" for lvl in sorted(flat['nivel_expresion'].dropna().unique().tolist())])
+                                for lvl, tab in zip(sorted(flat['nivel_expresion'].dropna().unique().tolist()), tabs):
+                                    with tab:
+                                        d = flat[flat['nivel_expresion'] == lvl]
+                                        if d.empty:
+                                            st.info("Sin datos para este nivel.")
+                                            continue
+                                        # Sunburst gene -> hallmark
+                                        fig = px.sunburst(
+                                            d,
+                                            path=['gene', 'hallmark'],
+                                            values='articles',
+                                            color='log_p',
+                                            color_continuous_scale='RdBu_r',
+                                            title=f"Firmas - {sel_tipo} - {lvl}",
+                                        )
+                                        st.plotly_chart(fig, use_container_width=True)
+                        except Exception as e:
+                            st.warning(f"No se pudo renderizar la visualización de firmas: {e}")
+
 
 # -----------------------------------------------------------------------------
 # Guía rápida

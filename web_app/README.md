@@ -23,6 +23,7 @@ Flujo
 - Anotación Ensembl (IDs/descripciones) y descarga de resultados.
 - Enriquecimiento STRING por nivel de expresión (GO/KEGG/Reactome), filtros y descargas.
 - Bibliografía (PubMed): ingresa tu NCBI Email (obligatorio) y API Key (opcional) directamente en la sección. La app mostrará progreso por gen, tablas y gráficos, y permitirá descargar CSV.
+- Firmas genéticas: genera firmas por tipo de cáncer/nivel desde la bibliografía clasificada y enriquece Hallmarks (MSigDB). Incluye visualización Sunburst y descarga CSV. Requiere `gseapy` y archivos GMT locales (ruta por defecto en `gen-sets_GSEA_MSigDB/`).
 
 Notas
 - La app lee `web_app/config/menu.json` para los parámetros (contexto, tipo de cáncer, método preferido).

@@ -65,6 +65,12 @@ Fecha: 2025-09-10
     - Dependencia agregada: `biopython` (para Entrez/Medline).
   - Logging y trazabilidad:
     - Logs informativos en puntos largos: anotación Ensembl, enriquecimiento STRING y búsqueda PubMed (inicio/fin, conteos). Se controla por `CGS_LOGLEVEL` (INFO por defecto).
+ - 2025-09-11
+  - Firmas genéticas (MVP) en la web app:
+    - Nuevo módulo `src/core/signatures.py` para construir firmas desde bibliografía clasificada y enriquecimiento Hallmarks.
+    - Sección "Firmas genéticas" en la app: selección de GMTs, generación de DataFrame y descarga CSV.
+    - Visualización básica con sunburst por gen→hallmark y color por -log10(p), separado por nivel de expresión.
+    - Requiere `gseapy` (añadido a requirements).
 
 **Ramas**
 - `master`: actualizado con descargas CSV, clasificación case-insensitive y fix de importaciones.
