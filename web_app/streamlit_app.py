@@ -64,6 +64,27 @@ from src.core.signatures import (
     create_signatures,
 )
 
+# Cache de firmas para evitar recomputar al cambiar solo la selección visual
+import hashlib
+@st.cache_data(show_spinner=False)
+def _compute_signatures_cached(bib_csv: str, ctx: str, hall_gmt: str, back_gmt: str, sel_tipo: str) -> pd.DataFrame:
+    try:
+        df_bib = pd.read_csv(io.StringIO(bib_csv))
+    except Exception:
+        return pd.DataFrame()
+    from src.core.signatures import HallmarkConfig
+    cfg = HallmarkConfig(hallmark_gmt=hall_gmt, background_gmt=back_gmt)
+    return create_signatures(df_bib, contexto_biologico=ctx, hallmark_cfg=cfg)
+
+# Cache de anotación Ensembl (evitar llamadas repetidas a red en cada rerun)
+@st.cache_data(show_spinner=False)
+def _annotate_ensembl_cached(df_csv: str, max_workers: int = 3) -> pd.DataFrame:
+    try:
+        df_in = pd.read_csv(io.StringIO(df_csv))
+    except Exception:
+        return pd.DataFrame()
+    return add_ensembl_info_batch(df_in, symbol_col='target', max_workers=max_workers)
+
 # Hot-reload STRING enrichment helpers during dev
 try:
     import importlib as _importlib
@@ -430,19 +451,41 @@ if df_loaded is not None:
 
             try:
                 df_to_annot = df_expr[['target', 'nivel_expresion', 'fold_change']].drop_duplicates(subset=['target']).reset_index(drop=True)
-                logger.info(f"Ensembl: anotando {len(df_to_annot)} genes (max_workers=3)")
-                with st.spinner("Consultando Ensembl…"):
-                    ensembl_df = add_ensembl_info_batch(df_to_annot, symbol_col='target', max_workers=3)
-                desc_series = ensembl_df['description'].fillna('').astype(str).str.strip()
-                ensembl_df['has_desc'] = desc_series.ne('') & desc_series.ne('No description')
-                extras['ensembl_anotado.csv'] = ensembl_df.to_csv(index=False)
-                try:
-                    encontrados = int((ensembl_df['ensembl_id'] != 'Not found').sum())
-                    logger.info(f"Ensembl: completado. IDs encontrados {encontrados}/{len(ensembl_df)}")
-                except Exception:
-                    pass
+                # Clave estable por lista de genes
+                genes_key = ",".join(sorted(df_to_annot['target'].dropna().astype(str).unique().tolist()))
+                ensembl_state_key = st.session_state.get('ensembl_key')
+                ensembl_state_df = st.session_state.get('ensembl_df')
 
-                tab_resumen, tab_explorar, tab_enlaces = st.tabs(["Resumen", "Explorar", "Enlaces"])
+                cols = st.columns([1,1,2])
+                with cols[0]:
+                    need_compute = not (ensembl_state_key == genes_key and isinstance(ensembl_state_df, pd.DataFrame) and not ensembl_state_df.empty)
+                    if need_compute:
+                        if st.button("Anotar Ensembl", key="btn_annot_ens"):
+                            with st.spinner("Consultando Ensembl…"):
+                                ensembl_df = _annotate_ensembl_cached(df_to_annot[['target','nivel_expresion','fold_change']].sort_values('target').to_csv(index=False), max_workers=3)
+                            st.session_state['ensembl_df'] = ensembl_df.copy()
+                            st.session_state['ensembl_key'] = genes_key
+                    else:
+                        st.success("Usando anotación en caché para esta lista de genes.")
+                        if st.button("Recalcular", key="btn_recalc_ens"):
+                            with st.spinner("Consultando Ensembl…"):
+                                ensembl_df = _annotate_ensembl_cached(df_to_annot[['target','nivel_expresion','fold_change']].sort_values('target').to_csv(index=False), max_workers=3)
+                            st.session_state['ensembl_df'] = ensembl_df.copy()
+                            st.session_state['ensembl_key'] = genes_key
+
+                # Obtener df desde sesión si existe
+                ensembl_df = st.session_state.get('ensembl_df')
+                if isinstance(ensembl_df, pd.DataFrame) and not ensembl_df.empty:
+                    desc_series = ensembl_df['description'].fillna('').astype(str).str.strip()
+                    ensembl_df['has_desc'] = desc_series.ne('') & desc_series.ne('No description')
+                    extras['ensembl_anotado.csv'] = ensembl_df.to_csv(index=False)
+                    try:
+                        encontrados = int((ensembl_df['ensembl_id'] != 'Not found').sum())
+                        logger.info(f"Ensembl: completado. IDs encontrados {encontrados}/{len(ensembl_df)}")
+                    except Exception:
+                        pass
+
+                    tab_resumen, tab_explorar, tab_enlaces = st.tabs(["Resumen", "Explorar", "Enlaces"])
 
                 # Resumen: métricas y gráfico de calidad de anotación por nivel de expresión
                 with tab_resumen:
@@ -500,18 +543,21 @@ if df_loaded is not None:
 
                 # Enlaces: listado con links a Ensembl y descripciones legibles
                 with tab_enlaces:
-                    st.caption("Navega por enlaces directos a Ensembl (máx. 100 primeros)")
-                    subset = ensembl_df.copy().head(100)
-                    for _, row in subset.iterrows():
-                        gene = str(row['target'])
-                        eid = str(row['ensembl_id'])
-                        desc = str(row['description'])
-                        lvl = str(row['nivel_expresion'])
-                        url = f"https://www.ensembl.org/Homo_sapiens/Gene/Summary?g={eid}" if eid and eid != 'Not found' else None
-                        if url:
-                            st.markdown(f"- [{gene}]({url}) · {lvl} — {desc}")
-                        else:
-                            st.markdown(f"- {gene} · {lvl} — {desc}")
+                    if isinstance(ensembl_df, pd.DataFrame) and not ensembl_df.empty:
+                        st.caption("Navega por enlaces directos a Ensembl (máx. 100 primeros)")
+                        subset = ensembl_df.copy().head(100)
+                        for _, row in subset.iterrows():
+                            gene = str(row['target'])
+                            eid = str(row['ensembl_id'])
+                            desc = str(row['description'])
+                            lvl = str(row['nivel_expresion'])
+                            url = f"https://www.ensembl.org/Homo_sapiens/Gene/Summary?g={eid}" if eid and eid != 'Not found' else None
+                            if url:
+                                st.markdown(f"- [{gene}]({url}) · {lvl} — {desc}")
+                            else:
+                                st.markdown(f"- {gene} · {lvl} — {desc}")
+                    else:
+                        st.info("Genera la anotación para ver enlaces.")
 
             except Exception as e:
                 st.warning(f"No se pudo anotar con Ensembl: {e}")
@@ -870,50 +916,54 @@ if df_loaded is not None:
     with c3:
         ctx = st.selectbox("Contexto biológico", ["Cáncer y TEM", "Cáncer y micro RNAs"], index=0, key="sig_ctx")
 
+    # Selección de tipo de cáncer (previa a generación)
+    # Usar el tipo de cáncer definido en los parámetros del estudio
+    sel_tipo_gen = cancer_type
+    st.caption(f"Tipo de cáncer (parámetros del estudio): {sel_tipo_gen}")
+
     run_sig = st.button("Generar firmas", disabled=not ready_bib, key="btn_run_signatures")
 
-        if run_sig:
-            try:
-                from src.core.signatures import HallmarkConfig
-                cfg = HallmarkConfig(hallmark_gmt=hall_gmt, background_gmt=back_gmt)
-                with st.spinner("Calculando firmas (incluye enriquecimiento de Hallmarks)…"):
-                    df_sigs = create_signatures(bib_class, contexto_biologico=ctx, hallmark_cfg=cfg)
-                if df_sigs is None or df_sigs.empty:
-                    st.info("No se generaron firmas para los datos disponibles.")
-                else:
-                    try:
-                        st.session_state["df_signatures"] = df_sigs.copy()
-                    except Exception:
-                        pass
-                    st.success(f"Firmas generadas: {len(df_sigs)} filas")
-                    # Vista segura para Streamlit/Arrow: convertir columnas *_genes (listas) a string
-                    df_sigs_display = df_sigs.copy()
-                    try:
-                        list_cols = [c for c in df_sigs_display.columns if c.startswith('hallmark_') and c.endswith('_genes')]
-                        for c in list_cols:
-                            df_sigs_display[c] = df_sigs_display[c].apply(lambda v: ", ".join(v) if isinstance(v, list) else (str(v) if pd.notna(v) else ""))
-                    except Exception:
-                        pass
-                    st.dataframe(df_sigs_display)
-                    # Descarga CSV
-                    st.download_button(
-                        label="Descargar firmas (CSV)",
-                        data=df_sigs.to_csv(index=False),
-                        file_name="firmas_geneticas.csv",
-                        mime="text/csv",
-                        use_container_width=True,
-                    )
+    if run_sig:
+        try:
+            with st.spinner("Calculando firmas (incluye enriquecimiento de Hallmarks)…"):
+                bib_csv = bib_class.to_csv(index=False)
+                df_sigs = _compute_signatures_cached(bib_csv, ctx, hall_gmt, back_gmt, sel_tipo_gen or "")
+            if df_sigs is None or df_sigs.empty:
+                st.info("No se generaron firmas para los datos disponibles.")
+            else:
+                try:
+                    st.session_state["df_signatures"] = df_sigs.copy()
+                except Exception:
+                    pass
+                st.success(f"Firmas generadas: {len(df_sigs)} filas")
+                # Vista segura para Streamlit/Arrow: convertir columnas *_genes (listas) a string
+                df_sigs_display = df_sigs.copy()
+                try:
+                    list_cols = [c for c in df_sigs_display.columns if c.startswith('hallmark_') and c.endswith('_genes')]
+                    for c in list_cols:
+                        df_sigs_display[c] = df_sigs_display[c].apply(lambda v: ", ".join(v) if isinstance(v, list) else (str(v) if pd.notna(v) else ""))
+                except Exception:
+                    pass
+                st.dataframe(df_sigs_display)
+                # Descarga CSV
+                st.download_button(
+                    label="Descargar firmas (CSV)",
+                    data=df_sigs.to_csv(index=False),
+                    file_name="firmas_geneticas.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
 
-                    # Visualización se realiza debajo usando datos en sesión
-            except Exception as e:
-                st.error(f"No se pudieron generar las firmas: {e}")
+                # Visualización se realiza debajo usando datos en sesión
+        except Exception as e:
+            st.error(f"No se pudieron generar las firmas: {e}")
 
         # Visualización: disponible siempre que existan firmas en sesión
         df_sigs_viz = st.session_state.get("df_signatures")
         if isinstance(df_sigs_viz, pd.DataFrame) and not df_sigs_viz.empty:
             st.subheader("Visualización de firmas")
-            tipos = sorted(df_sigs_viz['cancer_type'].dropna().astype(str).unique().tolist())
-            sel_tipo = st.selectbox("Tipo de cáncer para visualizar", tipos, index=0 if tipos else None, key="sig_tipo")
+            sel_tipo = sel_tipo_gen
+            st.caption(f"Visualizando tipo de cáncer (parámetros del estudio): {sel_tipo}")
             if sel_tipo:
                 try:
                     import plotly.express as px
@@ -938,7 +988,34 @@ if df_loaded is not None:
                                         'pvalue': pval if pd.notna(pval) else 1.0,
                                     })
                     if not recs:
-                        st.info("No hay hallmarks asociados para este tipo de cáncer.")
+                        st.info("No hay hallmarks asociados para este tipo de cáncer. Mostrando conteo de artículos por gen como alternativa.")
+                        # Fallback: barras por nivel con conteo de artículos por gen
+                        base = df_sigs_viz[df_sigs_viz['cancer_type'] == sel_tipo].copy()
+                        # Expandir por nivel y pares (gen, conteo)
+                        rows = []
+                        for _, r in base.iterrows():
+                            lvl = r.get('nivel_expresion')
+                            genes = r.get('genes', []) if isinstance(r.get('genes'), list) else []
+                            counts = r.get('conteo_articulos_por_gene', []) if isinstance(r.get('conteo_articulos_por_gene'), list) else []
+                            for g, c in zip(genes, counts):
+                                rows.append({'nivel_expresion': lvl, 'gene': g, 'articles': c})
+                        if rows:
+                            import plotly.express as px
+                            flatc = pd.DataFrame(rows)
+                            levels_sorted = sorted(flatc['nivel_expresion'].dropna().unique().tolist())
+                            tabs = st.tabs([f"{lvl}" for lvl in levels_sorted])
+                            for lvl, tab in zip(levels_sorted, tabs):
+                                with tab:
+                                    d = flatc[flatc['nivel_expresion'] == lvl]
+                                    if d.empty:
+                                        st.info("Sin datos para este nivel.")
+                                        continue
+                                    d = d.sort_values('articles', ascending=False).head(50)
+                                    fig = px.bar(d, x='gene', y='articles', title=f"Artículos por gen — {sel_tipo} — {lvl}")
+                                    fig.update_layout(height=600, margin=dict(t=60, b=100, l=20, r=20), xaxis_tickangle=45)
+                                    st.plotly_chart(fig, use_container_width=True)
+                        else:
+                            st.info("No hay datos suficientes para este tipo de cáncer.")
                     else:
                         flat = pd.DataFrame(recs)
                         flat['log_p'] = -np.log10(flat['pvalue'].replace(0, 1e-300))
