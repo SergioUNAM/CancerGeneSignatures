@@ -146,6 +146,8 @@ Notas
 - [x] Etiquetado heurístico por artículo: `upregulated`, `downregulated`, `emt_related`, `prognosis_bad/good`, funciones (proliferación, apoptosis, invasión, etc.).
 - [x] Resumen por gen (conteos y cadena `heuristic_summary`).
 - [x] Visualizaciones: tabla resumida y heatmap de relaciones por gen.
+  - [x] Integración con niveles de expresión: heatmap nivel×función (conteo/score), treemap Nivel→Función→Gen ponderado por score×|log2FC|.
+  - [x] Integración con Firmas (hallmarks): Sankey Función→Hallmark por conteos.
 
 ---
 
