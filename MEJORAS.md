@@ -140,6 +140,15 @@ Notas
 
 ---
 
+## Añadido — Interpretación heurística PubMed por cáncer (Fase 3/4)
+
+- [x] Filtro de bibliografía al cáncer seleccionado en panel (por términos conocidos y `cancer_type`).
+- [x] Etiquetado heurístico por artículo: `upregulated`, `downregulated`, `emt_related`, `prognosis_bad/good`, funciones (proliferación, apoptosis, invasión, etc.).
+- [x] Resumen por gen (conteos y cadena `heuristic_summary`).
+- [x] Visualizaciones: tabla resumida y heatmap de relaciones por gen.
+
+---
+
 ## Fase 6 — Calidad, Tests y Estilo
 
 Objetivo: Mejorar confiabilidad con pruebas automáticas y estilo consistente.

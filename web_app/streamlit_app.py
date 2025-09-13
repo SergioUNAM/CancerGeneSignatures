@@ -78,6 +78,9 @@ from src.core.bibliography import (
     search_pubmed_by_genes,
     classify_bibliography,
     aggregate_counts_by_level_and_cancer,
+    filter_bibliography_by_cancer,
+    interpret_gene_relations,
+    summarize_relations_by_gene,
 )
 from src.core.signatures import (
     create_signatures,
@@ -1151,21 +1154,23 @@ if df_loaded is not None:
                     st.markdown("### Clasificación por tipo de cáncer y contexto")
                     try:
                         classified = classify_bibliography(bib2)
+                        # Enfocar al cáncer seleccionado en el panel
+                        focused = filter_bibliography_by_cancer(classified, cancer_type)
                         try:
-                            st.session_state["bibliografia_clasificada"] = classified.copy()
+                            st.session_state["bibliografia_clasificada"] = focused.copy()
                         except Exception:
                             pass
-                        st.dataframe(classified.head(50))
+                        st.dataframe(focused.head(50))
                         st.download_button(
                             label="Descargar bibliografía clasificada (CSV)",
-                            data=classified.to_csv(index=False),
+                            data=focused.to_csv(index=False),
                             file_name="bibliografia_clasificada.csv",
                             mime="text/csv",
                             use_container_width=True,
                         )
 
                         # Gráfica de barras: número de estudios por tipo de cáncer y nivel
-                        agg = aggregate_counts_by_level_and_cancer(classified)
+                        agg = aggregate_counts_by_level_and_cancer(focused)
                         if not agg.empty:
                             import plotly.express as px
                             order_levels = ['sobreexpresado', 'estable', 'subexpresado']
@@ -1188,6 +1193,36 @@ if df_loaded is not None:
                                 labels={'count': 'Número de artículos', 'cancer_type': 'Tipo de cáncer'},
                             )
                             st.plotly_chart(figs, use_container_width=True)
+
+                        # Interpretación heurística enfocada al cáncer seleccionado
+                        st.markdown("### Interpretación heurística de relaciones (enfocada al cáncer seleccionado)")
+                        interp = interpret_gene_relations(focused)
+                        if interp is None or interp.empty:
+                            st.info("No se pudieron etiquetar relaciones con las heurísticas actuales.")
+                        else:
+                            # Resumen por gen
+                            summary = summarize_relations_by_gene(interp)
+                            st.dataframe(summary.sort_values('heuristic_summary').reset_index(drop=True))
+                            st.download_button(
+                                label="Descargar resumen heurístico (CSV)",
+                                data=summary.to_csv(index=False),
+                                file_name="resumen_heuristico_relaciones.csv",
+                                mime="text/csv",
+                                use_container_width=True,
+                            )
+                            # Heatmap de conteos por relación y gen
+                            try:
+                                import plotly.express as px
+                                rel_cols = [c for c in summary.columns if c not in ('Gene','heuristic_summary')]
+                                if rel_cols:
+                                    hm_counts = interp[['Gene'] + rel_cols].groupby('Gene')[rel_cols].sum().reset_index()
+                                    melt = hm_counts.melt(id_vars=['Gene'], var_name='relacion', value_name='conteo')
+                                    fig_hm = px.density_heatmap(melt, x='relacion', y='Gene', z='conteo',
+                                                                title='Relaciones por gen (conteo de artículos)', color_continuous_scale='Blues')
+                                    fig_hm.update_layout(height=600, yaxis={'dtick': 1})
+                                    st.plotly_chart(fig_hm, use_container_width=True)
+                            except Exception:
+                                pass
 
                     except Exception as e:
                         st.warning(f"No se pudo clasificar la bibliografía: {e}")

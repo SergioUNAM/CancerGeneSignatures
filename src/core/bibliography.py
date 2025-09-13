@@ -367,3 +367,124 @@ def aggregate_counts_by_level_and_cancer(df: pd.DataFrame) -> pd.DataFrame:
     t = t.assign(cancer_type=t["cancer_type"].astype(str).str.split(", ")).explode("cancer_type")
     g = t.groupby(["nivel_expresion", "cancer_type"], as_index=False).size().rename(columns={"size": "count"})
     return g
+
+
+# ---------------- Heurística de interpretación por cáncer -----------------
+
+def _match_cancer_key(label: str) -> Optional[str]:
+    """Devuelve la clave de DEFAULT_CANCER_TYPES que mejor coincide con `label`.
+    Coincidencia por igualdad o inclusión case-insensitive.
+    """
+    if not label:
+        return None
+    lab = str(label).strip().lower()
+    for k in DEFAULT_CANCER_TYPES.keys():
+        if lab == k.lower():
+            return k
+    for k in DEFAULT_CANCER_TYPES.keys():
+        if lab in k.lower() or k.lower() in lab:
+            return k
+    return None
+
+
+HEUR_UP = [
+    "overexpress", "over-expression", "upregulated", "up-regulated", "high expression",
+    "elevated", "increased", "up regulation", "gain of", "amplified",
+]
+HEUR_DOWN = [
+    "downregulated", "down-regulated", "low expression", "decreased", "reduced",
+    "silenced", "loss of", "suppressed",
+]
+HEUR_PROGNOSIS_BAD = [
+    "poor prognosis", "worse survival", "shorter survival", "adverse outcome", "high risk",
+]
+HEUR_PROGNOSIS_GOOD = [
+    "better survival", "good prognosis", "favorable prognosis", "longer survival",
+]
+HEUR_FUNCTIONS = {
+    "proliferation": ["proliferation", "cell growth"],
+    "apoptosis": ["apoptosis", "apoptotic"],
+    "invasion": ["invasion", "invasive"],
+    "migration": ["migration", "migratory"],
+    "metastasis": ["metastasis", "metastatic"],
+    "drug_resistance": ["drug resistance", "chemoresistance", "resistant"],
+    "drug_sensitivity": ["chemosensitivity", "sensitive to", "sensitizes"],
+}
+
+
+def _contains_any(text: str, words: List[str]) -> bool:
+    t = (text or "").lower()
+    return any(w.lower() in t for w in words)
+
+
+def filter_bibliography_by_cancer(df: pd.DataFrame, cancer_label: str) -> pd.DataFrame:
+    """Filtra artículos cuyo título/abstract mencionan el cáncer indicado o cuyo
+    campo 'cancer_type' lo contiene (cuando está disponible)."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    k = _match_cancer_key(cancer_label)
+    terms = DEFAULT_CANCER_TYPES.get(k, GENERAL_CANCER_TERMS)
+    t = df.copy()
+    title_col = "Title" if "Title" in t.columns else ("article_title" if "article_title" in t.columns else None)
+    abs_col = "Abstract" if "Abstract" in t.columns else None
+    text = ((t[title_col] if title_col else "") + " " + (t[abs_col] if abs_col else "")).astype(str)
+    mask_terms = text.str.lower().apply(lambda s: _contains_any(s, terms))
+    mask_ct = t.get("cancer_type").astype(str).str.contains(str(k or cancer_label), case=False, na=False) if "cancer_type" in t.columns else False
+    out = t[mask_terms | mask_ct]
+    return out.reset_index(drop=True)
+
+
+def interpret_gene_relations(
+    df: pd.DataFrame,
+    gene_col: str = "Gene",
+    title_col: str = "Title",
+    abs_col: str = "Abstract",
+) -> pd.DataFrame:
+    """Etiqueta heurísticamente relaciones por artículo y gene. Devuelve un DataFrame
+    con columnas booleanas por relación y un resumen por fila.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+    t = df.copy()
+    if title_col not in t.columns and "article_title" in t.columns:
+        title_col = "article_title"
+    if abs_col not in t.columns:
+        abs_col = None
+    def row_tags(row) -> Dict[str, bool]:
+        txt = (str(row.get(title_col, "")) + " " + (str(row.get(abs_col, "")) if abs_col else "")).lower()
+        tags: Dict[str, bool] = {
+            "upregulated": _contains_any(txt, HEUR_UP),
+            "downregulated": _contains_any(txt, HEUR_DOWN),
+            "emt_related": _detect_any(txt, _compile_kw_regex(EMT_KEYWORDS)),
+            "prognosis_bad": _contains_any(txt, HEUR_PROGNOSIS_BAD),
+            "prognosis_good": _contains_any(txt, HEUR_PROGNOSIS_GOOD),
+        }
+        for key, words in HEUR_FUNCTIONS.items():
+            tags[key] = _contains_any(txt, words)
+        return tags
+    tags_df = t.apply(row_tags, axis=1, result_type="expand")
+    out = pd.concat([t.reset_index(drop=True), tags_df], axis=1)
+    return out
+
+
+def summarize_relations_by_gene(df: pd.DataFrame, gene_col: str = "Gene") -> pd.DataFrame:
+    if df is None or df.empty or gene_col not in df.columns:
+        return pd.DataFrame()
+    rel_cols = [
+        "upregulated", "downregulated", "emt_related", "prognosis_bad", "prognosis_good",
+        "proliferation", "apoptosis", "invasion", "migration", "metastasis", "drug_resistance", "drug_sensitivity",
+    ]
+    present = [c for c in rel_cols if c in df.columns]
+    g = df.groupby(gene_col)[present].sum(min_count=1).reset_index()
+    def _mk_summary(r) -> str:
+        parts = []
+        for c in present:
+            try:
+                val = int(r.get(c, 0))
+                if val > 0:
+                    parts.append(f"{c}({val})")
+            except Exception:
+                pass
+        return ", ".join(parts)
+    g["heuristic_summary"] = g.apply(_mk_summary, axis=1)
+    return g
