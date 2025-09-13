@@ -120,3 +120,20 @@ def classify_by_suffixes(df_long: pd.DataFrame, ctrl_suffixes: List[str], sample
     ctrl = t[t["test_str"].str.endswith(tuple(ctrl_suffixes))] if ctrl_suffixes else t.iloc[0:0]
     samp = t[t["test_str"].str.endswith(tuple(sample_suffixes))] if sample_suffixes else t.iloc[0:0]
     return ctrl.drop(columns=["test_str"]) if not ctrl.empty else ctrl, samp.drop(columns=["test_str"]) if not samp.empty else samp
+
+
+def classify_by_regex(df_long: pd.DataFrame, ctrl_pattern: str, sample_pattern: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Clasifica usando expresiones regulares sobre la columna 'test'.
+    Si un patrón está vacío, devuelve DataFrame vacío para ese grupo.
+    """
+    t = df_long.copy()
+    t["test_str"] = t["test"].astype(str)
+    ctrl = (
+        t[t["test_str"].str.contains(ctrl_pattern, regex=True, na=False)]
+        if ctrl_pattern else t.iloc[0:0]
+    )
+    samp = (
+        t[t["test_str"].str.contains(sample_pattern, regex=True, na=False)]
+        if sample_pattern else t.iloc[0:0]
+    )
+    return ctrl.drop(columns=["test_str"]) if not ctrl.empty else ctrl, samp.drop(columns=["test_str"]) if not samp.empty else samp

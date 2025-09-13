@@ -59,13 +59,13 @@ Notas
 Objetivo: Hacer la clasificación de controles/muestras más flexible y separar pasos pesados en páginas.
 
 Tareas
-- [ ] Clasificación por prefijos, sufijos y regex (apoyarse en `classify_by_prefixes`/`classify_by_suffixes`).
+- [x] Clasificación por prefijos, sufijos y regex (apoyarse en `classify_by_prefixes`/`classify_by_suffixes`).
   - Mostrar vista previa de cuántas y cuáles pruebas caen en cada bucket antes de aplicar.
   - Referencia: `src/core/qpcr.py:84`, `src/core/qpcr.py:92`
-- [ ] Detectar y advertir colisiones (mismas pruebas en ambos grupos) con opción de auto-resolver.
+- [x] Detectar y advertir colisiones (mismas pruebas en ambos grupos) con opción de auto-resolver.
   - Referencia: `web_app/streamlit_app.py:349`
-- [ ] Mover secciones pesadas a `web_app/pages/` (STRING, PubMed, Firmas) para un flujo por pasos.
-- [ ] Gráficos FC: toggle escala lineal/log, resaltar el gen de referencia, tooltips claros.
+- [x] Mover secciones pesadas a `web_app/pages/` (STRING, PubMed, Firmas) para un flujo por pasos.
+- [x] Gráficos FC: toggle escala lineal/log, resaltar el gen de referencia, tooltips claros.
 
 Criterios de aceptación
 - La pestaña de clasificación permite elegir por prefijo/sufijo/regex y previsualiza resultados.

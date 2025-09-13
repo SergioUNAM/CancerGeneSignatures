@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-import io, os, json, sys
+import io, os, json, sys, re
 from pathlib import Path
 from typing import Optional
 import logging
@@ -44,6 +44,9 @@ from src.core.qpcr import (
     melt_wide_to_long,
     classify_tests,  # case-insensitive
     suggest_name_affixes,
+    classify_by_prefixes,
+    classify_by_suffixes,
+    classify_by_regex,
 )
 from src.core.cleaning import drop_machine_controls
 from src.core.fold_change import compute_fold_change
@@ -212,6 +215,7 @@ with st.sidebar:
     # Persistir en sesión para usarlo durante todo el flujo
     st.session_state["und_policy"] = und_policy
     st.session_state["und_value"] = float(und_value)
+    st.session_state["context_sel_label"] = context_sel_label
     run_btn = st.button("Procesar archivo", type="primary")
 
 # -----------------------------------------------------------------------------
@@ -315,16 +319,16 @@ if df_loaded is not None:
         st.warning(f"No se pudo mostrar el resumen de extracción: {e}")
         logger.warning(f"Fallo en resumen de extracción: {e}")
 
-    # Clasificación con mejor UX: prefijos sugeridos o selección manual
+    # Clasificación con mejor UX: prefijos, sufijos, regex o selección manual
     st.subheader("Clasificación de controles y muestras")
-    st.caption("Usa prefijos sugeridos/manuales o selecciona las pruebas directamente.")
+    st.caption("Clasifica por prefijos/sufijos/regex o selecciona directamente.")
 
     file_key = f"assign_{df_loaded.source_name}:{df_loaded.sheet_name}"
     state = st.session_state.setdefault(file_key, {})
 
     unique_tests = sorted(long_df['test'].astype(str).dropna().unique().tolist())
 
-    tab_pref, tab_select = st.tabs(["Por prefijos", "Selección manual"])
+    tab_pref, tab_suff, tab_regex, tab_select = st.tabs(["Por prefijos", "Por sufijos", "Por regex", "Selección manual"])
 
     with tab_pref:
         sugg = suggest_name_affixes(unique_tests, top_n=10)
@@ -338,7 +342,56 @@ if df_loaded is not None:
             samp_suggest = st.selectbox("Sugerencia (muestras)", options=["(vacío)"] + top_prefixes, index=0)
             samp_default = "" if samp_suggest == "(vacío)" else samp_suggest
             samp_prefix = st.text_input("Prefijo muestras", value=state.get('samp_prefix', samp_default))
+        # Vista previa
+        prev_ctrl = [t for t in unique_tests if ctrl_prefix and str(t).startswith(ctrl_prefix)]
+        prev_samp = [t for t in unique_tests if samp_prefix and str(t).startswith(samp_prefix)]
+        st.caption(f"Previa → Controles: {len(prev_ctrl)} | Muestras: {len(prev_samp)}")
+        if prev_ctrl:
+            st.caption("Controles: " + ", ".join(prev_ctrl[:20]) + (" …" if len(prev_ctrl) > 20 else ""))
+        if prev_samp:
+            st.caption("Muestras: " + ", ".join(prev_samp[:20]) + (" …" if len(prev_samp) > 20 else ""))
         submitted_pref = st.button("Clasificar por prefijos", type="primary")
+
+    with tab_suff:
+        sugg = suggest_name_affixes(unique_tests, top_n=10)
+        top_suffixes = [s for s, _ in (sugg.get('suffixes') or [])]
+        cols1, cols2 = st.columns(2)
+        with cols1:
+            ctrl_suff = st.text_input("Sufijos controles (coma-sep.)", value=state.get('ctrl_suff', ''))
+        with cols2:
+            samp_suff = st.text_input("Sufijos muestras (coma-sep.)", value=state.get('samp_suff', ''))
+        st.caption("Sugerencias sufijos: " + ", ".join(top_suffixes))
+        suff_ctrl_list = [s.strip() for s in ctrl_suff.split(',') if s.strip()]
+        suff_samp_list = [s.strip() for s in samp_suff.split(',') if s.strip()]
+        prev_ctrl = [t for t in unique_tests if any(str(t).endswith(s) for s in suff_ctrl_list)]
+        prev_samp = [t for t in unique_tests if any(str(t).endswith(s) for s in suff_samp_list)]
+        st.caption(f"Previa → Controles: {len(prev_ctrl)} | Muestras: {len(prev_samp)}")
+        if prev_ctrl:
+            st.caption("Controles: " + ", ".join(prev_ctrl[:20]) + (" …" if len(prev_ctrl) > 20 else ""))
+        if prev_samp:
+            st.caption("Muestras: " + ", ".join(prev_samp[:20]) + (" …" if len(prev_samp) > 20 else ""))
+        submitted_suff = st.button("Clasificar por sufijos", type="primary")
+
+    with tab_regex:
+        colr1, colr2 = st.columns(2)
+        with colr1:
+            ctrl_re = st.text_input("Regex controles", value=state.get('ctrl_re', ''))
+        with colr2:
+            samp_re = st.text_input("Regex muestras", value=state.get('samp_re', ''))
+        try:
+            prev_ctrl = [t for t in unique_tests if (ctrl_re and re.search(ctrl_re, str(t)) is not None)]
+        except Exception:
+            prev_ctrl = []
+        try:
+            prev_samp = [t for t in unique_tests if (samp_re and re.search(samp_re, str(t)) is not None)]
+        except Exception:
+            prev_samp = []
+        st.caption(f"Previa → Controles: {len(prev_ctrl)} | Muestras: {len(prev_samp)}")
+        if prev_ctrl:
+            st.caption("Controles: " + ", ".join(prev_ctrl[:20]) + (" …" if len(prev_ctrl) > 20 else ""))
+        if prev_samp:
+            st.caption("Muestras: " + ", ".join(prev_samp[:20]) + (" …" if len(prev_samp) > 20 else ""))
+        submitted_regex = st.button("Clasificar por regex", type="primary")
 
     with tab_select:
         colm1, colm2 = st.columns(2)
@@ -357,10 +410,27 @@ if df_loaded is not None:
     controles_df = state.get('controles_df', pd.DataFrame())
     muestras_df = state.get('muestras_df', pd.DataFrame())
 
+    # Utilidad local para resolver colisiones
+    def _resolve_collisions(ctrl_df: pd.DataFrame, samp_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+        inter = set(ctrl_df['test'].astype(str)).intersection(set(samp_df['test'].astype(str)))
+        if not inter:
+            return ctrl_df, samp_df
+        st.warning(f"Colisiones: {len(inter)} pruebas aparecen en ambos grupos → {', '.join(sorted(list(inter))[:10])}{' …' if len(inter)>10 else ''}")
+        choice = st.radio("Resolver colisiones", ["priorizar controles", "priorizar muestras", "excluir colisiones"], horizontal=True, index=0)
+        if choice == "priorizar controles":
+            samp_df = samp_df[~samp_df['test'].astype(str).isin(inter)]
+        elif choice == "priorizar muestras":
+            ctrl_df = ctrl_df[~ctrl_df['test'].astype(str).isin(inter)]
+        else:
+            ctrl_df = ctrl_df[~ctrl_df['test'].astype(str).isin(inter)]
+            samp_df = samp_df[~samp_df['test'].astype(str).isin(inter)]
+        return ctrl_df, samp_df
+
     if submitted_pref:
         if not ctrl_prefix and not samp_prefix:
             st.warning("Debes ingresar al menos un prefijo (controles o muestras)")
-        pref_ctrl_df, pref_samp_df = classify_tests(long_df, ctrl_prefix, samp_prefix)
+        pref_ctrl_df, pref_samp_df = classify_by_prefixes(long_df, [ctrl_prefix] if ctrl_prefix else [], [samp_prefix] if samp_prefix else [])
+        pref_ctrl_df, pref_samp_df = _resolve_collisions(pref_ctrl_df, pref_samp_df)
         state['ctrl_prefix'] = ctrl_prefix
         state['samp_prefix'] = samp_prefix
         state['controles_df'] = pref_ctrl_df
@@ -370,6 +440,35 @@ if df_loaded is not None:
         logger.info(f"Clasificación por prefijos: ctrl='{ctrl_prefix}' -> {len(controles_df)} filas, samp='{samp_prefix}' -> {len(muestras_df)} filas")
         if controles_df.empty or muestras_df.empty:
             st.warning("Alguna de las categorías resultó vacía. Revisa los prefijos o usa 'Selección manual'.")
+
+    if 'submitted_suff' in locals() and submitted_suff:
+        pref_ctrl_df, pref_samp_df = classify_by_suffixes(long_df, suff_ctrl_list, suff_samp_list)
+        pref_ctrl_df, pref_samp_df = _resolve_collisions(pref_ctrl_df, pref_samp_df)
+        state['ctrl_suff'] = ctrl_suff
+        state['samp_suff'] = samp_suff
+        state['controles_df'] = pref_ctrl_df
+        state['muestras_df'] = pref_samp_df
+        controles_df = pref_ctrl_df
+        muestras_df = pref_samp_df
+        logger.info(f"Clasificación por sufijos: ctrl={suff_ctrl_list} -> {len(controles_df)} filas, samp={suff_samp_list} -> {len(muestras_df)} filas")
+        if controles_df.empty or muestras_df.empty:
+            st.warning("Alguna de las categorías resultó vacía. Revisa los sufijos o usa otra pestaña.")
+
+    if 'submitted_regex' in locals() and submitted_regex:
+        try:
+            pref_ctrl_df, pref_samp_df = classify_by_regex(long_df, ctrl_re, samp_re)
+            pref_ctrl_df, pref_samp_df = _resolve_collisions(pref_ctrl_df, pref_samp_df)
+            state['ctrl_re'] = ctrl_re
+            state['samp_re'] = samp_re
+            state['controles_df'] = pref_ctrl_df
+            state['muestras_df'] = pref_samp_df
+            controles_df = pref_ctrl_df
+            muestras_df = pref_samp_df
+            logger.info(f"Clasificación por regex: ctrl='{ctrl_re}' -> {len(controles_df)} filas, samp='{samp_re}' -> {len(muestras_df)} filas")
+            if controles_df.empty or muestras_df.empty:
+                st.warning("Alguna de las categorías resultó vacía. Revisa los patrones o usa otra pestaña.")
+        except re.error as ex:
+            st.error(f"Regex inválido: {ex}")
 
     if submitted_sel:
         # Validar colisiones
@@ -479,15 +578,52 @@ if df_loaded is not None:
             import plotly.graph_objects as go
             fig = go.Figure()
             x_vals = fc.consolidated['target']
-            fig.add_trace(go.Bar(x=x_vals, y=fc.consolidated['delta_delta_ct_promedio'], name='ΔΔCT (Promedios)', marker_color='#1f77b4', opacity=0.85, yaxis='y'))
-            fig.add_trace(go.Bar(x=x_vals, y=fc.consolidated['delta_delta_ct_gen_ref'], name='ΔΔCT (Gen Ref)', marker_color='#ff7f0e', opacity=0.85, yaxis='y'))
-            fig.add_trace(go.Scatter(x=x_vals, y=fc.consolidated['fold_change_promedio'], name='Fold Change (Promedios)', mode='markers+lines', marker=dict(color='#2ca02c', size=8, symbol='diamond'), line=dict(color='#2ca02c', width=2, dash='dot'), yaxis='y2'))
-            fig.add_trace(go.Scatter(x=x_vals, y=fc.consolidated['fold_change_gen_ref'], name='Fold Change (Gen Ref)', mode='markers+lines', marker=dict(color='#d62728', size=8, symbol='diamond'), line=dict(color='#d62728', width=2, dash='dot'), yaxis='y2'))
+            ddct_mean = fc.consolidated['delta_delta_ct_promedio']
+            ddct_ref = fc.consolidated['delta_delta_ct_gen_ref']
+            fc_mean = fc.consolidated['fold_change_promedio']
+            fc_ref = fc.consolidated['fold_change_gen_ref']
+
+            y2_scale = st.radio("Escala FC", ["log", "lineal"], horizontal=True, index=0)
+            y2_type = 'log' if y2_scale == 'log' else 'linear'
+
+            fig.add_trace(go.Bar(
+                x=x_vals, y=ddct_mean, name='ΔΔCT (Promedios)', marker_color='#1f77b4', opacity=0.85, yaxis='y',
+                hovertemplate='Gen=%{x}<br>ΔΔCT Promedios=%{y:.3f}<extra></extra>'
+            ))
+            fig.add_trace(go.Bar(
+                x=x_vals, y=ddct_ref, name='ΔΔCT (Gen Ref)', marker_color='#ff7f0e', opacity=0.85, yaxis='y',
+                hovertemplate='Gen=%{x}<br>ΔΔCT GenRef=%{y:.3f}<extra></extra>'
+            ))
+            fig.add_trace(go.Scatter(
+                x=x_vals, y=fc_mean, name='Fold Change (Promedios)', mode='markers+lines',
+                marker=dict(color='#2ca02c', size=8, symbol='diamond'),
+                line=dict(color='#2ca02c', width=2, dash='dot'), yaxis='y2',
+                hovertemplate='Gen=%{x}<br>FC Promedios=%{y:.3f}<extra></extra>'
+            ))
+            fig.add_trace(go.Scatter(
+                x=x_vals, y=fc_ref, name='Fold Change (Gen Ref)', mode='markers+lines',
+                marker=dict(color='#d62728', size=8, symbol='diamond'),
+                line=dict(color='#d62728', width=2, dash='dot'), yaxis='y2',
+                hovertemplate='Gen=%{x}<br>FC GenRef=%{y:.3f}<extra></extra>'
+            ))
+
+            # Resaltar el gen de referencia
+            try:
+                ref_gene = fc.reference_gene
+                ref_mask = x_vals == ref_gene
+                fig.add_trace(go.Scatter(
+                    x=x_vals[ref_mask], y=fc_ref[ref_mask], mode='markers', name='Ref gene',
+                    marker=dict(color='black', size=12, symbol='star'), yaxis='y2',
+                    hovertemplate='Gen de referencia=%{x}<br>FC GenRef=%{y:.3f}<extra></extra>'
+                ))
+            except Exception:
+                pass
+
             fig.update_layout(
                 title=dict(text='Análisis comparativo de métodos de cálculo', x=0.5),
                 template='plotly_white', barmode='group',
                 yaxis=dict(title='ΔΔCT', showgrid=True, gridcolor='lightgray'),
-                yaxis2=dict(title='Fold Change (log)', overlaying='y', side='right', type='log', showgrid=False),
+                yaxis2=dict(title=f"Fold Change ({y2_scale})", overlaying='y', side='right', type=y2_type, showgrid=False),
                 legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
                 height=600, margin=dict(b=80, t=80, l=60, r=60)
             )
@@ -515,6 +651,10 @@ if df_loaded is not None:
                 bar = px.bar(x=counts.index, y=counts.values, labels={'x': 'Nivel de expresión', 'y': 'Frecuencia'}, title='Distribución de niveles de expresión')
                 st.plotly_chart(bar, use_container_width=True)
 
+            # Persistir para páginas
+            st.session_state['fc_consolidated'] = fc.consolidated.copy()
+            st.session_state['reference_gene'] = fc.reference_gene
+            st.session_state['df_expr'] = df_expr.copy()
             extras['fold_change_consolidado.csv'] = fc.consolidated.to_csv(index=False)
             extras['expresion_categorizada.csv'] = df_expr.to_csv(index=False)
 
