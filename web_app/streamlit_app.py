@@ -1231,6 +1231,7 @@ if df_loaded is not None:
     # -------------------------------------------------------------------------
 st.markdown("---")
 st.header("Firmas genéticas")
+with st.container():
     st.caption("Genera firmas por tipo de cáncer y nivel, con enriquecimiento de Hallmarks (MSigDB). Requiere gseapy y acceso a los GMT locales.")
 
     # Intentar recuperar bibliografía clasificada de esta sesión
@@ -1415,7 +1416,7 @@ st.header("Firmas genéticas")
                                 fig.update_layout(height=800, margin=dict(t=60, b=20, l=20, r=20))
                                 st.plotly_chart(fig, use_container_width=True)
                 except Exception as e:
-                st.warning(f"No se pudo renderizar la visualización de firmas: {e}")
+                    st.warning(f"No se pudo renderizar la visualización de firmas: {e}")
 
 
 # -------------------------------------------------------------------------
@@ -1587,6 +1588,8 @@ else:
                                 pass
             except Exception:
                 pass
+    except Exception as e:
+        st.warning(f"No se pudo ejecutar la heurística: {e}")
 # -----------------------------------------------------------------------------
 # Guía rápida
 # -----------------------------------------------------------------------------
