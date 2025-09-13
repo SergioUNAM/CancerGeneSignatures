@@ -74,14 +74,24 @@ from src.core.string_enrichment import (
     enrich_by_levels,
     dfs_to_excel_bytes,
 )
-from src.core.bibliography import (
-    search_pubmed_by_genes,
-    classify_bibliography,
-    aggregate_counts_by_level_and_cancer,
-    filter_bibliography_by_cancer,
-    interpret_gene_relations,
-    summarize_relations_by_gene,
-)
+# Hot-reload bibliography helpers during dev (ensure new functions are visible)
+try:
+    import importlib as _importlib
+    import src.core.bibliography as _cgs_bib
+    _cgs_bib = _importlib.reload(_cgs_bib)
+    search_pubmed_by_genes = _cgs_bib.search_pubmed_by_genes  # type: ignore
+    classify_bibliography = _cgs_bib.classify_bibliography  # type: ignore
+    aggregate_counts_by_level_and_cancer = _cgs_bib.aggregate_counts_by_level_and_cancer  # type: ignore
+    filter_bibliography_by_cancer = getattr(_cgs_bib, 'filter_bibliography_by_cancer')  # type: ignore
+    interpret_gene_relations = getattr(_cgs_bib, 'interpret_gene_relations')  # type: ignore
+    summarize_relations_by_gene = getattr(_cgs_bib, 'summarize_relations_by_gene')  # type: ignore
+except Exception:
+    # Fallbacks (should not be needed if module is available)
+    from src.core.bibliography import (
+        search_pubmed_by_genes,
+        classify_bibliography,
+        aggregate_counts_by_level_and_cancer,
+    )
 from src.core.signatures import (
     create_signatures,
 )
