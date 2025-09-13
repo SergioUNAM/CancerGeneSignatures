@@ -5,6 +5,7 @@ import streamlit as st
 import pandas as pd
 from pathlib import Path
 import sys
+from typing import Optional
 
 # Ensure project root on path
 _PROJ_ROOT = Path(__file__).resolve().parents[2]
@@ -45,4 +46,3 @@ if run:
             mime="text/csv",
             use_container_width=True,
         )
-

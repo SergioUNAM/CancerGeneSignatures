@@ -6,6 +6,7 @@ import streamlit as st
 import pandas as pd
 from pathlib import Path
 import sys
+from typing import Optional
 
 # Ensure project root on path
 _PROJ_ROOT = Path(__file__).resolve().parents[2]
@@ -18,7 +19,7 @@ st.set_page_config(page_title="CGS — Bibliografía PubMed", page_icon="📚", 
 st.title("Bibliografía (PubMed)")
 st.caption("Busca artículos por gen y contexto. Usa la tabla de expresión de la página principal.")
 
-df_expr: pd.DataFrame | None = st.session_state.get('df_expr')
+df_expr: Optional[pd.DataFrame] = st.session_state.get('df_expr')
 context_sel_label = st.session_state.get('context_sel_label', 'TEM')
 if df_expr is None or df_expr.empty:
     st.info("Primero ejecuta el análisis qPCR en la página principal para generar la tabla de expresión.")
@@ -106,4 +107,3 @@ if run:
             )
             fig.update_layout(height=500, margin=dict(t=60, b=60))
             st.plotly_chart(fig, use_container_width=True)
-

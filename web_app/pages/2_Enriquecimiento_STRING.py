@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import streamlit as st
 import pandas as pd
+from typing import Optional
 
 # Ensure project root is importable so `src.*` works when running from web_app/
 import sys
@@ -18,7 +19,7 @@ st.set_page_config(page_title="CGS — Enriquecimiento STRING", page_icon="🧬"
 st.title("Enriquecimiento funcional (STRING)")
 st.caption("Analiza términos enriquecidos por nivel de expresión. Usa los resultados de qPCR de la página principal.")
 
-df_expr: pd.DataFrame | None = st.session_state.get('df_expr')
+df_expr: Optional[pd.DataFrame] = st.session_state.get('df_expr')
 if df_expr is None or df_expr.empty:
     st.info("Primero ejecuta el análisis qPCR en la página principal para generar la tabla de expresión categorizada.")
     st.stop()
@@ -74,4 +75,3 @@ if run:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
-
