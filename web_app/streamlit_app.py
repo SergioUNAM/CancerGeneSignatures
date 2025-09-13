@@ -95,6 +95,11 @@ except Exception:
 from src.core.signatures import (
     create_signatures,
 )
+from src.core.visuals import (
+    hallmarks_polar_chart,
+    fingerprint_heatmap,
+    clustered_expression_by_level,
+)
 
 # Cache de firmas para evitar recomputar al cambiar solo la selección visual
 import hashlib
@@ -1417,6 +1422,82 @@ with st.container():
                                 st.plotly_chart(fig, use_container_width=True)
                 except Exception as e:
                     st.warning(f"No se pudo renderizar la visualización de firmas: {e}")
+
+            # Visualizaciones adicionales (polar, fingerprint, clustergrama)
+            try:
+                st.subheader("Visualizaciones adicionales")
+                # Niveles disponibles en firmas para el tipo seleccionado
+                niveles_disp = (
+                    df_sigs_viz[df_sigs_viz['cancer_type'] == sel_tipo]['nivel_expresion']
+                    .dropna().astype(str).unique().tolist()
+                )
+                niveles_disp = [n for n in ['Sobreexpresados', 'Subexpresados', 'estable'] if n in niveles_disp] or niveles_disp
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    with st.expander("Gráfico polar de Hallmarks", expanded=False):
+                        if niveles_disp:
+                            lvl = st.selectbox("Nivel", niveles_disp, key="viz_polar_lvl")
+                            figp = hallmarks_polar_chart(df_sigs_viz, sel_tipo, lvl)
+                            st.plotly_chart(figp, use_container_width=True)
+                        else:
+                            st.info("No hay niveles disponibles para el tipo seleccionado.")
+                with c2:
+                    with st.expander("Fingerprint (Genes × Hallmarks)", expanded=False):
+                        if niveles_disp:
+                            lvl2 = st.selectbox("Nivel", niveles_disp, key="viz_fp_lvl")
+                            figf = fingerprint_heatmap(df_sigs_viz, sel_tipo, lvl2)
+                            st.plotly_chart(figf, use_container_width=True)
+                        else:
+                            st.info("No hay niveles disponibles para el tipo seleccionado.")
+
+                with st.expander("Clustergrama de expresión relativa", expanded=False):
+                    try:
+                        # Recuperar clasificación y datos de expresión si existen
+                        if df_loaded is None:
+                            st.info("Primero carga y clasifica un Excel de qPCR para ver el clustergrama.")
+                        else:
+                            file_key = f"assign_{df_loaded.source_name}:{df_loaded.sheet_name}"
+                            state_local = st.session_state.get(file_key, {})
+                            controles_df = state_local.get('controles_df', pd.DataFrame())
+                            muestras_df = state_local.get('muestras_df', pd.DataFrame())
+                            if (controles_df is None or controles_df.empty) or (muestras_df is None or muestras_df.empty):
+                                st.info("Clasifica controles y muestras en la sección inicial para habilitar el clustergrama.")
+                            else:
+                                # Listas de genes desde las firmas para el tipo y niveles clásicos
+                                lista_sobre, lista_sub = [], []
+                                base = df_sigs_viz[df_sigs_viz['cancer_type'] == sel_tipo]
+                                try:
+                                    lista_sobre = base.loc[base['nivel_expresion'] == 'Sobreexpresados', 'genes'].iloc[0]
+                                except Exception:
+                                    lista_sobre = []
+                                try:
+                                    lista_sub = base.loc[base['nivel_expresion'] == 'Subexpresados', 'genes'].iloc[0]
+                                except Exception:
+                                    lista_sub = []
+                                lista_sobre = lista_sobre if isinstance(lista_sobre, list) else ([] if pd.isna(lista_sobre) else [str(lista_sobre)])
+                                lista_sub = lista_sub if isinstance(lista_sub, list) else ([] if pd.isna(lista_sub) else [str(lista_sub)])
+
+                                metodo = st.radio("Método de normalización", ["gen de referencia", "promedios"], index=0, horizontal=True, key="viz_cluster_method")
+                                ref_default = st.session_state.get('reference_gene', '')
+                                gen_ref = st.text_input("Gen de referencia (si aplica)", value=str(ref_default) if ref_default else "", key="viz_cluster_ref")
+                                figs = {}
+                                try:
+                                    figs = clustered_expression_by_level(controles_df, muestras_df, lista_sobre, lista_sub, metodo_elegido=metodo, gen_referencia=(gen_ref or None))
+                                except Exception as ex:
+                                    st.warning(f"No se pudo generar el clustergrama: {ex}")
+                                    figs = {}
+                                # Mostrar
+                                if not figs:
+                                    st.info("Sin datos suficientes para construir el clustergrama con los parámetros actuales.")
+                                else:
+                                    for k in ("Sobreexpresados", "Subexpresados"):
+                                        if k in figs:
+                                            st.plotly_chart(figs[k], use_container_width=True)
+                    except Exception:
+                        st.info("Clustergrama no disponible (faltan dependencias opcionales o datos).")
+            except Exception:
+                pass
 
 
 # -------------------------------------------------------------------------
