@@ -199,7 +199,13 @@ def _setup_entrez(cfg: PubMedConfig) -> None:
 
 @lru_cache(maxsize=1024)
 def _compile_word_regex(words_t: tuple) -> re.Pattern:
-    parts = [rf"\b{re.escape(w).replace(r'\-', '[- ]?')}\b" for w in words_t if w]
+    parts: List[str] = []
+    for w in words_t:
+        if not w:
+            continue
+        esc = re.escape(w)
+        esc = esc.replace("\\-", "[- ]?")  # permitir guion o espacio opcional
+        parts.append(r"\b" + esc + r"\b")
     return re.compile("|".join(parts), flags=re.IGNORECASE) if parts else re.compile(r"$.^")
 
 
