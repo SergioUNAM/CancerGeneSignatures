@@ -268,6 +268,14 @@ with st.sidebar:
     st.session_state["und_policy"] = und_policy
     st.session_state["und_value"] = float(und_value)
     st.session_state["context_sel_label"] = context_sel_label
+
+    # Preferencia global de gráficos: excluir genes 'estables'
+    exclude_stable = st.checkbox(
+        "Excluir genes 'estables' en gráficos",
+        value=bool(st.session_state.get("exclude_stable", False)),
+        help="Cuando está activado, los gráficos omiten los genes clasificados como 'estables'.",
+    )
+    st.session_state["exclude_stable"] = bool(exclude_stable)
     run_btn = st.button("Procesar archivo", type="primary")
 
 # -----------------------------------------------------------------------------
@@ -629,11 +637,22 @@ if df_loaded is not None:
 
             import plotly.graph_objects as go
             fig = go.Figure()
-            x_vals = fc.consolidated['target']
-            ddct_mean = fc.consolidated['delta_delta_ct_promedio']
-            ddct_ref = fc.consolidated['delta_delta_ct_gen_ref']
-            fc_mean = fc.consolidated['fold_change_promedio']
-            fc_ref = fc.consolidated['fold_change_gen_ref']
+            # Aplicar preferencia de exclusión de 'estables' solo para gráficos
+            exclude_stable = bool(st.session_state.get('exclude_stable', False))
+            try:
+                # Usar df_expr ya calculado para determinar objetivos a mostrar
+                targets_plot = (
+                    df_expr.loc[df_expr['nivel_expresion'] != 'estable', 'target']
+                    if exclude_stable else df_expr['target']
+                )
+                consolidated_plot = fc.consolidated[fc.consolidated['target'].isin(targets_plot)]
+            except Exception:
+                consolidated_plot = fc.consolidated
+            x_vals = consolidated_plot['target']
+            ddct_mean = consolidated_plot['delta_delta_ct_promedio']
+            ddct_ref = consolidated_plot['delta_delta_ct_gen_ref']
+            fc_mean = consolidated_plot['fold_change_promedio']
+            fc_ref = consolidated_plot['fold_change_gen_ref']
 
             y2_scale = st.radio("Escala FC", ["log", "lineal"], horizontal=True, index=0)
             y2_type = 'log' if y2_scale == 'log' else 'linear'
@@ -699,7 +718,10 @@ if df_loaded is not None:
             with cexp2:
                 import plotly.express as px
                 order_levels = ['estable', 'subexpresado', 'sobreexpresado']
-                counts = df_expr['nivel_expresion'].value_counts().reindex(order_levels, fill_value=0)
+                # Aplicar exclusión de 'estables' en el gráfico de distribución si corresponde
+                exclude_stable = bool(st.session_state.get('exclude_stable', False))
+                df_expr_plot = df_expr[df_expr['nivel_expresion'] != 'estable'] if exclude_stable else df_expr
+                counts = df_expr_plot['nivel_expresion'].value_counts().reindex(order_levels, fill_value=0)
                 bar = px.bar(x=counts.index, y=counts.values, labels={'x': 'Nivel de expresión', 'y': 'Frecuencia'}, title='Distribución de niveles de expresión')
                 st.plotly_chart(bar, use_container_width=True)
 

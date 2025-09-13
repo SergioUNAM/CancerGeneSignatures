@@ -66,6 +66,7 @@ Tareas
   - Referencia: `web_app/streamlit_app.py:349`
 - [x] Mover secciones pesadas a `web_app/pages/` (STRING, PubMed, Firmas) para un flujo por pasos.
 - [x] Gráficos FC: toggle escala lineal/log, resaltar el gen de referencia, tooltips claros.
+  - [x] Preferencia global en panel para excluir genes 'estables' en gráficos.
 
 Criterios de aceptación
 - La pestaña de clasificación permite elegir por prefijo/sufijo/regex y previsualiza resultados.
