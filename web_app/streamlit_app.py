@@ -912,6 +912,11 @@ if df_loaded is not None:
                 options=order_levels,
                 default=['subexpresado', 'sobreexpresado']
             )
+            # Respetar preferencia global de exclusión de 'estables'
+            exclude_stable_pref = bool(st.session_state.get('exclude_stable', False))
+            if exclude_stable_pref and 'estable' in sel_levels:
+                sel_levels = [lvl for lvl in sel_levels if lvl != 'estable']
+                st.caption("Preferencia activa: excluyendo 'estable' del enriquecimiento")
 
             # Fuentes/categorías a consultar en STRING
             cat_options = ["GO", "GO:BP", "GO:MF", "GO:CC", "KEGG", "Reactome"]
@@ -937,6 +942,8 @@ if df_loaded is not None:
                 try:
                     # Ejecutar enriquecimiento por nivel y concatenar (con caché)
                     levels_to_use = sel_levels or order_levels
+                    if exclude_stable_pref:
+                        levels_to_use = [lvl for lvl in levels_to_use if lvl != 'estable']
                     base = df_expr[df_expr['nivel_expresion'].isin(levels_to_use)].copy()
                     logger.info(f"STRING: niveles={levels_to_use}, fuentes={sel_cats}, genes_totales={base['target'].nunique()}")
                     with st.spinner("Consultando STRING por nivel…"):
@@ -1091,6 +1098,13 @@ if df_loaded is not None:
                     tmp = df_expr[['target', 'nivel_expresion']].drop_duplicates('target')
                     tmp['ensembl_id'] = ''
                     genes_df = tmp[['target', 'ensembl_id', 'nivel_expresion']]
+                # Respetar preferencia global de exclusión de 'estables'
+                if bool(st.session_state.get('exclude_stable', False)):
+                    n_before = len(genes_df)
+                    genes_df = genes_df[genes_df['nivel_expresion'] != 'estable']
+                    n_after = len(genes_df)
+                    if n_after < n_before:
+                        st.caption(f"Preferencia activa: excluyendo 'estable' en PubMed ({n_before-n_after} genes menos)")
 
                 # Usar credenciales explícitas (sin escribir en os.environ)
                 email = ncbi_email_input.strip()
