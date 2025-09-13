@@ -100,9 +100,9 @@ if run:
             order_levels = ['sobreexpresado', 'estable', 'subexpresado']
             agg['nivel_expresion'] = pd.Categorical(agg['nivel_expresion'], categories=order_levels, ordered=True)
             fig = px.bar(
-                agg.sort_values(['nivel_expresion','n'], ascending=[True, False]),
-                x='cancer_type', y='n', color='nivel_expresion', barmode='group',
-                labels={'cancer_type': 'Tipo de cáncer', 'n': 'Número de artículos', 'nivel_expresion': 'Nivel'},
+                agg.sort_values(['nivel_expresion','count'], ascending=[True, False]),
+                x='cancer_type', y='count', color='nivel_expresion', barmode='group',
+                labels={'cancer_type': 'Tipo de cáncer', 'count': 'Número de artículos', 'nivel_expresion': 'Nivel'},
                 title='Artículos por tipo de cáncer y nivel de expresión'
             )
             fig.update_layout(height=500, margin=dict(t=60, b=60))
