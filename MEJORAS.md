@@ -11,14 +11,14 @@ Estado inicial evaluado sobre `web_app/streamlit_app.py` y `src/core/*` a fecha 
 Objetivo: Corregir fallos evidentes que afectan la veracidad de resultados o UX inmediata.
 
 Tareas
-- [ ] Resumen de pruebas omite el primer nombre: usar todos los `sample_names`.
+- [x] Resumen de pruebas omite el primer nombre: usar todos los `sample_names`.
   - Referencia: `web_app/streamlit_app.py:279`
-- [ ] Robustecer elección del gen de referencia cuando no hay datos suficientes.
+- [x] Robustecer elección del gen de referencia cuando no hay datos suficientes.
   - Referencia: `src/core/fold_change.py:61`, `src/core/fold_change.py:64`, `src/core/fold_change.py:65`
   - Criterios: si toda la estabilidad es NaN o no hay intersección de genes entre grupos, mostrar mensaje claro en la UI y abortar el cálculo en lugar de fallar.
-- [ ] Evitar SettingWithCopy en imputación de Ct; operar sobre copias seguras o usar `.loc`.
+- [x] Evitar SettingWithCopy en imputación de Ct; operar sobre copias seguras o usar `.loc`.
   - Referencia: `web_app/streamlit_app.py:384`, `web_app/streamlit_app.py:385`
-- [ ] Unificar filtros de controles de máquina: aplicar lista por defecto + extras (PPC/RTC) en vez de reemplazarla.
+- [x] Unificar filtros de controles de máquina: aplicar lista por defecto + extras (PPC/RTC) en vez de reemplazarla.
   - Referencias: `web_app/streamlit_app.py:258`, `src/core/cleaning.py:25`
 
 Criterios de aceptación
@@ -37,13 +37,13 @@ Notas
 Objetivo: Prevenir rutas inválidas con validaciones tempranas y configurables.
 
 Tareas
-- [ ] Pre-checks antes de FC: grupos vacíos, intersección de `target`, ratio de NaN por grupo, n mínimo por gen/grupo.
+- [x] Pre-checks antes de FC: grupos vacíos, intersección de `target`, ratio de NaN por grupo, n mínimo por gen/grupo.
   - Mostrar panel de calidad con métricas y avisos.
-- [ ] Exponer en la UI la política de “Undetermined/ND” (nan | ctmax | value) y valor por defecto.
+- [x] Exponer en la UI la política de “Undetermined/ND” (nan | ctmax | value) y valor por defecto.
   - Conectar con `parse_qpcr_wide(..., undetermined_policy=...)` en lugar de imputar después.
   - Referencia: `src/core/io.py:79`, `src/core/io.py:181`
-- [ ] Ampliar tokens de “Undetermined”: incluir variantes como `na`, `n.a.`, `n/d`, `und.` (normalizar minúsculas y espacios).
-- [ ] Detección y resolución de nombres de muestra duplicados (renombrar con sufijos incrementales).
+- [x] Ampliar tokens de “Undetermined”: incluir variantes como `na`, `n.a.`, `n/d`, `und.` (normalizar minúsculas y espacios).
+- [x] Detección y resolución de nombres de muestra duplicados (renombrar con sufijos incrementales).
 
 Criterios de aceptación
 - Si una validación falla, la UI muestra causa y sugerencia (sin traceback).
@@ -186,11 +186,11 @@ Criterios de aceptación
 
 ## Apéndice — Lista de mejoras rápidas (checklist)
 
-- [ ] Corregir omisión de primer test en resumen (`web_app/streamlit_app.py:279`).
-- [ ] Guardas en FC para `NaN` y solapamiento (`src/core/fold_change.py:61`, `:64`, `:65`).
-- [ ] Unificar filtro de controles de máquina (usar defaults + PPC/RTC) (`web_app/streamlit_app.py:258`, `src/core/cleaning.py:25`).
-- [ ] Imputación segura de Ct (sin SettingWithCopy) (`web_app/streamlit_app.py:384`, `:385`).
-- [ ] UI para política “Undetermined” y tokens extendidos (`src/core/io.py:79`, `:181`).
+- [x] Corregir omisión de primer test en resumen (`web_app/streamlit_app.py:279`).
+- [x] Guardas en FC para `NaN` y solapamiento (`src/core/fold_change.py:61`, `:64`, `:65`).
+- [x] Unificar filtro de controles de máquina (usar defaults + PPC/RTC) (`web_app/streamlit_app.py:258`, `src/core/cleaning.py:25`).
+- [x] Imputación segura de Ct (sin SettingWithCopy) (`web_app/streamlit_app.py:384`, `:385`).
+- [x] UI para política “Undetermined” y tokens extendidos (`src/core/io.py:79`, `:181`).
 - [ ] Clasificar por sufijos/regex con previsualización (`src/core/qpcr.py:84`, `:92`).
 - [ ] Pages de Streamlit para modularizar flujo.
 - [ ] Caché a disco/TTL para Ensembl/STRING/PubMed (`web_app/streamlit_app.py:456`, `:463`, `:470`, `:748`).
@@ -214,4 +214,3 @@ Las fases 0–3 cubren la mayor parte del valor para un MVP robusto.
 - Mantener referencias de archivo con `ruta:línea` para trazabilidad.
 - Mensajes en español, concisos y con acción sugerida.
 - No introducir dependencias nuevas sin justificar en la fase correspondiente.
-

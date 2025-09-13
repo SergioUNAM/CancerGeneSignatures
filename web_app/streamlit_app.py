@@ -194,6 +194,24 @@ with st.sidebar:
     cancer_type = st.selectbox("Tipo de cáncer", MENU["menu"]["cancer_types"], index=0)
     context_sel_label = st.selectbox("Contexto", [c["label"] for c in MENU["menu"]["contexts"]], index=0)
     norm_sel_label = st.selectbox("Método preferido", [n["label"] for n in MENU["menu"]["normalization_methods"]], index=1)
+
+    st.header("3) Política 'Undetermined/ND'")
+    und_policy = st.selectbox(
+        "Cómo tratar valores 'Undetermined' (ND)",
+        options=["nan", "ctmax", "value"],
+        index=0,
+        help="\n- nan: deja como NaN (se puede imputar después).\n- ctmax: usa el Ct máximo observado por columna.\n- value: usa un valor fijo (p. ej., 40).",
+    )
+    und_value = st.number_input(
+        "Valor fijo para 'value'",
+        value=40.0,
+        min_value=0.0,
+        max_value=100.0,
+        step=0.5,
+    )
+    # Persistir en sesión para usarlo durante todo el flujo
+    st.session_state["und_policy"] = und_policy
+    st.session_state["und_value"] = float(und_value)
     run_btn = st.button("Procesar archivo", type="primary")
 
 # -----------------------------------------------------------------------------
@@ -212,6 +230,8 @@ if uploaded is not None and run_btn:
                 header_row_idx=3,  # A4/B4
                 well_col_idx=0,
                 target_col_idx=1,
+                undetermined_policy=und_policy,
+                undetermined_value=float(und_value),
             )
         except TypeError:
             # Compatibilidad con versiones antiguas sin nuevos parámetros
@@ -225,7 +245,13 @@ if uploaded is not None and run_btn:
         try:
             uploaded.seek(0)
             try:
-                df_loaded = parse_qpcr_wide(uploaded, sheet_name=sheet, header_mode="auto")
+                df_loaded = parse_qpcr_wide(
+                    uploaded,
+                    sheet_name=sheet,
+                    header_mode="auto",
+                    undetermined_policy=und_policy,
+                    undetermined_value=float(und_value),
+                )
             except TypeError:
                 df_loaded = parse_qpcr_wide(uploaded, sheet_name=sheet)
             st.session_state["df_loaded"] = df_loaded
@@ -276,7 +302,8 @@ if df_loaded is not None:
         pozos = [str(w).strip() for w in wells_col.dropna().unique().tolist()] if wells_col is not None else []
 
         st.markdown("- Nombres de las pruebas realizadas")
-        tests_filtered = sample_names[1:] if len(sample_names) > 1 else sample_names
+        # Usar todos los nombres de prueba (sin omitir el primero) y filtrar vacíos
+        tests_filtered = [s for s in sample_names if str(s).strip()]
         st.info(f"Total {len(tests_filtered)}: {', '.join(tests_filtered)}")
         st.markdown("- Genes objetivo analizados")
         genes_filtered = [g for g in genes if g]
@@ -373,16 +400,62 @@ if df_loaded is not None:
             else:
                 st.warning(f"No se detectaron {tipo.lower()} con los prefijos actuales.")
 
+        # Panel de calidad antes de FC
+        st.subheader("Calidad de datos (pre-FC)")
+        ok_for_fc = True
+        # Métricas básicas
+        ctrl_targets = set(controles_df['target'].dropna().astype(str)) if not controles_df.empty else set()
+        samp_targets = set(muestras_df['target'].dropna().astype(str)) if not muestras_df.empty else set()
+        common_targets = ctrl_targets.intersection(samp_targets)
+        ctrl_nan_ratio = float(controles_df['ct'].isna().mean()) if not controles_df.empty else 1.0
+        samp_nan_ratio = float(muestras_df['ct'].isna().mean()) if not muestras_df.empty else 1.0
+
+        mqa1, mqa2, mqa3, mqa4 = st.columns(4)
+        with mqa1:
+            st.metric("Genes (controles)", len(ctrl_targets))
+        with mqa2:
+            st.metric("Genes (muestras)", len(samp_targets))
+        with mqa3:
+            st.metric("Genes en común", len(common_targets))
+        with mqa4:
+            st.metric("NaN ct (ctrl/mues)", f"{ctrl_nan_ratio:.0%} / {samp_nan_ratio:.0%}")
+
+        if len(common_targets) == 0:
+            st.error("No hay intersección de genes entre controles y muestras. Ajusta tu clasificación.")
+            ok_for_fc = False
+        if ctrl_nan_ratio >= 1.0 or samp_nan_ratio >= 1.0:
+            st.error("Todos los valores Ct son NaN en algún grupo. Revisa la política de 'Undetermined' o tus datos.")
+            ok_for_fc = False
+
+        # N mínimo por gen y grupo
+        n_min = st.number_input("Mínimo de réplicas por gen y grupo", min_value=1, max_value=10, value=1, step=1)
+        if common_targets:
+            counts_ctrl = controles_df.dropna(subset=['ct']).groupby('target')['ct'].size()
+            counts_samp = muestras_df.dropna(subset=['ct']).groupby('target')['ct'].size()
+            eligible = [t for t in common_targets if counts_ctrl.get(t, 0) >= n_min and counts_samp.get(t, 0) >= n_min]
+            st.info(f"Genes que cumplen n≥{n_min} en ambos grupos: {len(eligible)}")
+            if len(eligible) == 0:
+                st.warning("Ningún gen cumple el mínimo de réplicas en ambos grupos. Considera reducir el umbral o revisar datos.")
+
     extras = {}
-    # Imputación estilo notebook: NaN -> valor máximo global de CT
-    if not controles_df.empty and not muestras_df.empty:
+    # Imputación estilo notebook: NaN -> valor máximo global de CT (solo si política es 'nan')
+    if not controles_df.empty and not muestras_df.empty and ok_for_fc:
         import pandas as pd
-        v_max = pd.concat([controles_df['ct'], muestras_df['ct']]).max()
-        # Mensaje informativo del valor máximo usado (estilo notebook)
-        max_str = f"{v_max:.2f}" if pd.notna(v_max) else "NaN"
-        st.info(f"Valor máximo usado para imputación de Ct: {max_str}")
-        controles_df['ct'] = pd.to_numeric(controles_df['ct'], errors='coerce').fillna(v_max)
-        muestras_df['ct'] = pd.to_numeric(muestras_df['ct'], errors='coerce').fillna(v_max)
+        # Coerción a numérico
+        controles_df = controles_df.copy()
+        muestras_df = muestras_df.copy()
+        controles_df.loc[:, 'ct'] = pd.to_numeric(controles_df['ct'], errors='coerce')
+        muestras_df.loc[:, 'ct'] = pd.to_numeric(muestras_df['ct'], errors='coerce')
+
+        und_policy = st.session_state.get('und_policy', 'nan')
+        if und_policy == 'nan':
+            v_max = pd.concat([controles_df['ct'], muestras_df['ct']]).max()
+            max_str = f"{v_max:.2f}" if pd.notna(v_max) else "NaN"
+            st.info(f"Imputación posterior: NaN de Ct → {max_str} (máximo global)")
+            controles_df.loc[:, 'ct'] = controles_df['ct'].fillna(v_max)
+            muestras_df.loc[:, 'ct'] = muestras_df['ct'].fillna(v_max)
+        else:
+            st.info("Valores 'Undetermined' ya tratados durante la carga (sin imputación adicional).")
 
         # Guardar CSV limpios
         extras['controles_limpios.csv'] = controles_df.to_csv(index=False)

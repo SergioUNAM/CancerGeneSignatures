@@ -36,8 +36,8 @@ def drop_machine_controls(
         "CONTROL",
     ]
 
-    prefixes = list(controls) if controls is not None else default_controls
+    # Unificar: usar lista por defecto + extras provistos (p. ej., PPC/RTC)
+    prefixes = (default_controls + list(controls)) if controls is not None else default_controls
     series = df_long[column].astype(str)
     mask_keep = ~series.str.startswith(tuple(prefixes))
     return df_long.loc[mask_keep].copy()
-
