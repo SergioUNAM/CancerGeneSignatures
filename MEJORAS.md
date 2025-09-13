@@ -151,6 +151,15 @@ Notas
 
 ---
 
+## Flujo UI actualizado (single-page)
+
+1. Bibliografía (PubMed): búsqueda y descarga. Cacheada 24h por parámetros.
+2. Firmas genéticas: generación a partir de la bibliografía clasificada (Hallmarks opcionales).
+3. Heurística: interpretación de títulos/abstracts con scoring y efectos.
+4. Relación niveles ↔ firmas ↔ hallmarks: heatmaps, treemaps y Sankey.
+
+---
+
 ## Fase 6 — Calidad, Tests y Estilo
 
 Objetivo: Mejorar confiabilidad con pruebas automáticas y estilo consistente.
