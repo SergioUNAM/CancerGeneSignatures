@@ -46,8 +46,24 @@ from src.core.qpcr import (
     suggest_name_affixes,
     classify_by_prefixes,
     classify_by_suffixes,
-    classify_by_regex,
 )
+# Compatibilidad: si la instalación local aún no expone classify_by_regex, usar fallback local
+try:
+    from src.core.qpcr import classify_by_regex  # type: ignore
+except Exception:
+    def classify_by_regex(df_long, ctrl_pattern: str, sample_pattern: str):
+        t = df_long.copy()
+        t["test_str"] = t["test"].astype(str)
+        ctrl = (
+            t[t["test_str"].str.contains(ctrl_pattern, regex=True, na=False)]
+            if ctrl_pattern else t.iloc[0:0]
+        )
+        samp = (
+            t[t["test_str"].str.contains(sample_pattern, regex=True, na=False)]
+            if sample_pattern else t.iloc[0:0]
+        )
+        return (ctrl.drop(columns=["test_str"]) if not ctrl.empty else ctrl,
+                samp.drop(columns=["test_str"]) if not samp.empty else samp)
 from src.core.cleaning import drop_machine_controls
 from src.core.fold_change import compute_fold_change
 from src.core.tables import fc_comparison_table
