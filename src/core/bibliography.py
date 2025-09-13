@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Iterable, List, Dict, Tuple, Optional, Callable, Any
+import re
+import difflib
+from functools import lru_cache
 import os
 import time
 import re
@@ -194,9 +197,14 @@ def _setup_entrez(cfg: PubMedConfig) -> None:
         Entrez.api_key = cfg.api_key
 
 
+@lru_cache(maxsize=1024)
+def _compile_word_regex(words_t: tuple) -> re.Pattern:
+    parts = [rf"\b{re.escape(w).replace(r'\-', '[- ]?')}\b" for w in words_t if w]
+    return re.compile("|".join(parts), flags=re.IGNORECASE) if parts else re.compile(r"$.^")
+
+
 def _compile_kw_regex(words: List[str]) -> re.Pattern:
-    words_escaped = [re.escape(w.lower()) for w in words if w]
-    return re.compile(r"\b(" + "|".join(words_escaped) + r")\b") if words_escaped else re.compile(r"$.^")
+    return _compile_word_regex(tuple(w for w in words if w))
 
 
 def _detect_any(text: str, rx: re.Pattern) -> bool:
@@ -371,50 +379,79 @@ def aggregate_counts_by_level_and_cancer(df: pd.DataFrame) -> pd.DataFrame:
 
 # ---------------- Heurística de interpretación por cáncer -----------------
 
+def _norm(s: str) -> str:
+    return (s or "").strip().lower()
+
+
+def _best_fuzzy_key(query: str, keys: List[str], cutoff: float = 0.82) -> Optional[str]:
+    matches = difflib.get_close_matches(query, keys, n=1, cutoff=cutoff)
+    return matches[0] if matches else None
+
+
 def _match_cancer_key(label: str) -> Optional[str]:
-    """Devuelve la clave de DEFAULT_CANCER_TYPES que mejor coincide con `label`.
-    Coincidencia por igualdad o inclusión case-insensitive.
-    """
+    """Mejor coincidencia: exacta, por sinónimos/inclusión, luego fuzzy por keys."""
     if not label:
         return None
-    lab = str(label).strip().lower()
-    for k in DEFAULT_CANCER_TYPES.keys():
+    lab = _norm(label)
+    keys = list(DEFAULT_CANCER_TYPES.keys())
+    # exacta por key
+    for k in keys:
         if lab == k.lower():
             return k
-    for k in DEFAULT_CANCER_TYPES.keys():
-        if lab in k.lower() or k.lower() in lab:
+    # sinónimos / inclusión
+    for k in keys:
+        syns = [k] + DEFAULT_CANCER_TYPES.get(k, [])
+        if any(lab == _norm(s) for s in syns):
             return k
+        if any(lab in _norm(s) or _norm(s) in lab for s in syns):
+            return k
+    # fuzzy por keys
+    fk = _best_fuzzy_key(lab, [k.lower() for k in keys], cutoff=0.82)
+    if fk:
+        return next((k for k in keys if k.lower() == fk), None)
     return None
 
 
 HEUR_UP = [
-    "overexpress", "over-expression", "upregulated", "up-regulated", "high expression",
-    "elevated", "increased", "up regulation", "gain of", "amplified",
+    "overexpress", "over-expression", "overexpression", "upregulated", "up-regulated",
+    "high expression", "elevated", "increased", "up regulation", "gain of", "amplified",
+    "induces expression", "activates", "enhances", "promotes expression",
 ]
 HEUR_DOWN = [
     "downregulated", "down-regulated", "low expression", "decreased", "reduced",
-    "silenced", "loss of", "suppressed",
+    "silenced", "loss of", "suppressed", "knockdown reduces", "knockout reduces",
+    "inhibits expression", "attenuates",
 ]
 HEUR_PROGNOSIS_BAD = [
     "poor prognosis", "worse survival", "shorter survival", "adverse outcome", "high risk",
+    "lower overall survival", "lower os", "lower dfs", "higher hazard", "hazard ratio >",
 ]
 HEUR_PROGNOSIS_GOOD = [
     "better survival", "good prognosis", "favorable prognosis", "longer survival",
+    "higher overall survival", "higher os", "beneficial prognosis",
 ]
 HEUR_FUNCTIONS = {
-    "proliferation": ["proliferation", "cell growth"],
-    "apoptosis": ["apoptosis", "apoptotic"],
-    "invasion": ["invasion", "invasive"],
-    "migration": ["migration", "migratory"],
-    "metastasis": ["metastasis", "metastatic"],
-    "drug_resistance": ["drug resistance", "chemoresistance", "resistant"],
-    "drug_sensitivity": ["chemosensitivity", "sensitive to", "sensitizes"],
+    "proliferation": ["proliferation", "cell growth", "cell cycle progression", "s phase entry"],
+    "apoptosis": ["apoptosis", "apoptotic", "anoikis", "caspase activation"],
+    "invasion": ["invasion", "invasive", "matrigel invasion"],
+    "migration": ["migration", "migratory", "wound healing assay"],
+    "metastasis": ["metastasis", "metastatic", "metastatic potential"],
+    "drug_resistance": ["drug resistance", "chemoresistance", "resistant", "multidrug resistance"],
+    "drug_sensitivity": ["chemosensitivity", "drug sensitivity", "sensitizes", "resensitizes"],
+    "emt_related": ["emt", "epithelial-mesenchymal transition", "vimentin", "e-cadherin loss"],
 }
+NEGATIONS = [
+    "not", "no", "lack of", "did not", "does not", "fails to", "without", "little to no",
+    "non-", "absence of", "insufficient", "no association", "not correlated",
+]
+HEDGES = [
+    "may", "might", "could", "suggests", "appears to", "potentially", "trend towards", "likely",
+]
 
 
 def _contains_any(text: str, words: List[str]) -> bool:
-    t = (text or "").lower()
-    return any(w.lower() in t for w in words)
+    rx = _compile_kw_regex(words)
+    return bool(rx.search(text or ""))
 
 
 def filter_bibliography_by_cancer(df: pd.DataFrame, cancer_label: str) -> pd.DataFrame:
@@ -427,11 +464,52 @@ def filter_bibliography_by_cancer(df: pd.DataFrame, cancer_label: str) -> pd.Dat
     t = df.copy()
     title_col = "Title" if "Title" in t.columns else ("article_title" if "article_title" in t.columns else None)
     abs_col = "Abstract" if "Abstract" in t.columns else None
-    text = ((t[title_col] if title_col else "") + " " + (t[abs_col] if abs_col else "")).astype(str)
-    mask_terms = text.str.lower().apply(lambda s: _contains_any(s, terms))
-    mask_ct = t.get("cancer_type").astype(str).str.contains(str(k or cancer_label), case=False, na=False) if "cancer_type" in t.columns else False
+    title_s = (t[title_col] if title_col else pd.Series("", index=t.index)).astype(str)
+    abs_s = (t[abs_col] if abs_col else pd.Series("", index=t.index)).astype(str)
+    text = (title_s + " " + abs_s)
+    mask_terms = text.apply(lambda s: bool(_compile_kw_regex(terms).search(s)))
+    mask_ct = (
+        t.get("cancer_type", pd.Series("", index=t.index)).astype(str)
+         .str.contains(str(k or cancer_label), case=False, na=False)
+    )
     out = t[mask_terms | mask_ct]
     return out.reset_index(drop=True)
+
+
+def _span_contains_negation(txt: str, start: int, end: int) -> bool:
+    left = max(0, start - 200)
+    right = min(len(txt), end + 200)
+    return bool(_compile_kw_regex(NEGATIONS).search(txt[left:right]))
+
+
+def _span_contains_hedge(txt: str, start: int, end: int) -> bool:
+    left = max(0, start - 200)
+    right = min(len(txt), end + 200)
+    return bool(_compile_kw_regex(HEDGES).search(txt[left:right]))
+
+
+def _score_hits(txt: str, gene: str, lexicon: List[str], title_txt: str = "") -> float:
+    if not txt:
+        return 0.0
+    rx = _compile_kw_regex(lexicon)
+    score = 0.0
+    for m in rx.finditer(txt):
+        s = 1.0
+        if gene:
+            try:
+                gpos = [gm.start() for gm in re.finditer(re.escape(gene), txt, flags=re.IGNORECASE)]
+            except re.error:
+                gpos = []
+            if gpos and any(abs(g - m.start()) <= 80 for g in gpos):
+                s *= 1.3
+        if _span_contains_negation(txt, m.start(), m.end()):
+            continue
+        if _span_contains_hedge(txt, m.start(), m.end()):
+            s *= 0.7
+        score += s
+    if title_txt and rx.search(title_txt):
+        score *= 1.5
+    return score
 
 
 def interpret_gene_relations(
@@ -440,9 +518,7 @@ def interpret_gene_relations(
     title_col: str = "Title",
     abs_col: str = "Abstract",
 ) -> pd.DataFrame:
-    """Etiqueta heurísticamente relaciones por artículo y gene. Devuelve un DataFrame
-    con columnas booleanas por relación y un resumen por fila.
-    """
+    """Calcula scores heurísticos por relación (+ flags por umbral) y efecto neto de expresión."""
     if df is None or df.empty:
         return pd.DataFrame()
     t = df.copy()
@@ -450,35 +526,67 @@ def interpret_gene_relations(
         title_col = "article_title"
     if abs_col not in t.columns:
         abs_col = None
-    def row_tags(row) -> Dict[str, bool]:
-        txt = (str(row.get(title_col, "")) + " " + (str(row.get(abs_col, "")) if abs_col else "")).lower()
-        tags: Dict[str, bool] = {
-            "upregulated": _contains_any(txt, HEUR_UP),
-            "downregulated": _contains_any(txt, HEUR_DOWN),
-            "emt_related": _detect_any(txt, _compile_kw_regex(EMT_KEYWORDS)),
-            "prognosis_bad": _contains_any(txt, HEUR_PROGNOSIS_BAD),
-            "prognosis_good": _contains_any(txt, HEUR_PROGNOSIS_GOOD),
-        }
-        for key, words in HEUR_FUNCTIONS.items():
-            tags[key] = _contains_any(txt, words)
-        return tags
-    tags_df = t.apply(row_tags, axis=1, result_type="expand")
-    out = pd.concat([t.reset_index(drop=True), tags_df], axis=1)
+
+    def _txt(row):
+        title = str(row.get(title_col, "") or "")
+        abstract = str(row.get(abs_col, "") or "") if abs_col else ""
+        return title, (title + " " + abstract)
+
+    def row_scores(row):
+        gene = str(row.get(gene_col, "") or "").strip()
+        title, full = _txt(row)
+        out: Dict[str, float | bool] = {}
+        out["upregulated_score"] = _score_hits(full, gene, HEUR_UP, title)
+        out["downregulated_score"] = _score_hits(full, gene, HEUR_DOWN, title)
+        out["prognosis_bad_score"] = _score_hits(full, gene, HEUR_PROGNOSIS_BAD, title)
+        out["prognosis_good_score"] = _score_hits(full, gene, HEUR_PROGNOSIS_GOOD, title)
+        for k, words in HEUR_FUNCTIONS.items():
+            out[f"{k}_score"] = _score_hits(full, gene, words, title)
+        TH = 1.2
+        out["upregulated"] = out["upregulated_score"] >= TH
+        out["downregulated"] = out["downregulated_score"] >= TH
+        out["prognosis_bad"] = out["prognosis_bad_score"] >= TH
+        out["prognosis_good"] = out["prognosis_good_score"] >= TH
+        for k in HEUR_FUNCTIONS.keys():
+            out[k] = out[f"{k}_score"] >= TH
+        return out
+
+    scores_df = t.apply(row_scores, axis=1, result_type="expand")
+    out = pd.concat([t.reset_index(drop=True), scores_df], axis=1)
+
+    def net_direction(r) -> str:
+        up = float(r.get("upregulated_score", 0.0))
+        dn = float(r.get("downregulated_score", 0.0))
+        if max(up, dn) < 1.2:
+            return "uncertain"
+        if up > dn * 1.25:
+            return "up"
+        if dn > up * 1.25:
+            return "down"
+        return "mixed"
+
+    out["expression_effect"] = out.apply(net_direction, axis=1)
     return out
 
 
 def summarize_relations_by_gene(df: pd.DataFrame, gene_col: str = "Gene") -> pd.DataFrame:
     if df is None or df.empty or gene_col not in df.columns:
         return pd.DataFrame()
-    rel_cols = [
-        "upregulated", "downregulated", "emt_related", "prognosis_bad", "prognosis_good",
-        "proliferation", "apoptosis", "invasion", "migration", "metastasis", "drug_resistance", "drug_sensitivity",
+    rel_flags = [
+        "upregulated", "downregulated", "prognosis_bad", "prognosis_good",
+        "proliferation", "apoptosis", "invasion", "migration", "metastasis",
+        "drug_resistance", "drug_sensitivity", "emt_related",
     ]
-    present = [c for c in rel_cols if c in df.columns]
-    g = df.groupby(gene_col)[present].sum(min_count=1).reset_index()
+    rel_scores = [f"{c}_score" for c in rel_flags]
+    present_flags = [c for c in rel_flags if c in df.columns]
+    present_scores = [c for c in rel_scores if c in df.columns]
+    agg_dict: Dict[str, str] = {c: "sum" for c in present_flags}
+    agg_dict.update({c: "sum" for c in present_scores})
+    g = df.groupby(gene_col).agg(agg_dict).reset_index()
+
     def _mk_summary(r) -> str:
         parts = []
-        for c in present:
+        for c in present_flags:
             try:
                 val = int(r.get(c, 0))
                 if val > 0:
@@ -486,5 +594,19 @@ def summarize_relations_by_gene(df: pd.DataFrame, gene_col: str = "Gene") -> pd.
             except Exception:
                 pass
         return ", ".join(parts)
+
     g["heuristic_summary"] = g.apply(_mk_summary, axis=1)
+
+    def _net_gene(r) -> str:
+        up = float(r.get("upregulated_score", 0.0))
+        dn = float(r.get("downregulated_score", 0.0))
+        if max(up, dn) < 2.5:
+            return "uncertain"
+        if up > dn * 1.2:
+            return "up"
+        if dn > up * 1.2:
+            return "down"
+        return "mixed"
+
+    g["net_expression_effect"] = g.apply(_net_gene, axis=1)
     return g

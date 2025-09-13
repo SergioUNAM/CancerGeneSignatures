@@ -1220,6 +1220,53 @@ if df_loaded is not None:
                                 mime="text/csv",
                                 use_container_width=True,
                             )
+                            # Visualizaciones avanzadas: heatmap de funciones y Sankey
+                            try:
+                                import numpy as np
+                                import plotly.express as px
+                                # Heatmap genes x funciones (scores normalizados)
+                                func_cols = [
+                                    c for c in summary.columns
+                                    if c.endswith('_score') and not c.startswith(('upregulated','downregulated','prognosis_'))
+                                ]
+                                if func_cols:
+                                    sm = summary.copy()
+                                    sm['_total_score'] = sm[func_cols].sum(axis=1)
+                                    top = sm.sort_values('_total_score', ascending=False).head(30)
+                                    Z = (top[func_cols] - top[func_cols].min()) / (top[func_cols].max() - top[func_cols].min() + 1e-9)
+                                    fig_hm = px.imshow(
+                                        Z.values,
+                                        labels=dict(x='Función', y='Gen', color='Score norm.'),
+                                        x=[c.replace('_score','') for c in func_cols],
+                                        y=top['Gene'].tolist(),
+                                        aspect='auto',
+                                        title='Heatmap genes × funciones (scores normalizados)'
+                                    )
+                                    fig_hm.update_layout(margin=dict(l=60,r=20,t=40,b=40))
+                                    st.plotly_chart(fig_hm, use_container_width=True)
+                                # Sankey: Gen → efecto expresión → pronóstico dominante
+                                mid = summary.get('net_expression_effect')
+                                if mid is not None:
+                                    import plotly.graph_objects as go
+                                    # pronóstico dominante
+                                    bad = summary.get('prognosis_bad_score', 0)
+                                    good = summary.get('prognosis_good_score', 0)
+                                    dom = np.where(bad.values > good.values, 'prognosis_bad', np.where(good.values > 0, 'prognosis_good', 'prognosis_uncertain'))
+                                    left = summary['Gene'].tolist()
+                                    midl = summary['net_expression_effect'].astype(str).tolist()
+                                    right = dom.tolist()
+                                    nodes = list(dict.fromkeys(left + midl + right))
+                                    idx = {n:i for i,n in enumerate(nodes)}
+                                    links = []
+                                    links += [(idx[l], idx[m], 1) for l, m in zip(left, midl)]
+                                    links += [(idx[m], idx[r], 1) for m, r in zip(midl, right)]
+                                    link = dict(source=[s for s,_,_ in links], target=[t for _,t,_ in links], value=[v for _,_,v in links])
+                                    node = dict(label=nodes, pad=12, thickness=12)
+                                    fig_sk = go.Figure(go.Sankey(node=node, link=link))
+                                    fig_sk.update_layout(margin=dict(l=10,r=10,t=10,b=10), title='Flujo expresión → pronóstico')
+                                    st.plotly_chart(fig_sk, use_container_width=True)
+                            except Exception:
+                                pass
                             # Heatmap de conteos por relación y gen
                             try:
                                 import plotly.express as px
