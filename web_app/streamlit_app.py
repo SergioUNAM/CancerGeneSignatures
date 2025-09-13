@@ -989,9 +989,15 @@ if df_loaded is not None:
             "Puedes ingresar tu email/API key aquí para la demo."
         )
         # Entrada directa (demo): email y API key NCBI
-        # Credenciales: tomar de st.secrets si están configuradas
-        sec_email = st.secrets.get("NCBI_EMAIL", "") if hasattr(st, 'secrets') else ""
-        sec_key = st.secrets.get("NCBI_API_KEY", "") if hasattr(st, 'secrets') else ""
+        # Credenciales: intentar st.secrets si existen; tolerar ausencia de secrets.toml
+        try:
+            sec_email = st.secrets["NCBI_EMAIL"]
+        except Exception:
+            sec_email = ""
+        try:
+            sec_key = st.secrets["NCBI_API_KEY"]
+        except Exception:
+            sec_key = ""
         env_email = sec_email or os.getenv("NCBI_EMAIL", "")
         env_key = sec_key or os.getenv("NCBI_API_KEY", "")
         ccreds1, ccreds2 = st.columns([2, 2])
