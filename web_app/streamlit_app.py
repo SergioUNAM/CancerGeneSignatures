@@ -725,6 +725,57 @@ if df_loaded is not None:
                 bar = px.bar(x=counts.index, y=counts.values, labels={'x': 'Nivel de expresión', 'y': 'Frecuencia'}, title='Distribución de niveles de expresión')
                 st.plotly_chart(bar, use_container_width=True)
 
+            # Genes por nivel de expresión: lista/tablas y treemap
+            st.markdown("### Genes por nivel de expresión")
+            # Base para visualizaciones (respetar preferencia de exclusión de 'estables')
+            df_expr_vis = df_expr[df_expr['nivel_expresion'] != 'estable'].copy() if bool(st.session_state.get('exclude_stable', False)) else df_expr.copy()
+            # Orden sugerido
+            levels_vis = ['subexpresado', 'estable', 'sobreexpresado']
+            levels_vis = [lvl for lvl in levels_vis if lvl in df_expr_vis['nivel_expresion'].astype(str).unique()]
+            view_mode = st.radio("Vista", ["Lista por nivel", "Treemap"], horizontal=True, index=0)
+            if view_mode == "Lista por nivel":
+                tabs = st.tabs([lvl.capitalize() for lvl in levels_vis]) if levels_vis else []
+                for lvl, tab in zip(levels_vis, tabs):
+                    with tab:
+                        sub = df_expr_vis[df_expr_vis['nivel_expresion'] == lvl].copy()
+                        if sub.empty:
+                            st.info("Sin genes para este nivel.")
+                            continue
+                        # Ordenar por |log2FC| descendente para resaltar extremos
+                        try:
+                            sub['log2fc'] = np.log2(sub['fold_change'].clip(lower=1e-12))
+                            sub = sub.sort_values(sub['log2fc'].abs(), ascending=False)
+                        except Exception:
+                            pass
+                        st.dataframe(sub[['target', 'fold_change', 'nivel_expresion']])
+                        st.download_button(
+                            label=f"Descargar genes ({lvl})",
+                            data=sub[['target', 'fold_change', 'nivel_expresion']].to_csv(index=False),
+                            file_name=f"genes_{lvl}.csv",
+                            mime="text/csv",
+                            use_container_width=True,
+                        )
+            else:
+                try:
+                    import plotly.express as px
+                    treedata = df_expr_vis.copy()
+                    if treedata.empty:
+                        st.info("Sin genes para graficar con los filtros actuales.")
+                    else:
+                        treedata['log2fc'] = np.log2(treedata['fold_change'].clip(lower=1e-12))
+                        fig_t = px.treemap(
+                            treedata,
+                            path=['nivel_expresion', 'target'],
+                            values=treedata['log2fc'].abs(),
+                            color='log2fc',
+                            color_continuous_scale='RdBu',
+                            color_continuous_midpoint=0.0,
+                            title='Genes por nivel (tamaño = |log2FC|, color = log2FC)'
+                        )
+                        st.plotly_chart(fig_t, use_container_width=True)
+                except Exception as _:
+                    st.info("No se pudo generar el treemap con los datos actuales.")
+
             # Persistir para páginas
             st.session_state['fc_consolidated'] = fc.consolidated.copy()
             st.session_state['reference_gene'] = fc.reference_gene
