@@ -54,7 +54,8 @@ def run_string_enrichment(
         # Examples: ["GO", "KEGG"], ["GO:BP"], ["KEGG"]
         params["source"] = "%0d".join(sources)
 
-    url = base_url or STRING_ENRICH_URL
+    # Permitir override de URL vía variable de entorno (CGS_STRING_URL)
+    url = base_url or os.getenv("CGS_STRING_URL") or STRING_ENRICH_URL
     data = None
     try:
         # Prefer POST per notebook example

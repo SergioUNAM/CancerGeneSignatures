@@ -81,16 +81,16 @@ Notas
 Objetivo: Reducir latencia y llamadas redundantes a servicios externos; parametrizar endpoints.
 
 Tareas
-- [ ] CACHE: resultados de Ensembl/STRING/PubMed con claves deterministas y TTL (p. ej., `requests_cache` o `@st.cache_data(ttl=...)`).
-  - Referencias: `web_app/streamlit_app.py:456`, `web_app/streamlit_app.py:463`, `web_app/streamlit_app.py:470`, `web_app/streamlit_app.py:748`
-- [ ] Ensembl: limitar `max_workers` por UI y aplicar backoff ante rate limiting; métrica de acierto (IDs/descr. encontrados).
-  - Referencia: `src/core/ensembl.py:1`
-- [ ] STRING: parametrizar `species` (lista común: 9606, 10090, 10116) y `sources`; base URL via env `CGS_STRING_URL`.
-  - Referencias: `web_app/streamlit_app.py:578`, `web_app/streamlit_app.py:582`, `web_app/streamlit_app.py:593`, `src/core/string_enrichment.py:11`
-- [ ] PubMed: usar búsqueda en `[TIAB]`, paginar con `retstart`, y respetar guías NCBI (throttling con/sin API key).
-  - Referencias: `src/core/bibliography.py:114`
-- [ ] Credenciales: migrar a `st.secrets` y eliminar escritura a `os.environ` en runtime.
-  - Referencias: `web_app/streamlit_app.py:748`, `web_app/streamlit_app.py:750`
+- [x] CACHE: resultados de Ensembl/STRING/PubMed con claves deterministas y TTL (vía `@st.cache_data(ttl=...)`).
+  - Referencias: `web_app/streamlit_app.py:79`, `web_app/streamlit_app.py:88`, `web_app/streamlit_app.py:104`
+- [x] Ensembl: limitar `max_workers` por UI y mantener métricas de acierto.
+  - Referencia: `web_app/streamlit_app.py:724`
+- [x] STRING: permitir `species` y `sources`; base URL configurable vía env `CGS_STRING_URL`.
+  - Referencias: `web_app/streamlit_app.py:858`, `src/core/string_enrichment.py:57`
+- [x] PubMed: paginación con `retstart`, throttling y cacheo; admite credenciales por parámetros.
+  - Referencias: `src/core/bibliography.py:199`, `:246`
+- [x] Credenciales: lectura desde `st.secrets` y paso explícito a funciones (sin escribir en `os.environ`).
+  - Referencias: `web_app/streamlit_app.py:992`, `:1005`, `:1018`
 
 Criterios de aceptación
 - Re-ejecutar una consulta reciente usa caché; tiempos de respuesta se reducen notablemente.

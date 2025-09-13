@@ -96,13 +96,49 @@ def _compute_signatures_cached(bib_csv: str, ctx: str, hall_gmt: str, back_gmt: 
     return create_signatures(df_bib, contexto_biologico=ctx, hallmark_cfg=cfg)
 
 # Cache de anotación Ensembl (evitar llamadas repetidas a red en cada rerun)
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=3600)
 def _annotate_ensembl_cached(df_csv: str, max_workers: int = 3) -> pd.DataFrame:
     try:
         df_in = pd.read_csv(io.StringIO(df_csv))
     except Exception:
         return pd.DataFrame()
     return add_ensembl_info_batch(df_in, symbol_col='target', max_workers=max_workers)
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _string_enrichment_cached(df_expr_csv: str, levels: list[str], species: int, sources: list[str], max_fdr: float, min_size: int, top_n: int) -> dict:
+    try:
+        df_expr = pd.read_csv(io.StringIO(df_expr_csv))
+    except Exception:
+        return {"combined": pd.DataFrame(), "by_level": {}}
+    from src.core.string_enrichment import enrich_by_levels, filter_enrichment
+    res = enrich_by_levels(df_expr, symbol_col='target', level_col='nivel_expresion', levels=levels, species=species, sources=sources)
+    combined = res.get('combined')
+    by_level = res.get('by_level') or {}
+    # Aplicar filtros aquí para cachear resultado final
+    out_by_level = {}
+    if isinstance(by_level, dict):
+        for lvl, d in by_level.items():
+            out_by_level[lvl] = filter_enrichment(d, include_categories=sources, max_fdr=max_fdr, min_term_genes=min_size, top_n=top_n)
+    out_combined = filter_enrichment(combined, include_categories=sources, max_fdr=max_fdr, min_term_genes=min_size, top_n=top_n)
+    return {"combined": out_combined, "by_level": out_by_level}
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def _pubmed_cached(genes_df_csv: str, context: str, max_per_gene: int, email: str, api_key: str|None) -> pd.DataFrame:
+    try:
+        genes_df = pd.read_csv(io.StringIO(genes_df_csv))
+    except Exception:
+        return pd.DataFrame()
+    return search_pubmed_by_genes(
+        genes_df.rename(columns={'target': 'target'}),
+        symbol_col='target',
+        ensembl_col='ensembl_id',
+        selected_context=context,
+        max_per_gene=int(max_per_gene),
+        progress=None,
+        logger=None,
+        email=email,
+        api_key=api_key,
+    )
 
 # Hot-reload STRING enrichment helpers during dev
 try:
@@ -688,17 +724,18 @@ if df_loaded is not None:
                 cols = st.columns([1,1,2])
                 with cols[0]:
                     need_compute = not (ensembl_state_key == genes_key and isinstance(ensembl_state_df, pd.DataFrame) and not ensembl_state_df.empty)
+                    ens_workers = st.number_input("Hilos Ensembl", value=3, min_value=1, max_value=16, step=1, help="Límite de concurrencia para llamadas a Ensembl")
                     if need_compute:
                         if st.button("Anotar Ensembl", key="btn_annot_ens"):
                             with st.spinner("Consultando Ensembl…"):
-                                ensembl_df = _annotate_ensembl_cached(df_to_annot[['target','nivel_expresion','fold_change']].sort_values('target').to_csv(index=False), max_workers=3)
+                                ensembl_df = _annotate_ensembl_cached(df_to_annot[['target','nivel_expresion','fold_change']].sort_values('target').to_csv(index=False), max_workers=int(ens_workers))
                             st.session_state['ensembl_df'] = ensembl_df.copy()
                             st.session_state['ensembl_key'] = genes_key
                     else:
                         st.success("Usando anotación en caché para esta lista de genes.")
                         if st.button("Recalcular", key="btn_recalc_ens"):
                             with st.spinner("Consultando Ensembl…"):
-                                ensembl_df = _annotate_ensembl_cached(df_to_annot[['target','nivel_expresion','fold_change']].sort_values('target').to_csv(index=False), max_workers=3)
+                                ensembl_df = _annotate_ensembl_cached(df_to_annot[['target','nivel_expresion','fold_change']].sort_values('target').to_csv(index=False), max_workers=int(ens_workers))
                             st.session_state['ensembl_df'] = ensembl_df.copy()
                             st.session_state['ensembl_key'] = genes_key
 
@@ -825,22 +862,22 @@ if df_loaded is not None:
 
             if run_enrich:
                 try:
-                    # Ejecutar enriquecimiento por nivel y concatenar
+                    # Ejecutar enriquecimiento por nivel y concatenar (con caché)
                     levels_to_use = sel_levels or order_levels
                     base = df_expr[df_expr['nivel_expresion'].isin(levels_to_use)].copy()
                     logger.info(f"STRING: niveles={levels_to_use}, fuentes={sel_cats}, genes_totales={base['target'].nunique()}")
                     with st.spinner("Consultando STRING por nivel…"):
-                        enr_dict = enrich_by_levels(
-                            base,
-                            symbol_col='target',
-                            level_col='nivel_expresion',
+                        res = _string_enrichment_cached(
+                            base.to_csv(index=False),
                             levels=levels_to_use,
                             species=int(species),
                             sources=sel_cats,
-                            caller_identity="UIMEO",
+                            max_fdr=float(max_fdr),
+                            min_size=int(min_size),
+                            top_n=int(top_n),
                         )
-                    combined = enr_dict.get('combined')
-                    by_level = enr_dict.get('by_level', {})
+                    combined = res.get('combined')
+                    by_level = res.get('by_level', {})
                     try:
                         logger.info(f"STRING: filas combinadas={0 if combined is None else len(combined)}")
                     except Exception:
@@ -952,8 +989,11 @@ if df_loaded is not None:
             "Puedes ingresar tu email/API key aquí para la demo."
         )
         # Entrada directa (demo): email y API key NCBI
-        env_email = os.getenv("NCBI_EMAIL", "")
-        env_key = os.getenv("NCBI_API_KEY", "")
+        # Credenciales: tomar de st.secrets si están configuradas
+        sec_email = st.secrets.get("NCBI_EMAIL", "") if hasattr(st, 'secrets') else ""
+        sec_key = st.secrets.get("NCBI_API_KEY", "") if hasattr(st, 'secrets') else ""
+        env_email = sec_email or os.getenv("NCBI_EMAIL", "")
+        env_key = sec_key or os.getenv("NCBI_API_KEY", "")
         ccreds1, ccreds2 = st.columns([2, 2])
         with ccreds1:
             ncbi_email_input = st.text_input("NCBI Email (obligatorio)", value=env_email, placeholder="tu_email@dominio.com")
@@ -973,10 +1013,9 @@ if df_loaded is not None:
                     tmp['ensembl_id'] = ''
                     genes_df = tmp[['target', 'ensembl_id', 'nivel_expresion']]
 
-                # Para simplificar la demo: setear variables de entorno en tiempo de ejecución
-                os.environ["NCBI_EMAIL"] = ncbi_email_input.strip()
-                if ncbi_api_key_input.strip():
-                    os.environ["NCBI_API_KEY"] = ncbi_api_key_input.strip()
+                # Usar credenciales explícitas (sin escribir en os.environ)
+                email = ncbi_email_input.strip()
+                api_key = ncbi_api_key_input.strip() or None
                 logger.info(f"PubMed: consultando {len(genes_df)} genes (contexto={context_sel_label}, max_per_gene={int(max_per_gene)})")
                 prog = st.progress(0)
                 status = st.empty()
@@ -987,14 +1026,13 @@ if df_loaded is not None:
                     status.info(f"Procesando {i}/{total}: {gene}")
 
                 with st.spinner("Consultando PubMed por gen…"):
-                    bib = search_pubmed_by_genes(
-                        genes_df.rename(columns={'target': 'target'}),
-                        symbol_col='target',
-                        ensembl_col='ensembl_id',
-                        selected_context=context_sel_label,
-                        max_per_gene=int(max_per_gene),
-                        progress=_on_progress,
-                        logger=logger,
+                    # Cache por combinación de parámetros
+                    bib = _pubmed_cached(
+                        genes_df.to_csv(index=False),
+                        context_sel_label,
+                        int(max_per_gene),
+                        email,
+                        api_key,
                     )
                 prog.progress(100)
                 status.success("Consulta PubMed finalizada")

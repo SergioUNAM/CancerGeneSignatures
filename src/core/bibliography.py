@@ -175,12 +175,15 @@ class PubMedConfig:
     sleep_between: float = 0.34  # ~3 req/s without API key
 
 
-def _require_entrez_config() -> PubMedConfig:
-    email = os.getenv("NCBI_EMAIL")
-    if not email:
-        raise RuntimeError("NCBI_EMAIL no configurado en el entorno.")
-    api_key = os.getenv("NCBI_API_KEY")
-    return PubMedConfig(email=email, api_key=api_key)
+def _require_entrez_config(email: Optional[str] = None, api_key: Optional[str] = None) -> PubMedConfig:
+    """Obtiene configuración de Entrez desde argumentos o variables de entorno.
+    Da prioridad a parámetros explícitos para evitar depender de `os.environ` en la app.
+    """
+    em = email or os.getenv("NCBI_EMAIL")
+    if not em:
+        raise RuntimeError("NCBI_EMAIL no configurado (parámetro o entorno).")
+    key = api_key or os.getenv("NCBI_API_KEY")
+    return PubMedConfig(email=em, api_key=key)
 
 
 def _setup_entrez(cfg: PubMedConfig) -> None:
@@ -208,12 +211,14 @@ def search_pubmed_by_genes(
     max_per_gene: int = 100,
     progress: Optional[Callable[[int, int, str], None]] = None,
     logger: Optional[Any] = None,
+    email: Optional[str] = None,
+    api_key: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Busca artículos en PubMed por gen (símbolo) y filtra por contexto/cáncer de forma ligera.
     Devuelve columnas: Gene, Ensembl_ID, Title, Year, Abstract, Link
     """
-    cfg = _require_entrez_config()
+    cfg = _require_entrez_config(email=email, api_key=api_key)
     _setup_entrez(cfg)
     max_n = int(max_per_gene or cfg.max_per_gene)
 
@@ -246,13 +251,25 @@ def search_pubmed_by_genes(
         # Keep the query simple and broad; refine on client side
         query = f"{gene} AND ({' OR '.join(GENERAL_CANCER_TERMS + ctx_kw)})"
         try:
-            h = Entrez.esearch(db="pubmed", term=query, retmax=max_n)
-            record = Entrez.read(h)
-            h.close()
-            ids = record.get("IdList", [])
+            ids: List[str] = []
+            retmax = min(200, max_n)
+            retstart = 0
+            while len(ids) < max_n:
+                h = Entrez.esearch(db="pubmed", term=query, retmax=retmax, retstart=retstart)
+                record = Entrez.read(h)
+                h.close()
+                batch = record.get("IdList", [])
+                if not batch:
+                    break
+                ids.extend(batch)
+                retstart += len(batch)
+                if len(batch) < retmax:
+                    break
             if not ids:
                 time.sleep(cfg.sleep_between)
                 continue
+            # Limitar a max_n ids
+            ids = ids[:max_n]
             h2 = Entrez.efetch(db="pubmed", id=ids, rettype="medline", retmode="text")
             parsed = list(Medline.parse(h2))
             h2.close()
