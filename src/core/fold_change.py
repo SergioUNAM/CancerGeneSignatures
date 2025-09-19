@@ -34,8 +34,22 @@ def compute_fold_change(controles: pd.DataFrame, muestras: pd.DataFrame) -> Fold
     - Gen de referencia (más estable por menor std promedio)
     Recibe DataFrames largos con columnas: ['test','target','ct'] para controles y muestras.
     """
+    # Validaciones básicas
+    required_cols = {'test', 'target', 'ct'}
+    for name, df in (('controles', controles), ('muestras', muestras)):
+        if not required_cols.issubset(df.columns):
+            faltan = required_cols.difference(df.columns)
+            raise ValueError(f"Faltan columnas en {name}: {', '.join(sorted(faltan))}")
+
     stats_controles = _stats_by_group(controles, 'controles')
     stats_muestras = _stats_by_group(muestras, 'muestras')
+
+    # Intersección de genes entre grupos
+    genes_ctrl = set(stats_controles['target'].dropna().astype(str))
+    genes_samp = set(stats_muestras['target'].dropna().astype(str))
+    common_genes = sorted(genes_ctrl.intersection(genes_samp))
+    if len(common_genes) == 0:
+        raise ValueError("No hay genes en común entre controles y muestras. Revisa la clasificación o los prefijos.")
 
     # Promedios globales por grupo
     stats_controles['promedio_general_controles'] = stats_controles['ct_promedio_controles'].mean()
@@ -58,11 +72,24 @@ def compute_fold_change(controles: pd.DataFrame, muestras: pd.DataFrame) -> Fold
     df_consolidado['stability'] = (
         df_consolidado['ct_std_controles'] + df_consolidado['ct_std_muestras']
     ) / 2.0
-    reference_gene = df_consolidado.loc[df_consolidado['stability'].idxmin(), 'target']
+    # Elegir gen de referencia solo entre genes comunes y con estabilidad válida
+    mask_valid = (
+        df_consolidado['target'].astype(str).isin(common_genes)
+        & df_consolidado['stability'].notna()
+    )
+    df_valid = df_consolidado.loc[mask_valid]
+    if df_valid.empty:
+        raise ValueError("No hay suficiente información (desviaciones estándar NaN) para elegir un gen de referencia. Comprueba datos y NaN.")
+    reference_gene = df_valid.loc[df_valid['stability'].idxmin(), 'target']
 
     # ΔCt respecto al gen de referencia
-    ref_c = stats_controles.query('target == @reference_gene')['ct_promedio_controles'].values[0]
-    ref_m = stats_muestras.query('target == @reference_gene')['ct_promedio_muestras'].values[0]
+    # Obtener promedios del gen de referencia
+    ref_c_series = stats_controles.query('target == @reference_gene')['ct_promedio_controles']
+    ref_m_series = stats_muestras.query('target == @reference_gene')['ct_promedio_muestras']
+    if ref_c_series.empty or ref_m_series.empty:
+        raise ValueError("El gen de referencia no tiene promedios en ambos grupos. Revisa la intersección de genes.")
+    ref_c = ref_c_series.values[0]
+    ref_m = ref_m_series.values[0]
 
     stats_controles['delta_ct_gen_ref_controles'] = stats_controles['ct_promedio_controles'] - ref_c
     stats_muestras['delta_ct_gen_ref_muestras'] = stats_muestras['ct_promedio_muestras'] - ref_m
@@ -95,4 +122,3 @@ def compute_fold_change(controles: pd.DataFrame, muestras: pd.DataFrame) -> Fold
         by_refgene=by_ref,
         reference_gene=str(reference_gene),
     )
-

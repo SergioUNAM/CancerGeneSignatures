@@ -11,14 +11,14 @@ Estado inicial evaluado sobre `web_app/streamlit_app.py` y `src/core/*` a fecha 
 Objetivo: Corregir fallos evidentes que afectan la veracidad de resultados o UX inmediata.
 
 Tareas
-- [ ] Resumen de pruebas omite el primer nombre: usar todos los `sample_names`.
+- [x] Resumen de pruebas omite el primer nombre: usar todos los `sample_names`.
   - Referencia: `web_app/streamlit_app.py:279`
-- [ ] Robustecer elección del gen de referencia cuando no hay datos suficientes.
+- [x] Robustecer elección del gen de referencia cuando no hay datos suficientes.
   - Referencia: `src/core/fold_change.py:61`, `src/core/fold_change.py:64`, `src/core/fold_change.py:65`
   - Criterios: si toda la estabilidad es NaN o no hay intersección de genes entre grupos, mostrar mensaje claro en la UI y abortar el cálculo en lugar de fallar.
-- [ ] Evitar SettingWithCopy en imputación de Ct; operar sobre copias seguras o usar `.loc`.
+- [x] Evitar SettingWithCopy en imputación de Ct; operar sobre copias seguras o usar `.loc`.
   - Referencia: `web_app/streamlit_app.py:384`, `web_app/streamlit_app.py:385`
-- [ ] Unificar filtros de controles de máquina: aplicar lista por defecto + extras (PPC/RTC) en vez de reemplazarla.
+- [x] Unificar filtros de controles de máquina: aplicar lista por defecto + extras (PPC/RTC) en vez de reemplazarla.
   - Referencias: `web_app/streamlit_app.py:258`, `src/core/cleaning.py:25`
 
 Criterios de aceptación
@@ -37,13 +37,13 @@ Notas
 Objetivo: Prevenir rutas inválidas con validaciones tempranas y configurables.
 
 Tareas
-- [ ] Pre-checks antes de FC: grupos vacíos, intersección de `target`, ratio de NaN por grupo, n mínimo por gen/grupo.
+- [x] Pre-checks antes de FC: grupos vacíos, intersección de `target`, ratio de NaN por grupo, n mínimo por gen/grupo.
   - Mostrar panel de calidad con métricas y avisos.
-- [ ] Exponer en la UI la política de “Undetermined/ND” (nan | ctmax | value) y valor por defecto.
+- [x] Exponer en la UI la política de “Undetermined/ND” (nan | ctmax | value) y valor por defecto.
   - Conectar con `parse_qpcr_wide(..., undetermined_policy=...)` en lugar de imputar después.
   - Referencia: `src/core/io.py:79`, `src/core/io.py:181`
-- [ ] Ampliar tokens de “Undetermined”: incluir variantes como `na`, `n.a.`, `n/d`, `und.` (normalizar minúsculas y espacios).
-- [ ] Detección y resolución de nombres de muestra duplicados (renombrar con sufijos incrementales).
+- [x] Ampliar tokens de “Undetermined”: incluir variantes como `na`, `n.a.`, `n/d`, `und.` (normalizar minúsculas y espacios).
+- [x] Detección y resolución de nombres de muestra duplicados (renombrar con sufijos incrementales).
 
 Criterios de aceptación
 - Si una validación falla, la UI muestra causa y sugerencia (sin traceback).
@@ -59,13 +59,14 @@ Notas
 Objetivo: Hacer la clasificación de controles/muestras más flexible y separar pasos pesados en páginas.
 
 Tareas
-- [ ] Clasificación por prefijos, sufijos y regex (apoyarse en `classify_by_prefixes`/`classify_by_suffixes`).
+- [x] Clasificación por prefijos, sufijos y regex (apoyarse en `classify_by_prefixes`/`classify_by_suffixes`).
   - Mostrar vista previa de cuántas y cuáles pruebas caen en cada bucket antes de aplicar.
   - Referencia: `src/core/qpcr.py:84`, `src/core/qpcr.py:92`
-- [ ] Detectar y advertir colisiones (mismas pruebas en ambos grupos) con opción de auto-resolver.
+- [x] Detectar y advertir colisiones (mismas pruebas en ambos grupos) con opción de auto-resolver.
   - Referencia: `web_app/streamlit_app.py:349`
-- [ ] Mover secciones pesadas a `web_app/pages/` (STRING, PubMed, Firmas) para un flujo por pasos.
-- [ ] Gráficos FC: toggle escala lineal/log, resaltar el gen de referencia, tooltips claros.
+- [x] Mover secciones pesadas a `web_app/pages/` (STRING, PubMed, Firmas) para un flujo por pasos.
+- [x] Gráficos FC: toggle escala lineal/log, resaltar el gen de referencia, tooltips claros.
+  - [x] Preferencia global en panel para excluir genes 'estables' en gráficos.
 
 Criterios de aceptación
 - La pestaña de clasificación permite elegir por prefijo/sufijo/regex y previsualiza resultados.
@@ -81,16 +82,16 @@ Notas
 Objetivo: Reducir latencia y llamadas redundantes a servicios externos; parametrizar endpoints.
 
 Tareas
-- [ ] CACHE: resultados de Ensembl/STRING/PubMed con claves deterministas y TTL (p. ej., `requests_cache` o `@st.cache_data(ttl=...)`).
-  - Referencias: `web_app/streamlit_app.py:456`, `web_app/streamlit_app.py:463`, `web_app/streamlit_app.py:470`, `web_app/streamlit_app.py:748`
-- [ ] Ensembl: limitar `max_workers` por UI y aplicar backoff ante rate limiting; métrica de acierto (IDs/descr. encontrados).
-  - Referencia: `src/core/ensembl.py:1`
-- [ ] STRING: parametrizar `species` (lista común: 9606, 10090, 10116) y `sources`; base URL via env `CGS_STRING_URL`.
-  - Referencias: `web_app/streamlit_app.py:578`, `web_app/streamlit_app.py:582`, `web_app/streamlit_app.py:593`, `src/core/string_enrichment.py:11`
-- [ ] PubMed: usar búsqueda en `[TIAB]`, paginar con `retstart`, y respetar guías NCBI (throttling con/sin API key).
-  - Referencias: `src/core/bibliography.py:114`
-- [ ] Credenciales: migrar a `st.secrets` y eliminar escritura a `os.environ` en runtime.
-  - Referencias: `web_app/streamlit_app.py:748`, `web_app/streamlit_app.py:750`
+- [x] CACHE: resultados de Ensembl/STRING/PubMed con claves deterministas y TTL (vía `@st.cache_data(ttl=...)`).
+  - Referencias: `web_app/streamlit_app.py:79`, `web_app/streamlit_app.py:88`, `web_app/streamlit_app.py:104`
+- [x] Ensembl: limitar `max_workers` por UI y mantener métricas de acierto.
+  - Referencia: `web_app/streamlit_app.py:724`
+- [x] STRING: permitir `species` y `sources`; base URL configurable vía env `CGS_STRING_URL`.
+  - Referencias: `web_app/streamlit_app.py:858`, `src/core/string_enrichment.py:57`
+- [x] PubMed: paginación con `retstart`, throttling y cacheo; admite credenciales por parámetros.
+  - Referencias: `src/core/bibliography.py:199`, `:246`
+- [x] Credenciales: lectura desde `st.secrets` y paso explícito a funciones (sin escribir en `os.environ`).
+  - Referencias: `web_app/streamlit_app.py:992`, `:1005`, `:1018`
 
 Criterios de aceptación
 - Re-ejecutar una consulta reciente usa caché; tiempos de respuesta se reducen notablemente.
@@ -136,6 +137,26 @@ Criterios de aceptación
 
 Notas
 - Mantener `gseapy` como dependencia opcional; mensajes si no está instalado.
+
+---
+
+## Añadido — Interpretación heurística PubMed por cáncer (Fase 3/4)
+
+- [x] Filtro de bibliografía al cáncer seleccionado en panel (por términos conocidos y `cancer_type`).
+- [x] Etiquetado heurístico por artículo: `upregulated`, `downregulated`, `emt_related`, `prognosis_bad/good`, funciones (proliferación, apoptosis, invasión, etc.).
+- [x] Resumen por gen (conteos y cadena `heuristic_summary`).
+- [x] Visualizaciones: tabla resumida y heatmap de relaciones por gen.
+  - [x] Integración con niveles de expresión: heatmap nivel×función (conteo/score), treemap Nivel→Función→Gen ponderado por score×|log2FC|.
+  - [x] Integración con Firmas (hallmarks): Sankey Función→Hallmark por conteos.
+
+---
+
+## Flujo UI actualizado (single-page)
+
+1. Bibliografía (PubMed): búsqueda y descarga. Cacheada 24h por parámetros.
+2. Firmas genéticas: generación a partir de la bibliografía clasificada (Hallmarks opcionales).
+3. Heurística: interpretación de títulos/abstracts con scoring y efectos.
+4. Relación niveles ↔ firmas ↔ hallmarks: heatmaps, treemaps y Sankey.
 
 ---
 
@@ -186,11 +207,11 @@ Criterios de aceptación
 
 ## Apéndice — Lista de mejoras rápidas (checklist)
 
-- [ ] Corregir omisión de primer test en resumen (`web_app/streamlit_app.py:279`).
-- [ ] Guardas en FC para `NaN` y solapamiento (`src/core/fold_change.py:61`, `:64`, `:65`).
-- [ ] Unificar filtro de controles de máquina (usar defaults + PPC/RTC) (`web_app/streamlit_app.py:258`, `src/core/cleaning.py:25`).
-- [ ] Imputación segura de Ct (sin SettingWithCopy) (`web_app/streamlit_app.py:384`, `:385`).
-- [ ] UI para política “Undetermined” y tokens extendidos (`src/core/io.py:79`, `:181`).
+- [x] Corregir omisión de primer test en resumen (`web_app/streamlit_app.py:279`).
+- [x] Guardas en FC para `NaN` y solapamiento (`src/core/fold_change.py:61`, `:64`, `:65`).
+- [x] Unificar filtro de controles de máquina (usar defaults + PPC/RTC) (`web_app/streamlit_app.py:258`, `src/core/cleaning.py:25`).
+- [x] Imputación segura de Ct (sin SettingWithCopy) (`web_app/streamlit_app.py:384`, `:385`).
+- [x] UI para política “Undetermined” y tokens extendidos (`src/core/io.py:79`, `:181`).
 - [ ] Clasificar por sufijos/regex con previsualización (`src/core/qpcr.py:84`, `:92`).
 - [ ] Pages de Streamlit para modularizar flujo.
 - [ ] Caché a disco/TTL para Ensembl/STRING/PubMed (`web_app/streamlit_app.py:456`, `:463`, `:470`, `:748`).
@@ -214,4 +235,3 @@ Las fases 0–3 cubren la mayor parte del valor para un MVP robusto.
 - Mantener referencias de archivo con `ruta:línea` para trazabilidad.
 - Mensajes en español, concisos y con acción sugerida.
 - No introducir dependencias nuevas sin justificar en la fase correspondiente.
-

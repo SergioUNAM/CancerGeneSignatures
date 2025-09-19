@@ -166,6 +166,21 @@ def parse_qpcr_wide(
             name = f"Sample_{idx}"
         sample_names.append(name)
 
+    # Resolver nombres de muestra duplicados añadiendo sufijos incrementales (_2, _3, ...)
+    def _dedup(items: List[str]) -> List[str]:
+        seen: dict[str, int] = {}
+        out: List[str] = []
+        for v in items:
+            base = v or "Sample"
+            if base not in seen:
+                seen[base] = 1
+                out.append(base)
+            else:
+                seen[base] += 1
+                out.append(f"{base}_{seen[base]}")
+        return out
+    sample_names = _dedup(sample_names)
+
     # Build clean DataFrame
     cols = [well_col, target_col] + sample_cols
     df = raw.iloc[data_start:, cols].copy()
@@ -178,10 +193,16 @@ def parse_qpcr_wide(
 
     # Handle 'Undetermined' and cast to numeric for sample columns
     sample_cols_names = sample_names
-    undet_tokens = {"undetermined", "undet", "nd", "neg"}
+    # Tokens extendidos para "Undetermined" con normalización (minúsculas, sin espacios ni puntuación)
+    undet_tokens = {"undetermined", "undet", "und", "nd", "neg", "na"}
     for c in sample_cols_names:
         s = df[c].apply(_cell_str)
-        mask_undet = s.str.lower().isin(undet_tokens)
+        norm = (
+            s.str.lower()
+             .str.replace(r"\s+", "", regex=True)
+             .str.replace(r"[\./]", "", regex=True)
+        )
+        mask_undet = norm.isin(undet_tokens)
         # Coerce numeric
         num = pd.to_numeric(df[c], errors="coerce")
         # Apply policy

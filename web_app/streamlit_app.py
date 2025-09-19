@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-import io, os, json, sys
+import io, os, json, sys, re
 from pathlib import Path
 from typing import Optional
 import logging
@@ -44,7 +44,26 @@ from src.core.qpcr import (
     melt_wide_to_long,
     classify_tests,  # case-insensitive
     suggest_name_affixes,
+    classify_by_prefixes,
+    classify_by_suffixes,
 )
+# Compatibilidad: si la instalación local aún no expone classify_by_regex, usar fallback local
+try:
+    from src.core.qpcr import classify_by_regex  # type: ignore
+except Exception:
+    def classify_by_regex(df_long, ctrl_pattern: str, sample_pattern: str):
+        t = df_long.copy()
+        t["test_str"] = t["test"].astype(str)
+        ctrl = (
+            t[t["test_str"].str.contains(ctrl_pattern, regex=True, na=False)]
+            if ctrl_pattern else t.iloc[0:0]
+        )
+        samp = (
+            t[t["test_str"].str.contains(sample_pattern, regex=True, na=False)]
+            if sample_pattern else t.iloc[0:0]
+        )
+        return (ctrl.drop(columns=["test_str"]) if not ctrl.empty else ctrl,
+                samp.drop(columns=["test_str"]) if not samp.empty else samp)
 from src.core.cleaning import drop_machine_controls
 from src.core.fold_change import compute_fold_change
 from src.core.tables import fc_comparison_table
@@ -55,14 +74,33 @@ from src.core.string_enrichment import (
     enrich_by_levels,
     dfs_to_excel_bytes,
 )
-from src.core.bibliography import (
-    search_pubmed_by_genes,
-    classify_bibliography,
-    aggregate_counts_by_level_and_cancer,
-)
+# Hot-reload bibliography helpers during dev (ensure new functions are visible)
+try:
+    import importlib as _importlib
+    import src.core.bibliography as _cgs_bib
+    _cgs_bib = _importlib.reload(_cgs_bib)
+    search_pubmed_by_genes = _cgs_bib.search_pubmed_by_genes  # type: ignore
+    classify_bibliography = _cgs_bib.classify_bibliography  # type: ignore
+    aggregate_counts_by_level_and_cancer = _cgs_bib.aggregate_counts_by_level_and_cancer  # type: ignore
+    filter_bibliography_by_cancer = getattr(_cgs_bib, 'filter_bibliography_by_cancer')  # type: ignore
+    interpret_gene_relations = getattr(_cgs_bib, 'interpret_gene_relations')  # type: ignore
+    summarize_relations_by_gene = getattr(_cgs_bib, 'summarize_relations_by_gene')  # type: ignore
+except Exception:
+    # Fallbacks (should not be needed if module is available)
+    from src.core.bibliography import (
+        search_pubmed_by_genes,
+        classify_bibliography,
+        aggregate_counts_by_level_and_cancer,
+    )
 from src.core.signatures import (
     create_signatures,
 )
+from src.core.visuals import (
+    hallmarks_polar_chart,
+    fingerprint_heatmap,
+    clustered_expression_by_level,
+)
+from src.integrations.google_nlp import GoogleNLPClient, aggregate_insights
 
 # Cache de firmas para evitar recomputar al cambiar solo la selección visual
 import hashlib
@@ -77,13 +115,49 @@ def _compute_signatures_cached(bib_csv: str, ctx: str, hall_gmt: str, back_gmt: 
     return create_signatures(df_bib, contexto_biologico=ctx, hallmark_cfg=cfg)
 
 # Cache de anotación Ensembl (evitar llamadas repetidas a red en cada rerun)
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=3600)
 def _annotate_ensembl_cached(df_csv: str, max_workers: int = 3) -> pd.DataFrame:
     try:
         df_in = pd.read_csv(io.StringIO(df_csv))
     except Exception:
         return pd.DataFrame()
     return add_ensembl_info_batch(df_in, symbol_col='target', max_workers=max_workers)
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _string_enrichment_cached(df_expr_csv: str, levels: list[str], species: int, sources: list[str], max_fdr: float, min_size: int, top_n: int) -> dict:
+    try:
+        df_expr = pd.read_csv(io.StringIO(df_expr_csv))
+    except Exception:
+        return {"combined": pd.DataFrame(), "by_level": {}}
+    from src.core.string_enrichment import enrich_by_levels, filter_enrichment
+    res = enrich_by_levels(df_expr, symbol_col='target', level_col='nivel_expresion', levels=levels, species=species, sources=sources)
+    combined = res.get('combined')
+    by_level = res.get('by_level') or {}
+    # Aplicar filtros aquí para cachear resultado final
+    out_by_level = {}
+    if isinstance(by_level, dict):
+        for lvl, d in by_level.items():
+            out_by_level[lvl] = filter_enrichment(d, include_categories=sources, max_fdr=max_fdr, min_term_genes=min_size, top_n=top_n)
+    out_combined = filter_enrichment(combined, include_categories=sources, max_fdr=max_fdr, min_term_genes=min_size, top_n=top_n)
+    return {"combined": out_combined, "by_level": out_by_level}
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def _pubmed_cached(genes_df_csv: str, context: str, max_per_gene: int, email: str, api_key: str|None) -> pd.DataFrame:
+    try:
+        genes_df = pd.read_csv(io.StringIO(genes_df_csv))
+    except Exception:
+        return pd.DataFrame()
+    return search_pubmed_by_genes(
+        genes_df.rename(columns={'target': 'target'}),
+        symbol_col='target',
+        ensembl_col='ensembl_id',
+        selected_context=context,
+        max_per_gene=int(max_per_gene),
+        progress=None,
+        logger=None,
+        email=email,
+        api_key=api_key,
+    )
 
 # Hot-reload STRING enrichment helpers during dev
 try:
@@ -194,6 +268,33 @@ with st.sidebar:
     cancer_type = st.selectbox("Tipo de cáncer", MENU["menu"]["cancer_types"], index=0)
     context_sel_label = st.selectbox("Contexto", [c["label"] for c in MENU["menu"]["contexts"]], index=0)
     norm_sel_label = st.selectbox("Método preferido", [n["label"] for n in MENU["menu"]["normalization_methods"]], index=1)
+
+    st.header("3) Política 'Undetermined/ND'")
+    und_policy = st.selectbox(
+        "Cómo tratar valores 'Undetermined' (ND)",
+        options=["nan", "ctmax", "value"],
+        index=0,
+        help="\n- nan: deja como NaN (se puede imputar después).\n- ctmax: usa el Ct máximo observado por columna.\n- value: usa un valor fijo (p. ej., 40).",
+    )
+    und_value = st.number_input(
+        "Valor fijo para 'value'",
+        value=40.0,
+        min_value=0.0,
+        max_value=100.0,
+        step=0.5,
+    )
+    # Persistir en sesión para usarlo durante todo el flujo
+    st.session_state["und_policy"] = und_policy
+    st.session_state["und_value"] = float(und_value)
+    st.session_state["context_sel_label"] = context_sel_label
+
+    # Preferencia global de gráficos: excluir genes 'estables'
+    exclude_stable = st.checkbox(
+        "Excluir genes 'estables' en gráficos",
+        value=bool(st.session_state.get("exclude_stable", False)),
+        help="Cuando está activado, los gráficos omiten los genes clasificados como 'estables'.",
+    )
+    st.session_state["exclude_stable"] = bool(exclude_stable)
     run_btn = st.button("Procesar archivo", type="primary")
 
 # -----------------------------------------------------------------------------
@@ -212,6 +313,8 @@ if uploaded is not None and run_btn:
                 header_row_idx=3,  # A4/B4
                 well_col_idx=0,
                 target_col_idx=1,
+                undetermined_policy=und_policy,
+                undetermined_value=float(und_value),
             )
         except TypeError:
             # Compatibilidad con versiones antiguas sin nuevos parámetros
@@ -225,7 +328,13 @@ if uploaded is not None and run_btn:
         try:
             uploaded.seek(0)
             try:
-                df_loaded = parse_qpcr_wide(uploaded, sheet_name=sheet, header_mode="auto")
+                df_loaded = parse_qpcr_wide(
+                    uploaded,
+                    sheet_name=sheet,
+                    header_mode="auto",
+                    undetermined_policy=und_policy,
+                    undetermined_value=float(und_value),
+                )
             except TypeError:
                 df_loaded = parse_qpcr_wide(uploaded, sheet_name=sheet)
             st.session_state["df_loaded"] = df_loaded
@@ -276,7 +385,8 @@ if df_loaded is not None:
         pozos = [str(w).strip() for w in wells_col.dropna().unique().tolist()] if wells_col is not None else []
 
         st.markdown("- Nombres de las pruebas realizadas")
-        tests_filtered = sample_names[1:] if len(sample_names) > 1 else sample_names
+        # Usar todos los nombres de prueba (sin omitir el primero) y filtrar vacíos
+        tests_filtered = [s for s in sample_names if str(s).strip()]
         st.info(f"Total {len(tests_filtered)}: {', '.join(tests_filtered)}")
         st.markdown("- Genes objetivo analizados")
         genes_filtered = [g for g in genes if g]
@@ -288,16 +398,16 @@ if df_loaded is not None:
         st.warning(f"No se pudo mostrar el resumen de extracción: {e}")
         logger.warning(f"Fallo en resumen de extracción: {e}")
 
-    # Clasificación con mejor UX: prefijos sugeridos o selección manual
+    # Clasificación con mejor UX: prefijos, sufijos, regex o selección manual
     st.subheader("Clasificación de controles y muestras")
-    st.caption("Usa prefijos sugeridos/manuales o selecciona las pruebas directamente.")
+    st.caption("Clasifica por prefijos/sufijos/regex o selecciona directamente.")
 
     file_key = f"assign_{df_loaded.source_name}:{df_loaded.sheet_name}"
     state = st.session_state.setdefault(file_key, {})
 
     unique_tests = sorted(long_df['test'].astype(str).dropna().unique().tolist())
 
-    tab_pref, tab_select = st.tabs(["Por prefijos", "Selección manual"])
+    tab_pref, tab_suff, tab_regex, tab_select = st.tabs(["Por prefijos", "Por sufijos", "Por regex", "Selección manual"])
 
     with tab_pref:
         sugg = suggest_name_affixes(unique_tests, top_n=10)
@@ -311,7 +421,56 @@ if df_loaded is not None:
             samp_suggest = st.selectbox("Sugerencia (muestras)", options=["(vacío)"] + top_prefixes, index=0)
             samp_default = "" if samp_suggest == "(vacío)" else samp_suggest
             samp_prefix = st.text_input("Prefijo muestras", value=state.get('samp_prefix', samp_default))
+        # Vista previa
+        prev_ctrl = [t for t in unique_tests if ctrl_prefix and str(t).startswith(ctrl_prefix)]
+        prev_samp = [t for t in unique_tests if samp_prefix and str(t).startswith(samp_prefix)]
+        st.caption(f"Previa → Controles: {len(prev_ctrl)} | Muestras: {len(prev_samp)}")
+        if prev_ctrl:
+            st.caption("Controles: " + ", ".join(prev_ctrl[:20]) + (" …" if len(prev_ctrl) > 20 else ""))
+        if prev_samp:
+            st.caption("Muestras: " + ", ".join(prev_samp[:20]) + (" …" if len(prev_samp) > 20 else ""))
         submitted_pref = st.button("Clasificar por prefijos", type="primary")
+
+    with tab_suff:
+        sugg = suggest_name_affixes(unique_tests, top_n=10)
+        top_suffixes = [s for s, _ in (sugg.get('suffixes') or [])]
+        cols1, cols2 = st.columns(2)
+        with cols1:
+            ctrl_suff = st.text_input("Sufijos controles (coma-sep.)", value=state.get('ctrl_suff', ''))
+        with cols2:
+            samp_suff = st.text_input("Sufijos muestras (coma-sep.)", value=state.get('samp_suff', ''))
+        st.caption("Sugerencias sufijos: " + ", ".join(top_suffixes))
+        suff_ctrl_list = [s.strip() for s in ctrl_suff.split(',') if s.strip()]
+        suff_samp_list = [s.strip() for s in samp_suff.split(',') if s.strip()]
+        prev_ctrl = [t for t in unique_tests if any(str(t).endswith(s) for s in suff_ctrl_list)]
+        prev_samp = [t for t in unique_tests if any(str(t).endswith(s) for s in suff_samp_list)]
+        st.caption(f"Previa → Controles: {len(prev_ctrl)} | Muestras: {len(prev_samp)}")
+        if prev_ctrl:
+            st.caption("Controles: " + ", ".join(prev_ctrl[:20]) + (" …" if len(prev_ctrl) > 20 else ""))
+        if prev_samp:
+            st.caption("Muestras: " + ", ".join(prev_samp[:20]) + (" …" if len(prev_samp) > 20 else ""))
+        submitted_suff = st.button("Clasificar por sufijos", type="primary")
+
+    with tab_regex:
+        colr1, colr2 = st.columns(2)
+        with colr1:
+            ctrl_re = st.text_input("Regex controles", value=state.get('ctrl_re', ''))
+        with colr2:
+            samp_re = st.text_input("Regex muestras", value=state.get('samp_re', ''))
+        try:
+            prev_ctrl = [t for t in unique_tests if (ctrl_re and re.search(ctrl_re, str(t)) is not None)]
+        except Exception:
+            prev_ctrl = []
+        try:
+            prev_samp = [t for t in unique_tests if (samp_re and re.search(samp_re, str(t)) is not None)]
+        except Exception:
+            prev_samp = []
+        st.caption(f"Previa → Controles: {len(prev_ctrl)} | Muestras: {len(prev_samp)}")
+        if prev_ctrl:
+            st.caption("Controles: " + ", ".join(prev_ctrl[:20]) + (" …" if len(prev_ctrl) > 20 else ""))
+        if prev_samp:
+            st.caption("Muestras: " + ", ".join(prev_samp[:20]) + (" …" if len(prev_samp) > 20 else ""))
+        submitted_regex = st.button("Clasificar por regex", type="primary")
 
     with tab_select:
         colm1, colm2 = st.columns(2)
@@ -330,10 +489,27 @@ if df_loaded is not None:
     controles_df = state.get('controles_df', pd.DataFrame())
     muestras_df = state.get('muestras_df', pd.DataFrame())
 
+    # Utilidad local para resolver colisiones
+    def _resolve_collisions(ctrl_df: pd.DataFrame, samp_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+        inter = set(ctrl_df['test'].astype(str)).intersection(set(samp_df['test'].astype(str)))
+        if not inter:
+            return ctrl_df, samp_df
+        st.warning(f"Colisiones: {len(inter)} pruebas aparecen en ambos grupos → {', '.join(sorted(list(inter))[:10])}{' …' if len(inter)>10 else ''}")
+        choice = st.radio("Resolver colisiones", ["priorizar controles", "priorizar muestras", "excluir colisiones"], horizontal=True, index=0)
+        if choice == "priorizar controles":
+            samp_df = samp_df[~samp_df['test'].astype(str).isin(inter)]
+        elif choice == "priorizar muestras":
+            ctrl_df = ctrl_df[~ctrl_df['test'].astype(str).isin(inter)]
+        else:
+            ctrl_df = ctrl_df[~ctrl_df['test'].astype(str).isin(inter)]
+            samp_df = samp_df[~samp_df['test'].astype(str).isin(inter)]
+        return ctrl_df, samp_df
+
     if submitted_pref:
         if not ctrl_prefix and not samp_prefix:
             st.warning("Debes ingresar al menos un prefijo (controles o muestras)")
-        pref_ctrl_df, pref_samp_df = classify_tests(long_df, ctrl_prefix, samp_prefix)
+        pref_ctrl_df, pref_samp_df = classify_by_prefixes(long_df, [ctrl_prefix] if ctrl_prefix else [], [samp_prefix] if samp_prefix else [])
+        pref_ctrl_df, pref_samp_df = _resolve_collisions(pref_ctrl_df, pref_samp_df)
         state['ctrl_prefix'] = ctrl_prefix
         state['samp_prefix'] = samp_prefix
         state['controles_df'] = pref_ctrl_df
@@ -343,6 +519,35 @@ if df_loaded is not None:
         logger.info(f"Clasificación por prefijos: ctrl='{ctrl_prefix}' -> {len(controles_df)} filas, samp='{samp_prefix}' -> {len(muestras_df)} filas")
         if controles_df.empty or muestras_df.empty:
             st.warning("Alguna de las categorías resultó vacía. Revisa los prefijos o usa 'Selección manual'.")
+
+    if 'submitted_suff' in locals() and submitted_suff:
+        pref_ctrl_df, pref_samp_df = classify_by_suffixes(long_df, suff_ctrl_list, suff_samp_list)
+        pref_ctrl_df, pref_samp_df = _resolve_collisions(pref_ctrl_df, pref_samp_df)
+        state['ctrl_suff'] = ctrl_suff
+        state['samp_suff'] = samp_suff
+        state['controles_df'] = pref_ctrl_df
+        state['muestras_df'] = pref_samp_df
+        controles_df = pref_ctrl_df
+        muestras_df = pref_samp_df
+        logger.info(f"Clasificación por sufijos: ctrl={suff_ctrl_list} -> {len(controles_df)} filas, samp={suff_samp_list} -> {len(muestras_df)} filas")
+        if controles_df.empty or muestras_df.empty:
+            st.warning("Alguna de las categorías resultó vacía. Revisa los sufijos o usa otra pestaña.")
+
+    if 'submitted_regex' in locals() and submitted_regex:
+        try:
+            pref_ctrl_df, pref_samp_df = classify_by_regex(long_df, ctrl_re, samp_re)
+            pref_ctrl_df, pref_samp_df = _resolve_collisions(pref_ctrl_df, pref_samp_df)
+            state['ctrl_re'] = ctrl_re
+            state['samp_re'] = samp_re
+            state['controles_df'] = pref_ctrl_df
+            state['muestras_df'] = pref_samp_df
+            controles_df = pref_ctrl_df
+            muestras_df = pref_samp_df
+            logger.info(f"Clasificación por regex: ctrl='{ctrl_re}' -> {len(controles_df)} filas, samp='{samp_re}' -> {len(muestras_df)} filas")
+            if controles_df.empty or muestras_df.empty:
+                st.warning("Alguna de las categorías resultó vacía. Revisa los patrones o usa otra pestaña.")
+        except re.error as ex:
+            st.error(f"Regex inválido: {ex}")
 
     if submitted_sel:
         # Validar colisiones
@@ -373,16 +578,62 @@ if df_loaded is not None:
             else:
                 st.warning(f"No se detectaron {tipo.lower()} con los prefijos actuales.")
 
+        # Panel de calidad antes de FC
+        st.subheader("Calidad de datos (pre-FC)")
+        ok_for_fc = True
+        # Métricas básicas
+        ctrl_targets = set(controles_df['target'].dropna().astype(str)) if not controles_df.empty else set()
+        samp_targets = set(muestras_df['target'].dropna().astype(str)) if not muestras_df.empty else set()
+        common_targets = ctrl_targets.intersection(samp_targets)
+        ctrl_nan_ratio = float(controles_df['ct'].isna().mean()) if not controles_df.empty else 1.0
+        samp_nan_ratio = float(muestras_df['ct'].isna().mean()) if not muestras_df.empty else 1.0
+
+        mqa1, mqa2, mqa3, mqa4 = st.columns(4)
+        with mqa1:
+            st.metric("Genes (controles)", len(ctrl_targets))
+        with mqa2:
+            st.metric("Genes (muestras)", len(samp_targets))
+        with mqa3:
+            st.metric("Genes en común", len(common_targets))
+        with mqa4:
+            st.metric("NaN ct (ctrl/mues)", f"{ctrl_nan_ratio:.0%} / {samp_nan_ratio:.0%}")
+
+        if len(common_targets) == 0:
+            st.error("No hay intersección de genes entre controles y muestras. Ajusta tu clasificación.")
+            ok_for_fc = False
+        if ctrl_nan_ratio >= 1.0 or samp_nan_ratio >= 1.0:
+            st.error("Todos los valores Ct son NaN en algún grupo. Revisa la política de 'Undetermined' o tus datos.")
+            ok_for_fc = False
+
+        # N mínimo por gen y grupo
+        n_min = st.number_input("Mínimo de réplicas por gen y grupo", min_value=1, max_value=10, value=1, step=1)
+        if common_targets:
+            counts_ctrl = controles_df.dropna(subset=['ct']).groupby('target')['ct'].size()
+            counts_samp = muestras_df.dropna(subset=['ct']).groupby('target')['ct'].size()
+            eligible = [t for t in common_targets if counts_ctrl.get(t, 0) >= n_min and counts_samp.get(t, 0) >= n_min]
+            st.info(f"Genes que cumplen n≥{n_min} en ambos grupos: {len(eligible)}")
+            if len(eligible) == 0:
+                st.warning("Ningún gen cumple el mínimo de réplicas en ambos grupos. Considera reducir el umbral o revisar datos.")
+
     extras = {}
-    # Imputación estilo notebook: NaN -> valor máximo global de CT
-    if not controles_df.empty and not muestras_df.empty:
+    # Imputación estilo notebook: NaN -> valor máximo global de CT (solo si política es 'nan')
+    if not controles_df.empty and not muestras_df.empty and ok_for_fc:
         import pandas as pd
-        v_max = pd.concat([controles_df['ct'], muestras_df['ct']]).max()
-        # Mensaje informativo del valor máximo usado (estilo notebook)
-        max_str = f"{v_max:.2f}" if pd.notna(v_max) else "NaN"
-        st.info(f"Valor máximo usado para imputación de Ct: {max_str}")
-        controles_df['ct'] = pd.to_numeric(controles_df['ct'], errors='coerce').fillna(v_max)
-        muestras_df['ct'] = pd.to_numeric(muestras_df['ct'], errors='coerce').fillna(v_max)
+        # Coerción a numérico
+        controles_df = controles_df.copy()
+        muestras_df = muestras_df.copy()
+        controles_df.loc[:, 'ct'] = pd.to_numeric(controles_df['ct'], errors='coerce')
+        muestras_df.loc[:, 'ct'] = pd.to_numeric(muestras_df['ct'], errors='coerce')
+
+        und_policy = st.session_state.get('und_policy', 'nan')
+        if und_policy == 'nan':
+            v_max = pd.concat([controles_df['ct'], muestras_df['ct']]).max()
+            max_str = f"{v_max:.2f}" if pd.notna(v_max) else "NaN"
+            st.info(f"Imputación posterior: NaN de Ct → {max_str} (máximo global)")
+            controles_df.loc[:, 'ct'] = controles_df['ct'].fillna(v_max)
+            muestras_df.loc[:, 'ct'] = muestras_df['ct'].fillna(v_max)
+        else:
+            st.info("Valores 'Undetermined' ya tratados durante la carga (sin imputación adicional).")
 
         # Guardar CSV limpios
         extras['controles_limpios.csv'] = controles_df.to_csv(index=False)
@@ -405,16 +656,64 @@ if df_loaded is not None:
 
             import plotly.graph_objects as go
             fig = go.Figure()
-            x_vals = fc.consolidated['target']
-            fig.add_trace(go.Bar(x=x_vals, y=fc.consolidated['delta_delta_ct_promedio'], name='ΔΔCT (Promedios)', marker_color='#1f77b4', opacity=0.85, yaxis='y'))
-            fig.add_trace(go.Bar(x=x_vals, y=fc.consolidated['delta_delta_ct_gen_ref'], name='ΔΔCT (Gen Ref)', marker_color='#ff7f0e', opacity=0.85, yaxis='y'))
-            fig.add_trace(go.Scatter(x=x_vals, y=fc.consolidated['fold_change_promedio'], name='Fold Change (Promedios)', mode='markers+lines', marker=dict(color='#2ca02c', size=8, symbol='diamond'), line=dict(color='#2ca02c', width=2, dash='dot'), yaxis='y2'))
-            fig.add_trace(go.Scatter(x=x_vals, y=fc.consolidated['fold_change_gen_ref'], name='Fold Change (Gen Ref)', mode='markers+lines', marker=dict(color='#d62728', size=8, symbol='diamond'), line=dict(color='#d62728', width=2, dash='dot'), yaxis='y2'))
+            # Aplicar preferencia de exclusión de 'estables' solo para gráficos
+            exclude_stable = bool(st.session_state.get('exclude_stable', False))
+            try:
+                # Usar df_expr ya calculado para determinar objetivos a mostrar
+                targets_plot = (
+                    df_expr.loc[df_expr['nivel_expresion'] != 'estable', 'target']
+                    if exclude_stable else df_expr['target']
+                )
+                consolidated_plot = fc.consolidated[fc.consolidated['target'].isin(targets_plot)]
+            except Exception:
+                consolidated_plot = fc.consolidated
+            x_vals = consolidated_plot['target']
+            ddct_mean = consolidated_plot['delta_delta_ct_promedio']
+            ddct_ref = consolidated_plot['delta_delta_ct_gen_ref']
+            fc_mean = consolidated_plot['fold_change_promedio']
+            fc_ref = consolidated_plot['fold_change_gen_ref']
+
+            y2_scale = st.radio("Escala FC", ["log", "lineal"], horizontal=True, index=0)
+            y2_type = 'log' if y2_scale == 'log' else 'linear'
+
+            fig.add_trace(go.Bar(
+                x=x_vals, y=ddct_mean, name='ΔΔCT (Promedios)', marker_color='#1f77b4', opacity=0.85, yaxis='y',
+                hovertemplate='Gen=%{x}<br>ΔΔCT Promedios=%{y:.3f}<extra></extra>'
+            ))
+            fig.add_trace(go.Bar(
+                x=x_vals, y=ddct_ref, name='ΔΔCT (Gen Ref)', marker_color='#ff7f0e', opacity=0.85, yaxis='y',
+                hovertemplate='Gen=%{x}<br>ΔΔCT GenRef=%{y:.3f}<extra></extra>'
+            ))
+            fig.add_trace(go.Scatter(
+                x=x_vals, y=fc_mean, name='Fold Change (Promedios)', mode='markers+lines',
+                marker=dict(color='#2ca02c', size=8, symbol='diamond'),
+                line=dict(color='#2ca02c', width=2, dash='dot'), yaxis='y2',
+                hovertemplate='Gen=%{x}<br>FC Promedios=%{y:.3f}<extra></extra>'
+            ))
+            fig.add_trace(go.Scatter(
+                x=x_vals, y=fc_ref, name='Fold Change (Gen Ref)', mode='markers+lines',
+                marker=dict(color='#d62728', size=8, symbol='diamond'),
+                line=dict(color='#d62728', width=2, dash='dot'), yaxis='y2',
+                hovertemplate='Gen=%{x}<br>FC GenRef=%{y:.3f}<extra></extra>'
+            ))
+
+            # Resaltar el gen de referencia
+            try:
+                ref_gene = fc.reference_gene
+                ref_mask = x_vals == ref_gene
+                fig.add_trace(go.Scatter(
+                    x=x_vals[ref_mask], y=fc_ref[ref_mask], mode='markers', name='Ref gene',
+                    marker=dict(color='black', size=12, symbol='star'), yaxis='y2',
+                    hovertemplate='Gen de referencia=%{x}<br>FC GenRef=%{y:.3f}<extra></extra>'
+                ))
+            except Exception:
+                pass
+
             fig.update_layout(
                 title=dict(text='Análisis comparativo de métodos de cálculo', x=0.5),
                 template='plotly_white', barmode='group',
                 yaxis=dict(title='ΔΔCT', showgrid=True, gridcolor='lightgray'),
-                yaxis2=dict(title='Fold Change (log)', overlaying='y', side='right', type='log', showgrid=False),
+                yaxis2=dict(title=f"Fold Change ({y2_scale})", overlaying='y', side='right', type=y2_type, showgrid=False),
                 legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
                 height=600, margin=dict(b=80, t=80, l=60, r=60)
             )
@@ -438,10 +737,68 @@ if df_loaded is not None:
             with cexp2:
                 import plotly.express as px
                 order_levels = ['estable', 'subexpresado', 'sobreexpresado']
-                counts = df_expr['nivel_expresion'].value_counts().reindex(order_levels, fill_value=0)
+                # Aplicar exclusión de 'estables' en el gráfico de distribución si corresponde
+                exclude_stable = bool(st.session_state.get('exclude_stable', False))
+                df_expr_plot = df_expr[df_expr['nivel_expresion'] != 'estable'] if exclude_stable else df_expr
+                counts = df_expr_plot['nivel_expresion'].value_counts().reindex(order_levels, fill_value=0)
                 bar = px.bar(x=counts.index, y=counts.values, labels={'x': 'Nivel de expresión', 'y': 'Frecuencia'}, title='Distribución de niveles de expresión')
                 st.plotly_chart(bar, use_container_width=True)
 
+            # Genes por nivel de expresión: lista/tablas y treemap
+            st.markdown("### Genes por nivel de expresión")
+            # Base para visualizaciones (respetar preferencia de exclusión de 'estables')
+            df_expr_vis = df_expr[df_expr['nivel_expresion'] != 'estable'].copy() if bool(st.session_state.get('exclude_stable', False)) else df_expr.copy()
+            # Orden sugerido
+            levels_vis = ['subexpresado', 'estable', 'sobreexpresado']
+            levels_vis = [lvl for lvl in levels_vis if lvl in df_expr_vis['nivel_expresion'].astype(str).unique()]
+            view_mode = st.radio("Vista", ["Lista por nivel", "Treemap"], horizontal=True, index=0)
+            if view_mode == "Lista por nivel":
+                tabs = st.tabs([lvl.capitalize() for lvl in levels_vis]) if levels_vis else []
+                for lvl, tab in zip(levels_vis, tabs):
+                    with tab:
+                        sub = df_expr_vis[df_expr_vis['nivel_expresion'] == lvl].copy()
+                        if sub.empty:
+                            st.info("Sin genes para este nivel.")
+                            continue
+                        # Ordenar por |log2FC| descendente para resaltar extremos
+                        try:
+                            sub['log2fc'] = np.log2(sub['fold_change'].clip(lower=1e-12))
+                            sub = sub.sort_values(sub['log2fc'].abs(), ascending=False)
+                        except Exception:
+                            pass
+                        st.dataframe(sub[['target', 'fold_change', 'nivel_expresion']])
+                        st.download_button(
+                            label=f"Descargar genes ({lvl})",
+                            data=sub[['target', 'fold_change', 'nivel_expresion']].to_csv(index=False),
+                            file_name=f"genes_{lvl}.csv",
+                            mime="text/csv",
+                            use_container_width=True,
+                        )
+            else:
+                try:
+                    import plotly.express as px
+                    treedata = df_expr_vis.copy()
+                    if treedata.empty:
+                        st.info("Sin genes para graficar con los filtros actuales.")
+                    else:
+                        treedata['log2fc'] = np.log2(treedata['fold_change'].clip(lower=1e-12))
+                        fig_t = px.treemap(
+                            treedata,
+                            path=['nivel_expresion', 'target'],
+                            values=treedata['log2fc'].abs(),
+                            color='log2fc',
+                            color_continuous_scale='RdBu',
+                            color_continuous_midpoint=0.0,
+                            title='Genes por nivel (tamaño = |log2FC|, color = log2FC)'
+                        )
+                        st.plotly_chart(fig_t, use_container_width=True)
+                except Exception as _:
+                    st.info("No se pudo generar el treemap con los datos actuales.")
+
+            # Persistir para páginas
+            st.session_state['fc_consolidated'] = fc.consolidated.copy()
+            st.session_state['reference_gene'] = fc.reference_gene
+            st.session_state['df_expr'] = df_expr.copy()
             extras['fold_change_consolidado.csv'] = fc.consolidated.to_csv(index=False)
             extras['expresion_categorizada.csv'] = df_expr.to_csv(index=False)
 
@@ -459,17 +816,18 @@ if df_loaded is not None:
                 cols = st.columns([1,1,2])
                 with cols[0]:
                     need_compute = not (ensembl_state_key == genes_key and isinstance(ensembl_state_df, pd.DataFrame) and not ensembl_state_df.empty)
+                    ens_workers = st.number_input("Hilos Ensembl", value=3, min_value=1, max_value=16, step=1, help="Límite de concurrencia para llamadas a Ensembl")
                     if need_compute:
                         if st.button("Anotar Ensembl", key="btn_annot_ens"):
                             with st.spinner("Consultando Ensembl…"):
-                                ensembl_df = _annotate_ensembl_cached(df_to_annot[['target','nivel_expresion','fold_change']].sort_values('target').to_csv(index=False), max_workers=3)
+                                ensembl_df = _annotate_ensembl_cached(df_to_annot[['target','nivel_expresion','fold_change']].sort_values('target').to_csv(index=False), max_workers=int(ens_workers))
                             st.session_state['ensembl_df'] = ensembl_df.copy()
                             st.session_state['ensembl_key'] = genes_key
                     else:
                         st.success("Usando anotación en caché para esta lista de genes.")
                         if st.button("Recalcular", key="btn_recalc_ens"):
                             with st.spinner("Consultando Ensembl…"):
-                                ensembl_df = _annotate_ensembl_cached(df_to_annot[['target','nivel_expresion','fold_change']].sort_values('target').to_csv(index=False), max_workers=3)
+                                ensembl_df = _annotate_ensembl_cached(df_to_annot[['target','nivel_expresion','fold_change']].sort_values('target').to_csv(index=False), max_workers=int(ens_workers))
                             st.session_state['ensembl_df'] = ensembl_df.copy()
                             st.session_state['ensembl_key'] = genes_key
 
@@ -573,6 +931,11 @@ if df_loaded is not None:
                 options=order_levels,
                 default=['subexpresado', 'sobreexpresado']
             )
+            # Respetar preferencia global de exclusión de 'estables'
+            exclude_stable_pref = bool(st.session_state.get('exclude_stable', False))
+            if exclude_stable_pref and 'estable' in sel_levels:
+                sel_levels = [lvl for lvl in sel_levels if lvl != 'estable']
+                st.caption("Preferencia activa: excluyendo 'estable' del enriquecimiento")
 
             # Fuentes/categorías a consultar en STRING
             cat_options = ["GO", "GO:BP", "GO:MF", "GO:CC", "KEGG", "Reactome"]
@@ -596,22 +959,24 @@ if df_loaded is not None:
 
             if run_enrich:
                 try:
-                    # Ejecutar enriquecimiento por nivel y concatenar
+                    # Ejecutar enriquecimiento por nivel y concatenar (con caché)
                     levels_to_use = sel_levels or order_levels
+                    if exclude_stable_pref:
+                        levels_to_use = [lvl for lvl in levels_to_use if lvl != 'estable']
                     base = df_expr[df_expr['nivel_expresion'].isin(levels_to_use)].copy()
                     logger.info(f"STRING: niveles={levels_to_use}, fuentes={sel_cats}, genes_totales={base['target'].nunique()}")
                     with st.spinner("Consultando STRING por nivel…"):
-                        enr_dict = enrich_by_levels(
-                            base,
-                            symbol_col='target',
-                            level_col='nivel_expresion',
+                        res = _string_enrichment_cached(
+                            base.to_csv(index=False),
                             levels=levels_to_use,
                             species=int(species),
                             sources=sel_cats,
-                            caller_identity="UIMEO",
+                            max_fdr=float(max_fdr),
+                            min_size=int(min_size),
+                            top_n=int(top_n),
                         )
-                    combined = enr_dict.get('combined')
-                    by_level = enr_dict.get('by_level', {})
+                    combined = res.get('combined')
+                    by_level = res.get('by_level', {})
                     try:
                         logger.info(f"STRING: filas combinadas={0 if combined is None else len(combined)}")
                     except Exception:
@@ -723,8 +1088,17 @@ if df_loaded is not None:
             "Puedes ingresar tu email/API key aquí para la demo."
         )
         # Entrada directa (demo): email y API key NCBI
-        env_email = os.getenv("NCBI_EMAIL", "")
-        env_key = os.getenv("NCBI_API_KEY", "")
+        # Credenciales: intentar st.secrets si existen; tolerar ausencia de secrets.toml
+        try:
+            sec_email = st.secrets["NCBI_EMAIL"]
+        except Exception:
+            sec_email = ""
+        try:
+            sec_key = st.secrets["NCBI_API_KEY"]
+        except Exception:
+            sec_key = ""
+        env_email = sec_email or os.getenv("NCBI_EMAIL", "")
+        env_key = sec_key or os.getenv("NCBI_API_KEY", "")
         ccreds1, ccreds2 = st.columns([2, 2])
         with ccreds1:
             ncbi_email_input = st.text_input("NCBI Email (obligatorio)", value=env_email, placeholder="tu_email@dominio.com")
@@ -733,6 +1107,7 @@ if df_loaded is not None:
 
         max_per_gene = st.number_input("Máximo de artículos por gen", value=100, min_value=10, max_value=300, step=10)
         run_pubmed = st.button("Buscar en PubMed", disabled=not bool(ncbi_email_input.strip()))
+        st.caption("Las consultas a PubMed se cachean (24h) por combinación de genes, contexto y credenciales.")
 
         if run_pubmed:
             try:
@@ -743,11 +1118,17 @@ if df_loaded is not None:
                     tmp = df_expr[['target', 'nivel_expresion']].drop_duplicates('target')
                     tmp['ensembl_id'] = ''
                     genes_df = tmp[['target', 'ensembl_id', 'nivel_expresion']]
+                # Respetar preferencia global de exclusión de 'estables'
+                if bool(st.session_state.get('exclude_stable', False)):
+                    n_before = len(genes_df)
+                    genes_df = genes_df[genes_df['nivel_expresion'] != 'estable']
+                    n_after = len(genes_df)
+                    if n_after < n_before:
+                        st.caption(f"Preferencia activa: excluyendo 'estable' en PubMed ({n_before-n_after} genes menos)")
 
-                # Para simplificar la demo: setear variables de entorno en tiempo de ejecución
-                os.environ["NCBI_EMAIL"] = ncbi_email_input.strip()
-                if ncbi_api_key_input.strip():
-                    os.environ["NCBI_API_KEY"] = ncbi_api_key_input.strip()
+                # Usar credenciales explícitas (sin escribir en os.environ)
+                email = ncbi_email_input.strip()
+                api_key = ncbi_api_key_input.strip() or None
                 logger.info(f"PubMed: consultando {len(genes_df)} genes (contexto={context_sel_label}, max_per_gene={int(max_per_gene)})")
                 prog = st.progress(0)
                 status = st.empty()
@@ -758,14 +1139,13 @@ if df_loaded is not None:
                     status.info(f"Procesando {i}/{total}: {gene}")
 
                 with st.spinner("Consultando PubMed por gen…"):
-                    bib = search_pubmed_by_genes(
-                        genes_df.rename(columns={'target': 'target'}),
-                        symbol_col='target',
-                        ensembl_col='ensembl_id',
-                        selected_context=context_sel_label,
-                        max_per_gene=int(max_per_gene),
-                        progress=_on_progress,
-                        logger=logger,
+                    # Cache por combinación de parámetros
+                    bib = _pubmed_cached(
+                        genes_df.to_csv(index=False),
+                        context_sel_label,
+                        int(max_per_gene),
+                        email,
+                        api_key,
                     )
                 prog.progress(100)
                 status.success("Consulta PubMed finalizada")
@@ -791,21 +1171,23 @@ if df_loaded is not None:
                     st.markdown("### Clasificación por tipo de cáncer y contexto")
                     try:
                         classified = classify_bibliography(bib2)
+                        # Enfocar al cáncer seleccionado en el panel
+                        focused = filter_bibliography_by_cancer(classified, cancer_type)
                         try:
-                            st.session_state["bibliografia_clasificada"] = classified.copy()
+                            st.session_state["bibliografia_clasificada"] = focused.copy()
                         except Exception:
                             pass
-                        st.dataframe(classified.head(50))
+                        st.dataframe(focused.head(50))
                         st.download_button(
                             label="Descargar bibliografía clasificada (CSV)",
-                            data=classified.to_csv(index=False),
+                            data=focused.to_csv(index=False),
                             file_name="bibliografia_clasificada.csv",
                             mime="text/csv",
                             use_container_width=True,
                         )
 
                         # Gráfica de barras: número de estudios por tipo de cáncer y nivel
-                        agg = aggregate_counts_by_level_and_cancer(classified)
+                        agg = aggregate_counts_by_level_and_cancer(focused)
                         if not agg.empty:
                             import plotly.express as px
                             order_levels = ['sobreexpresado', 'estable', 'subexpresado']
@@ -828,6 +1210,7 @@ if df_loaded is not None:
                                 labels={'count': 'Número de artículos', 'cancer_type': 'Tipo de cáncer'},
                             )
                             st.plotly_chart(figs, use_container_width=True)
+
 
                     except Exception as e:
                         st.warning(f"No se pudo clasificar la bibliografía: {e}")
@@ -852,8 +1235,9 @@ if df_loaded is not None:
     # -------------------------------------------------------------------------
     # Firmas genéticas (a partir de bibliografía clasificada)
     # -------------------------------------------------------------------------
-    st.markdown("---")
-    st.header("Firmas genéticas")
+st.markdown("---")
+st.header("Firmas genéticas")
+with st.container():
     st.caption("Genera firmas por tipo de cáncer y nivel, con enriquecimiento de Hallmarks (MSigDB). Requiere gseapy y acceso a los GMT locales.")
 
     # Intentar recuperar bibliografía clasificada de esta sesión
@@ -1040,6 +1424,578 @@ if df_loaded is not None:
                 except Exception as e:
                     st.warning(f"No se pudo renderizar la visualización de firmas: {e}")
 
+            # Visualizaciones adicionales (polar, fingerprint, clustergrama)
+            try:
+                st.subheader("Visualizaciones adicionales")
+                # Niveles disponibles en firmas para el tipo seleccionado
+                niveles_disp = (
+                    df_sigs_viz[df_sigs_viz['cancer_type'] == sel_tipo]['nivel_expresion']
+                    .dropna().astype(str).unique().tolist()
+                )
+                niveles_disp = [n for n in ['Sobreexpresados', 'Subexpresados', 'estable'] if n in niveles_disp] or niveles_disp
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    with st.expander("Gráfico polar de Hallmarks", expanded=False):
+                        if niveles_disp:
+                            lvl = st.selectbox("Nivel", niveles_disp, key="viz_polar_lvl")
+                            figp = hallmarks_polar_chart(df_sigs_viz, sel_tipo, lvl)
+                            st.plotly_chart(figp, use_container_width=True)
+                        else:
+                            st.info("No hay niveles disponibles para el tipo seleccionado.")
+                with c2:
+                    with st.expander("Fingerprint (Genes × Hallmarks)", expanded=False):
+                        if niveles_disp:
+                            lvl2 = st.selectbox("Nivel", niveles_disp, key="viz_fp_lvl")
+                            figf = fingerprint_heatmap(df_sigs_viz, sel_tipo, lvl2)
+                            st.plotly_chart(figf, use_container_width=True)
+                        else:
+                            st.info("No hay niveles disponibles para el tipo seleccionado.")
+
+                with st.expander("Clustergrama de expresión relativa", expanded=False):
+                    try:
+                        # Recuperar clasificación y datos de expresión si existen
+                        if df_loaded is None:
+                            st.info("Primero carga y clasifica un Excel de qPCR para ver el clustergrama.")
+                        else:
+                            file_key = f"assign_{df_loaded.source_name}:{df_loaded.sheet_name}"
+                            state_local = st.session_state.get(file_key, {})
+                            controles_df = state_local.get('controles_df', pd.DataFrame())
+                            muestras_df = state_local.get('muestras_df', pd.DataFrame())
+                            if (controles_df is None or controles_df.empty) or (muestras_df is None or muestras_df.empty):
+                                st.info("Clasifica controles y muestras en la sección inicial para habilitar el clustergrama.")
+                            else:
+                                # Listas de genes desde las firmas para el tipo y niveles clásicos
+                                lista_sobre, lista_sub = [], []
+                                base = df_sigs_viz[df_sigs_viz['cancer_type'] == sel_tipo]
+                                try:
+                                    lista_sobre = base.loc[base['nivel_expresion'] == 'Sobreexpresados', 'genes'].iloc[0]
+                                except Exception:
+                                    lista_sobre = []
+                                try:
+                                    lista_sub = base.loc[base['nivel_expresion'] == 'Subexpresados', 'genes'].iloc[0]
+                                except Exception:
+                                    lista_sub = []
+                                lista_sobre = lista_sobre if isinstance(lista_sobre, list) else ([] if pd.isna(lista_sobre) else [str(lista_sobre)])
+                                lista_sub = lista_sub if isinstance(lista_sub, list) else ([] if pd.isna(lista_sub) else [str(lista_sub)])
+
+                                metodo = st.radio("Método de normalización", ["gen de referencia", "promedios"], index=0, horizontal=True, key="viz_cluster_method")
+                                ref_default = st.session_state.get('reference_gene', '')
+                                gen_ref = st.text_input("Gen de referencia (si aplica)", value=str(ref_default) if ref_default else "", key="viz_cluster_ref")
+                                figs = {}
+                                try:
+                                    figs = clustered_expression_by_level(controles_df, muestras_df, lista_sobre, lista_sub, metodo_elegido=metodo, gen_referencia=(gen_ref or None))
+                                except Exception as ex:
+                                    st.warning(f"No se pudo generar el clustergrama: {ex}")
+                                    figs = {}
+                                # Mostrar
+                                if not figs:
+                                    st.info("Sin datos suficientes para construir el clustergrama con los parámetros actuales.")
+                                else:
+                                    for k in ("Sobreexpresados", "Subexpresados"):
+                                        if k in figs:
+                                            st.plotly_chart(figs[k], use_container_width=True)
+                    except Exception:
+                        st.info("Clustergrama no disponible (faltan dependencias opcionales o datos).")
+            except Exception:
+                pass
+
+
+# -------------------------------------------------------------------------
+# Heurística (PubMed) y relación con niveles/firmas
+# -------------------------------------------------------------------------
+st.markdown("---")
+st.header("Heurística bibliográfica y relación con niveles/firmas")
+
+focused = st.session_state.get("bibliografia_clasificada")
+if not (isinstance(focused, pd.DataFrame) and not focused.empty):
+    st.info("Primero ejecuta la búsqueda en PubMed y la clasificación para generar la heurística.")
+else:
+    try:
+        st.subheader("Interpretación heurística de relaciones (enfocada al cáncer seleccionado)")
+        interp = interpret_gene_relations(focused)
+        if interp is None or interp.empty:
+            st.info("No se pudieron etiquetar relaciones con las heurísticas actuales.")
+        else:
+            summary = summarize_relations_by_gene(interp)
+            st.dataframe(summary.sort_values('heuristic_summary').reset_index(drop=True))
+            st.download_button(
+                label="Descargar resumen heurístico (CSV)",
+                data=summary.to_csv(index=False),
+                file_name="resumen_heuristico_relaciones.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+            # Heatmap genes × funciones (scores normalizados)
+            try:
+                import numpy as np
+                import plotly.express as px
+                func_cols = [
+                    c for c in summary.columns
+                    if c.endswith('_score') and not c.startswith(('upregulated','downregulated','prognosis_'))
+                ]
+                if func_cols:
+                    sm = summary.copy()
+                    sm['_total_score'] = sm[func_cols].sum(axis=1)
+                    top = sm.sort_values('_total_score', ascending=False).head(30)
+                    Z = (top[func_cols] - top[func_cols].min()) / (top[func_cols].max() - top[func_cols].min() + 1e-9)
+                    fig_hm = px.imshow(
+                        Z.values,
+                        labels=dict(x='Función', y='Gen', color='Score norm.'),
+                        x=[c.replace('_score','') for c in func_cols],
+                        y=top['Gene'].tolist(),
+                        aspect='auto',
+                        title='Heatmap genes × funciones (scores normalizados)'
+                    )
+                    fig_hm.update_layout(margin=dict(l=60,r=20,t=40,b=40))
+                    st.plotly_chart(fig_hm, use_container_width=True)
+            except Exception:
+                pass
+
+            # Sankey: Gen → efecto expresión → pronóstico dominante
+            try:
+                import numpy as np
+                import plotly.graph_objects as go
+                bad = summary.get('prognosis_bad_score', 0)
+                good = summary.get('prognosis_good_score', 0)
+                if hasattr(bad, 'values') and hasattr(good, 'values'):
+                    dom = np.where(bad.values > good.values, 'prognosis_bad', np.where(good.values > 0, 'prognosis_good', 'prognosis_uncertain'))
+                    left = summary['Gene'].tolist()
+                    midl = summary['net_expression_effect'].astype(str).tolist() if 'net_expression_effect' in summary.columns else ['uncertain'] * len(left)
+                    right = dom.tolist()
+                    nodes = list(dict.fromkeys(left + midl + right))
+                    idx = {n:i for i,n in enumerate(nodes)}
+                    links = []
+                    links += [(idx[l], idx[m], 1) for l, m in zip(left, midl)]
+                    links += [(idx[m], idx[r], 1) for m, r in zip(midl, right)]
+                    link = dict(source=[s for s,_,_ in links], target=[t for _,t,_ in links], value=[v for _,_,v in links])
+                    node = dict(label=nodes, pad=12, thickness=12)
+                    fig_sk = go.Figure(go.Sankey(node=node, link=link))
+                    fig_sk.update_layout(margin=dict(l=10,r=10,t=10,b=10), title='Flujo expresión → pronóstico')
+                    st.plotly_chart(fig_sk, use_container_width=True)
+            except Exception:
+                pass
+
+            # Relación heurística ↔ niveles de expresión y firmas
+            try:
+                import numpy as np
+                import plotly.express as px
+                df_levels = st.session_state.get('df_expr')
+                if isinstance(df_levels, pd.DataFrame) and not df_levels.empty:
+                    lev = df_levels[['target', 'nivel_expresion', 'fold_change']].drop_duplicates('target').rename(columns={'target':'Gene'})
+                    merged = pd.merge(summary, lev, on='Gene', how='left')
+                    if bool(st.session_state.get('exclude_stable', False)):
+                        merged = merged[merged['nivel_expresion'] != 'estable']
+                    func_score_cols = [c for c in merged.columns if c.endswith('_score') and not c.startswith(('upregulated','downregulated','prognosis_'))]
+                    func_flags = [c.replace('_score','') for c in func_score_cols]
+                    long_rows = []
+                    for fscore, fname in zip(func_score_cols, func_flags):
+                        sub = merged[["Gene", "nivel_expresion", fscore]].copy()
+                        sub['funcion'] = fname
+                        sub['flag'] = (sub[fscore] >= 1.2).astype(int)
+                        long_rows.append(sub.rename(columns={fscore: 'score'}))
+                    long = pd.concat(long_rows, ignore_index=True) if long_rows else pd.DataFrame()
+                    if not long.empty:
+                        st.subheader("Niveles × funciones")
+                        colm1, colm2, colm3 = st.columns([1,1,1])
+                        with colm1:
+                            agg_mode = st.selectbox("Métrica", ["conteo", "score"], index=1, key="agg_mode_heu")
+                        with colm2:
+                            top_funcs = st.number_input("Top funciones", min_value=3, max_value=20, value=8, step=1, key="top_funcs_heu")
+                        with colm3:
+                            norm_scores = st.checkbox("Normalizar por columna", value=True, key="norm_scores_heu")
+                        if agg_mode == 'conteo':
+                            pivot = long.groupby(['nivel_expresion','funcion'])['flag'].sum().unstack(fill_value=0)
+                        else:
+                            pivot = long.groupby(['nivel_expresion','funcion'])['score'].sum().unstack(fill_value=0)
+                        totals = pivot.sum(axis=0).sort_values(ascending=False)
+                        top_cols = totals.head(int(top_funcs)).index.tolist()
+                        pivot_top = pivot[top_cols]
+                        if norm_scores:
+                            pivot_top = (pivot_top - pivot_top.min()) / (pivot_top.max() - pivot_top.min() + 1e-9)
+                        fig_lv = px.imshow(
+                            pivot_top.values,
+                            labels=dict(x='Función', y='Nivel expresión', color='Valor'),
+                            x=top_cols,
+                            y=pivot_top.index.tolist(),
+                            aspect='auto',
+                            title=f"Niveles × Funciones ({agg_mode})"
+                        )
+                        st.plotly_chart(fig_lv, use_container_width=True)
+
+                        # Treemap: Nivel → Función → Gen (score×|log2FC|)
+                        trea = long.copy().merge(lev, on='Gene', how='left')
+                        trea['log2fc_abs'] = np.log2(trea['fold_change'].clip(lower=1e-12)).abs()
+                        trea['weight'] = trea['score'] * (1.0 + trea['log2fc_abs'])
+                        fig_tree = px.treemap(
+                            trea,
+                            path=['nivel_expresion','funcion','Gene'],
+                            values='weight',
+                            color='score', color_continuous_scale='Viridis',
+                            title='Treemap: Nivel → Función → Gen (peso = score×|log2FC|)'
+                        )
+                        st.plotly_chart(fig_tree, use_container_width=True)
+
+                        # Función → Hallmarks si hay firmas
+                        df_sigs_v = st.session_state.get('df_signatures')
+                        if isinstance(df_sigs_v, pd.DataFrame) and not df_sigs_v.empty:
+                            st.subheader("Funciones ↔ Hallmarks (firmas)")
+                            try:
+                                base_s = df_sigs_v[df_sigs_v.get('cancer_type') == cancer_type]
+                                recs = []
+                                for _, r in base_s.iterrows():
+                                    for col in r.index:
+                                        if col.startswith('hallmark_') and col.endswith('_genes'):
+                                            term = col[len('hallmark_'):-len('_genes')]
+                                            genes_hm = r[col] if isinstance(r[col], list) else []
+                                            for g in genes_hm:
+                                                recs.append({'Gene': g, 'hallmark': term})
+                                if recs:
+                                    map_hm = pd.DataFrame(recs).drop_duplicates()
+                                    mf = pd.merge(long[['Gene','funcion','flag']], map_hm, on='Gene', how='inner')
+                                    agg_hm = mf.groupby(['funcion','hallmark'])['flag'].sum().reset_index(name='n')
+                                    import plotly.graph_objects as go
+                                    funcs = agg_hm['funcion'].unique().tolist()
+                                    terms = agg_hm['hallmark'].unique().tolist()
+                                    nodes = funcs + terms
+                                    idx = {n:i for i,n in enumerate(nodes)}
+                                    src = [idx[f] for f in agg_hm['funcion']]
+                                    tgt = [idx[t] for t in agg_hm['hallmark']]
+                                    val = agg_hm['n'].astype(float).tolist()
+                                    fig_fh = go.Figure(go.Sankey(node=dict(label=nodes, pad=12, thickness=12), link=dict(source=src, target=tgt, value=val)))
+                                    fig_fh.update_layout(margin=dict(l=10,r=10,t=10,b=10), title='Funciones → Hallmarks (conteos)')
+                                    st.plotly_chart(fig_fh, use_container_width=True)
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+    except Exception as e:
+        st.warning(f"No se pudo ejecutar la heurística: {e}")
+
+# -----------------------------------------------------------------------------
+# Insights (Google NLP) sobre bibliografía filtrada por el cáncer seleccionado
+# -----------------------------------------------------------------------------
+st.markdown("---")
+st.header("Insights de la literatura (Google NLP)")
+
+try:
+    sec_gkey = st.secrets["GOOGLE_NLP_API_KEY"]
+except Exception:
+    sec_gkey = ""
+env_gkey = sec_gkey or os.getenv("GOOGLE_NLP_API_KEY", "")
+
+ins_col1, ins_col2, ins_col3 = st.columns([2,1,1])
+with ins_col1:
+    g_api_key = st.text_input(
+        "Google NLP API Key",
+        value=env_gkey,
+        type="password",
+        help="Se recomienda usar st.secrets['GOOGLE_NLP_API_KEY'] o la variable de entorno GOOGLE_NLP_API_KEY.",
+    )
+with ins_col2:
+    n_docs = st.number_input("Máx. artículos a analizar", min_value=5, max_value=200, value=30, step=5)
+with ins_col3:
+    lang_sel = st.selectbox("Idioma (opcional)", options=["auto", "es", "en"], index=0, help="Déjalo en 'auto' para detección automática.")
+
+apply_cancer_filter = st.checkbox(
+    "Filtrar por el tipo de cáncer seleccionado",
+    value=True,
+    help="Desactívalo si tu CSV incluye artículos de otros cánceres y quieres analizarlos igualmente.",
+)
+run_insights = st.button("Generar insights (Google NLP)")
+
+uploaded_bib_ins = st.file_uploader(
+    "Subir bibliografía (CSV) — columnas esperadas: Title, Abstract, Gene (opcional)",
+    type=["csv"],
+    key="upl_bib_nlp_csv",
+    help="Si subes un archivo aquí, se usará para los insights en lugar de la bibliografía de la sesión.",
+)
+
+# Selección de gen (desde dataset o manual si no existe columna)
+gene_selected: Optional[str] = None
+gene_source_df = None
+def _read_uploaded_csv(uploaded_file):
+    if uploaded_file is None:
+        return None
+    # Intenta distintas estrategias para archivos regionales (coma/punto y coma) y BOM
+    for attempt in range(3):
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+        try:
+            if attempt == 0:
+                return pd.read_csv(uploaded_file)
+            elif attempt == 1:
+                return pd.read_csv(uploaded_file, sep=None, engine='python')
+            else:
+                return pd.read_csv(uploaded_file, sep=';', encoding='utf-8-sig')
+        except Exception:
+            continue
+    return None
+
+try:
+    if uploaded_bib_ins is not None:
+        gene_source_df = _read_uploaded_csv(uploaded_bib_ins)
+    else:
+        gene_source_df = st.session_state.get("bibliografia_clasificada")
+except Exception:
+    gene_source_df = None
+
+if isinstance(gene_source_df, pd.DataFrame) and not gene_source_df.empty:
+    # Buscar columnas de gen razonables
+    gene_col = None
+    for c in ["Gene", "gene", "Symbol", "symbol", "target"]:
+        if c in gene_source_df.columns:
+            gene_col = c
+            break
+    if gene_col:
+        uniq_genes = (
+            gene_source_df[gene_col].dropna().astype(str).str.strip().unique().tolist()
+        )
+        uniq_genes = sorted([g for g in uniq_genes if g])
+        if uniq_genes:
+            gene_selected = st.selectbox("Gen a analizar (desde archivo/datos)", options=uniq_genes, index=0)
+    if not gene_selected:
+        gene_selected = st.text_input("Gen a analizar (manual si no hay columna)", value="", placeholder="Ej.: TP53")
+else:
+    gene_selected = st.text_input("Gen a analizar", value="", placeholder="Ej.: TP53")
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _prep_nlp_texts_cached(df_csv: str, cancer_label: str, gene: Optional[str], limit: int, apply_filter: bool) -> list[str]:
+    try:
+        df = pd.read_csv(io.StringIO(df_csv))
+    except Exception:
+        return []
+    t = df.copy()
+    if apply_filter:
+        try:
+            from src.core.bibliography import filter_bibliography_by_cancer
+            t = filter_bibliography_by_cancer(t, cancer_label)
+        except Exception:
+            pass
+    # Filtrar por gen si aplica
+    if gene:
+        gcand = None
+        for c in ["Gene", "gene", "Symbol", "symbol", "target"]:
+            if c in t.columns:
+                gcand = c
+                break
+        if gcand:
+            t = t[t[gcand].astype(str).str.strip().str.lower() == str(gene).strip().lower()]
+    # Tomar columnas de texto disponibles
+    title_col = "Title" if "Title" in t.columns else ("article_title" if "article_title" in t.columns else None)
+    abs_col = "Abstract" if "Abstract" in t.columns else None
+    if not title_col:
+        return []
+    texts = (t[title_col].astype(str) + " " + (t[abs_col].astype(str) if abs_col else "")).tolist()
+    texts = [s.strip() for s in texts if isinstance(s, str) and s.strip()]
+    return texts[: max(1, int(limit))]
+
+if run_insights:
+    # Priorizar archivo subido; si no, usar bibliografía de sesión
+    if uploaded_bib_ins is not None:
+        # Reutiliza el DataFrame ya leído (evita puntero al final del buffer)
+        if isinstance(gene_source_df, pd.DataFrame) and not gene_source_df.empty:
+            bib_df = gene_source_df.copy()
+        else:
+            try:
+                bib_df = _read_uploaded_csv(uploaded_bib_ins)
+            except Exception as e:
+                st.error(f"No se pudo leer el CSV subido: {e}")
+                bib_df = None
+        if bib_df is None:
+            st.error("No se pudo leer el CSV subido (prueba con separador ';' o codificación UTF-8).")
+    else:
+        bib_df = st.session_state.get("bibliografia_clasificada")
+    if not (isinstance(bib_df, pd.DataFrame) and not bib_df.empty):
+        st.info("Primero genera o carga la bibliografía clasificada en la sección anterior.")
+    elif not (g_api_key or os.getenv("GOOGLE_NLP_API_KEY")):
+        st.warning("Falta la API Key de Google NLP. Ingresa una o configúrala en el entorno/secrets.")
+    else:
+        with st.spinner("Analizando textos con Google NLP…"):
+            # Conteos informativos antes del análisis
+            try:
+                df_all = bib_df.copy()
+                # Arma columna de texto combinada
+                title_col = "Title" if "Title" in df_all.columns else ("article_title" if "article_title" in df_all.columns else None)
+                abs_col = "Abstract" if "Abstract" in df_all.columns else None
+                if title_col is None:
+                    raise RuntimeError("El CSV debe incluir una columna 'Title' o 'article_title'.")
+                df_all['_text'] = df_all[title_col].astype(str) + ' ' + (df_all[abs_col].astype(str) if abs_col else '')
+                total_docs_all = int((df_all['_text'].astype(str).str.strip() != '').sum())
+                # Filtrar por gen
+                df_gene = df_all.copy()
+                if gene_selected:
+                    gcand = None
+                    for c in ["Gene", "gene", "Symbol", "symbol", "target"]:
+                        if c in df_gene.columns:
+                            gcand = c
+                            break
+                    if gcand:
+                        df_gene = df_gene[df_gene[gcand].astype(str).str.strip().str.lower() == str(gene_selected).strip().lower()]
+                total_docs_gene = int((df_gene['_text'].astype(str).str.strip() != '').sum())
+                # Filtrar por cáncer (si aplica)
+                df_cancer_gene = df_gene.copy()
+                if apply_cancer_filter:
+                    try:
+                        from src.core.bibliography import filter_bibliography_by_cancer
+                        df_cancer_gene = filter_bibliography_by_cancer(df_cancer_gene, cancer_type)
+                    except Exception:
+                        pass
+                total_docs_final = int(len(df_cancer_gene))
+                st.caption(
+                    f"Artículos: {total_docs_all} en total → {total_docs_gene} para el gen seleccionado"
+                    + (f" → {total_docs_final} tras filtrar por '{cancer_type}'" if apply_cancer_filter else "")
+                )
+            except Exception:
+                total_docs_final = None
+
+            texts = _prep_nlp_texts_cached(
+                bib_df.to_csv(index=False), cancer_type, gene_selected or None, int(n_docs), bool(apply_cancer_filter)
+            )
+            if not texts:
+                if apply_cancer_filter:
+                    st.info("No hay textos para analizar con el filtro de cáncer activo. Desactívalo para analizar todo tu CSV.")
+                else:
+                    st.info("No hay textos válidos en el CSV (requiere columnas Title/Abstract con contenido).")
+            else:
+                try:
+                    glang = None if lang_sel == "auto" else lang_sel
+                    client = GoogleNLPClient(api_key=(g_api_key or None), default_language=glang, sleep_between=0.0)
+                    res = aggregate_insights(
+                        texts,
+                        client,
+                        do_entities=True,
+                        do_entity_sentiment=True,
+                        do_sentiment=True,
+                        do_categories=True,
+                        language=glang,
+                        max_chars_per_doc=8000,
+                    )
+                except Exception as e:
+                    st.error(f"Error llamando Google NLP: {e}")
+                    res = None
+
+                if res:
+                    # Breve párrafo resumen para el gen seleccionado (conclusiones)
+                    try:
+                        gname = (gene_selected or '').strip()
+                        sent = res.get("sentiment", {}) or {}
+                        cats = res.get("categories", []) or []
+                        ents = res.get("entities", []) or []
+                        entsent = res.get("entity_sentiment", []) or []
+                        n_docs_used = int(sent.get('n', 0))
+                        avg_s = float(sent.get('avg_score', 0.0))
+                        avg_m = float(sent.get('avg_magnitude', 0.0))
+                        # Top categorías
+                        top_cats = [c.get('category','') for c in cats[:3]] if cats else []
+                        # Entidades salientes
+                        top_ent_names = [e.get('name','') for e in ents[:3]] if ents else []
+                        # Entidades con polaridad marcada
+                        pos_ents = sorted([e for e in entsent if float(e.get('avg_sentiment',0)) > 0.2], key=lambda x: (x.get('avg_sentiment',0), x.get('avg_magnitude',0)), reverse=True)[:3]
+                        neg_ents = sorted([e for e in entsent if float(e.get('avg_sentiment',0)) < -0.2], key=lambda x: (abs(x.get('avg_sentiment',0)), x.get('avg_magnitude',0)), reverse=True)[:3]
+                        pos_list = [p.get('name','') for p in pos_ents]
+                        neg_list = [n.get('name','') for n in neg_ents]
+                        # Construir narrativa breve orientada a conclusiones
+                        partes = []
+                        partes.append(
+                            f"Se revisaron {n_docs_used} artículos" + (f" sobre {gname}" if gname else "") + (f" en {cancer_type}" if apply_cancer_filter else "") + "."
+                        )
+                        if top_cats:
+                            partes.append(f"Los temas dominantes fueron: {', '.join(top_cats)}.")
+                        if top_ent_names:
+                            partes.append(f"Las entidades más relevantes incluyeron {', '.join(top_ent_names)}.")
+                        if pos_list or neg_list:
+                            if pos_list:
+                                partes.append(f"Se observaron asociaciones positivas destacadas con {', '.join(pos_list)}.")
+                            if neg_list:
+                                partes.append(f"También emergieron señales negativas en torno a {', '.join(neg_list)}.")
+                        partes.append(f"El tono global fue {('ligeramente negativo' if avg_s < -0.1 else 'ligeramente positivo' if avg_s > 0.1 else 'neutral')} (score {avg_s:.2f}, magnitud {avg_m:.2f}).")
+                        resumen = " ".join(partes)
+                        st.info(resumen)
+                    except Exception:
+                        pass
+
+                    # Complemento con heurística propia si hay bibliografía disponible (refuerza conclusiones)
+                    try:
+                        df_sub = bib_df.copy()
+                        # Filtrar por gen
+                        gcand = None
+                        for c in ["Gene", "gene", "Symbol", "symbol", "target"]:
+                            if c in df_sub.columns:
+                                gcand = c
+                                break
+                        if gcand and gname:
+                            df_sub = df_sub[df_sub[gcand].astype(str).str.strip().str.lower() == gname.lower()]
+                        # Filtrar por cáncer si aplica
+                        if apply_cancer_filter:
+                            try:
+                                from src.core.bibliography import filter_bibliography_by_cancer
+                                df_sub = filter_bibliography_by_cancer(df_sub, cancer_type)
+                            except Exception:
+                                pass
+                        # Aplicar interpretación heurística
+                        ih = interpret_gene_relations(df_sub)
+                        summ = summarize_relations_by_gene(ih)
+                        if isinstance(summ, pd.DataFrame) and not summ.empty:
+                            # Toma fila del gen
+                            row = summ.iloc[0]
+                            effects = []
+                            if float(row.get('upregulated_score', 0)) > float(row.get('downregulated_score', 0)):
+                                effects.append('tendencia a sobreexpresión')
+                            elif float(row.get('downregulated_score', 0)) > float(row.get('upregulated_score', 0)):
+                                effects.append('tendencia a subexpresión')
+                            prog = 'desfavorable' if float(row.get('prognosis_bad_score', 0)) > float(row.get('prognosis_good_score', 0)) else ('favorable' if float(row.get('prognosis_good_score', 0)) > 0 else 'incierta')
+                            flags = [k for k in ['proliferation','invasion','migration','metastasis','drug_resistance','drug_sensitivity','apoptosis','emt_related'] if row.get(k, 0) > 0]
+                            texto = (
+                                f"Heurística complementaria: para {gname or 'el gen seleccionado'} se observa {', '.join(effects) if effects else 'un efecto de expresión incierto'}, "
+                                f"y una señal pronóstica {prog}. Funciones implicadas: {', '.join(flags) if flags else 'no concluyentes'}."
+                            )
+                            st.caption(texto)
+                    except Exception:
+                        pass
+
+                    # Resumen de sentimiento global
+                    sent = res.get("sentiment", {}) or {}
+                    s1, s2, s3 = st.columns(3)
+                    with s1:
+                        st.metric("Sentimiento promedio", f"{float(sent.get('avg_score', 0.0)):.2f}")
+                    with s2:
+                        st.metric("Magnitud promedio", f"{float(sent.get('avg_magnitude', 0.0)):.2f}")
+                    with s3:
+                        st.metric("Artículos analizados", int(sent.get('n', 0)))
+
+                    # Entidades más salientes
+                    ents = pd.DataFrame(res.get("entities") or [])
+                    if not ents.empty:
+                        st.subheader("Entidades más relevantes")
+                        show = ents.rename(columns={"salience_sum": "saliencia_acum", "mentions": "menciones"})
+                        st.dataframe(show.head(50))
+
+                    # Entidades con mayor carga emocional
+                    entsent = pd.DataFrame(res.get("entity_sentiment") or [])
+                    if not entsent.empty:
+                        st.subheader("Entidades con sentimiento (promedios)")
+                        show2 = entsent.rename(columns={
+                            "avg_sentiment": "sent_prom",
+                            "avg_magnitude": "magn_prom",
+                            "mentions": "menciones",
+                        })
+                        st.dataframe(show2.head(50))
+
+                    # Categorías temáticas
+                    cats = pd.DataFrame(res.get("categories") or [])
+                    if not cats.empty:
+                        st.subheader("Categorías (classifyText)")
+                        try:
+                            import plotly.express as px
+                            figc = px.bar(cats.head(20), x="confidence_sum", y="category", orientation="h", title="Top categorías")
+                            st.plotly_chart(figc, use_container_width=True)
+                        except Exception:
+                            pass
+                        st.dataframe(cats)
 
 # -----------------------------------------------------------------------------
 # Guía rápida
