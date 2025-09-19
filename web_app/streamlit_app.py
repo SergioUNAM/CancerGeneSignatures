@@ -100,6 +100,7 @@ from src.core.visuals import (
     fingerprint_heatmap,
     clustered_expression_by_level,
 )
+from src.integrations.google_nlp import GoogleNLPClient, aggregate_insights
 
 # Cache de firmas para evitar recomputar al cambiar solo la selección visual
 import hashlib
@@ -1671,6 +1672,331 @@ else:
                 pass
     except Exception as e:
         st.warning(f"No se pudo ejecutar la heurística: {e}")
+
+# -----------------------------------------------------------------------------
+# Insights (Google NLP) sobre bibliografía filtrada por el cáncer seleccionado
+# -----------------------------------------------------------------------------
+st.markdown("---")
+st.header("Insights de la literatura (Google NLP)")
+
+try:
+    sec_gkey = st.secrets["GOOGLE_NLP_API_KEY"]
+except Exception:
+    sec_gkey = ""
+env_gkey = sec_gkey or os.getenv("GOOGLE_NLP_API_KEY", "")
+
+ins_col1, ins_col2, ins_col3 = st.columns([2,1,1])
+with ins_col1:
+    g_api_key = st.text_input(
+        "Google NLP API Key",
+        value=env_gkey,
+        type="password",
+        help="Se recomienda usar st.secrets['GOOGLE_NLP_API_KEY'] o la variable de entorno GOOGLE_NLP_API_KEY.",
+    )
+with ins_col2:
+    n_docs = st.number_input("Máx. artículos a analizar", min_value=5, max_value=200, value=30, step=5)
+with ins_col3:
+    lang_sel = st.selectbox("Idioma (opcional)", options=["auto", "es", "en"], index=0, help="Déjalo en 'auto' para detección automática.")
+
+apply_cancer_filter = st.checkbox(
+    "Filtrar por el tipo de cáncer seleccionado",
+    value=True,
+    help="Desactívalo si tu CSV incluye artículos de otros cánceres y quieres analizarlos igualmente.",
+)
+run_insights = st.button("Generar insights (Google NLP)")
+
+uploaded_bib_ins = st.file_uploader(
+    "Subir bibliografía (CSV) — columnas esperadas: Title, Abstract, Gene (opcional)",
+    type=["csv"],
+    key="upl_bib_nlp_csv",
+    help="Si subes un archivo aquí, se usará para los insights en lugar de la bibliografía de la sesión.",
+)
+
+# Selección de gen (desde dataset o manual si no existe columna)
+gene_selected: Optional[str] = None
+gene_source_df = None
+def _read_uploaded_csv(uploaded_file):
+    if uploaded_file is None:
+        return None
+    # Intenta distintas estrategias para archivos regionales (coma/punto y coma) y BOM
+    for attempt in range(3):
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+        try:
+            if attempt == 0:
+                return pd.read_csv(uploaded_file)
+            elif attempt == 1:
+                return pd.read_csv(uploaded_file, sep=None, engine='python')
+            else:
+                return pd.read_csv(uploaded_file, sep=';', encoding='utf-8-sig')
+        except Exception:
+            continue
+    return None
+
+try:
+    if uploaded_bib_ins is not None:
+        gene_source_df = _read_uploaded_csv(uploaded_bib_ins)
+    else:
+        gene_source_df = st.session_state.get("bibliografia_clasificada")
+except Exception:
+    gene_source_df = None
+
+if isinstance(gene_source_df, pd.DataFrame) and not gene_source_df.empty:
+    # Buscar columnas de gen razonables
+    gene_col = None
+    for c in ["Gene", "gene", "Symbol", "symbol", "target"]:
+        if c in gene_source_df.columns:
+            gene_col = c
+            break
+    if gene_col:
+        uniq_genes = (
+            gene_source_df[gene_col].dropna().astype(str).str.strip().unique().tolist()
+        )
+        uniq_genes = sorted([g for g in uniq_genes if g])
+        if uniq_genes:
+            gene_selected = st.selectbox("Gen a analizar (desde archivo/datos)", options=uniq_genes, index=0)
+    if not gene_selected:
+        gene_selected = st.text_input("Gen a analizar (manual si no hay columna)", value="", placeholder="Ej.: TP53")
+else:
+    gene_selected = st.text_input("Gen a analizar", value="", placeholder="Ej.: TP53")
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _prep_nlp_texts_cached(df_csv: str, cancer_label: str, gene: Optional[str], limit: int, apply_filter: bool) -> list[str]:
+    try:
+        df = pd.read_csv(io.StringIO(df_csv))
+    except Exception:
+        return []
+    t = df.copy()
+    if apply_filter:
+        try:
+            from src.core.bibliography import filter_bibliography_by_cancer
+            t = filter_bibliography_by_cancer(t, cancer_label)
+        except Exception:
+            pass
+    # Filtrar por gen si aplica
+    if gene:
+        gcand = None
+        for c in ["Gene", "gene", "Symbol", "symbol", "target"]:
+            if c in t.columns:
+                gcand = c
+                break
+        if gcand:
+            t = t[t[gcand].astype(str).str.strip().str.lower() == str(gene).strip().lower()]
+    # Tomar columnas de texto disponibles
+    title_col = "Title" if "Title" in t.columns else ("article_title" if "article_title" in t.columns else None)
+    abs_col = "Abstract" if "Abstract" in t.columns else None
+    if not title_col:
+        return []
+    texts = (t[title_col].astype(str) + " " + (t[abs_col].astype(str) if abs_col else "")).tolist()
+    texts = [s.strip() for s in texts if isinstance(s, str) and s.strip()]
+    return texts[: max(1, int(limit))]
+
+if run_insights:
+    # Priorizar archivo subido; si no, usar bibliografía de sesión
+    if uploaded_bib_ins is not None:
+        # Reutiliza el DataFrame ya leído (evita puntero al final del buffer)
+        if isinstance(gene_source_df, pd.DataFrame) and not gene_source_df.empty:
+            bib_df = gene_source_df.copy()
+        else:
+            try:
+                bib_df = _read_uploaded_csv(uploaded_bib_ins)
+            except Exception as e:
+                st.error(f"No se pudo leer el CSV subido: {e}")
+                bib_df = None
+        if bib_df is None:
+            st.error("No se pudo leer el CSV subido (prueba con separador ';' o codificación UTF-8).")
+    else:
+        bib_df = st.session_state.get("bibliografia_clasificada")
+    if not (isinstance(bib_df, pd.DataFrame) and not bib_df.empty):
+        st.info("Primero genera o carga la bibliografía clasificada en la sección anterior.")
+    elif not (g_api_key or os.getenv("GOOGLE_NLP_API_KEY")):
+        st.warning("Falta la API Key de Google NLP. Ingresa una o configúrala en el entorno/secrets.")
+    else:
+        with st.spinner("Analizando textos con Google NLP…"):
+            # Conteos informativos antes del análisis
+            try:
+                df_all = bib_df.copy()
+                # Arma columna de texto combinada
+                title_col = "Title" if "Title" in df_all.columns else ("article_title" if "article_title" in df_all.columns else None)
+                abs_col = "Abstract" if "Abstract" in df_all.columns else None
+                if title_col is None:
+                    raise RuntimeError("El CSV debe incluir una columna 'Title' o 'article_title'.")
+                df_all['_text'] = df_all[title_col].astype(str) + ' ' + (df_all[abs_col].astype(str) if abs_col else '')
+                total_docs_all = int((df_all['_text'].astype(str).str.strip() != '').sum())
+                # Filtrar por gen
+                df_gene = df_all.copy()
+                if gene_selected:
+                    gcand = None
+                    for c in ["Gene", "gene", "Symbol", "symbol", "target"]:
+                        if c in df_gene.columns:
+                            gcand = c
+                            break
+                    if gcand:
+                        df_gene = df_gene[df_gene[gcand].astype(str).str.strip().str.lower() == str(gene_selected).strip().lower()]
+                total_docs_gene = int((df_gene['_text'].astype(str).str.strip() != '').sum())
+                # Filtrar por cáncer (si aplica)
+                df_cancer_gene = df_gene.copy()
+                if apply_cancer_filter:
+                    try:
+                        from src.core.bibliography import filter_bibliography_by_cancer
+                        df_cancer_gene = filter_bibliography_by_cancer(df_cancer_gene, cancer_type)
+                    except Exception:
+                        pass
+                total_docs_final = int(len(df_cancer_gene))
+                st.caption(
+                    f"Artículos: {total_docs_all} en total → {total_docs_gene} para el gen seleccionado"
+                    + (f" → {total_docs_final} tras filtrar por '{cancer_type}'" if apply_cancer_filter else "")
+                )
+            except Exception:
+                total_docs_final = None
+
+            texts = _prep_nlp_texts_cached(
+                bib_df.to_csv(index=False), cancer_type, gene_selected or None, int(n_docs), bool(apply_cancer_filter)
+            )
+            if not texts:
+                if apply_cancer_filter:
+                    st.info("No hay textos para analizar con el filtro de cáncer activo. Desactívalo para analizar todo tu CSV.")
+                else:
+                    st.info("No hay textos válidos en el CSV (requiere columnas Title/Abstract con contenido).")
+            else:
+                try:
+                    glang = None if lang_sel == "auto" else lang_sel
+                    client = GoogleNLPClient(api_key=(g_api_key or None), default_language=glang, sleep_between=0.0)
+                    res = aggregate_insights(
+                        texts,
+                        client,
+                        do_entities=True,
+                        do_entity_sentiment=True,
+                        do_sentiment=True,
+                        do_categories=True,
+                        language=glang,
+                        max_chars_per_doc=8000,
+                    )
+                except Exception as e:
+                    st.error(f"Error llamando Google NLP: {e}")
+                    res = None
+
+                if res:
+                    # Breve párrafo resumen para el gen seleccionado (conclusiones)
+                    try:
+                        gname = (gene_selected or '').strip()
+                        sent = res.get("sentiment", {}) or {}
+                        cats = res.get("categories", []) or []
+                        ents = res.get("entities", []) or []
+                        entsent = res.get("entity_sentiment", []) or []
+                        n_docs_used = int(sent.get('n', 0))
+                        avg_s = float(sent.get('avg_score', 0.0))
+                        avg_m = float(sent.get('avg_magnitude', 0.0))
+                        # Top categorías
+                        top_cats = [c.get('category','') for c in cats[:3]] if cats else []
+                        # Entidades salientes
+                        top_ent_names = [e.get('name','') for e in ents[:3]] if ents else []
+                        # Entidades con polaridad marcada
+                        pos_ents = sorted([e for e in entsent if float(e.get('avg_sentiment',0)) > 0.2], key=lambda x: (x.get('avg_sentiment',0), x.get('avg_magnitude',0)), reverse=True)[:3]
+                        neg_ents = sorted([e for e in entsent if float(e.get('avg_sentiment',0)) < -0.2], key=lambda x: (abs(x.get('avg_sentiment',0)), x.get('avg_magnitude',0)), reverse=True)[:3]
+                        pos_list = [p.get('name','') for p in pos_ents]
+                        neg_list = [n.get('name','') for n in neg_ents]
+                        # Construir narrativa breve orientada a conclusiones
+                        partes = []
+                        partes.append(
+                            f"Se revisaron {n_docs_used} artículos" + (f" sobre {gname}" if gname else "") + (f" en {cancer_type}" if apply_cancer_filter else "") + "."
+                        )
+                        if top_cats:
+                            partes.append(f"Los temas dominantes fueron: {', '.join(top_cats)}.")
+                        if top_ent_names:
+                            partes.append(f"Las entidades más relevantes incluyeron {', '.join(top_ent_names)}.")
+                        if pos_list or neg_list:
+                            if pos_list:
+                                partes.append(f"Se observaron asociaciones positivas destacadas con {', '.join(pos_list)}.")
+                            if neg_list:
+                                partes.append(f"También emergieron señales negativas en torno a {', '.join(neg_list)}.")
+                        partes.append(f"El tono global fue {('ligeramente negativo' if avg_s < -0.1 else 'ligeramente positivo' if avg_s > 0.1 else 'neutral')} (score {avg_s:.2f}, magnitud {avg_m:.2f}).")
+                        resumen = " ".join(partes)
+                        st.info(resumen)
+                    except Exception:
+                        pass
+
+                    # Complemento con heurística propia si hay bibliografía disponible (refuerza conclusiones)
+                    try:
+                        df_sub = bib_df.copy()
+                        # Filtrar por gen
+                        gcand = None
+                        for c in ["Gene", "gene", "Symbol", "symbol", "target"]:
+                            if c in df_sub.columns:
+                                gcand = c
+                                break
+                        if gcand and gname:
+                            df_sub = df_sub[df_sub[gcand].astype(str).str.strip().str.lower() == gname.lower()]
+                        # Filtrar por cáncer si aplica
+                        if apply_cancer_filter:
+                            try:
+                                from src.core.bibliography import filter_bibliography_by_cancer
+                                df_sub = filter_bibliography_by_cancer(df_sub, cancer_type)
+                            except Exception:
+                                pass
+                        # Aplicar interpretación heurística
+                        ih = interpret_gene_relations(df_sub)
+                        summ = summarize_relations_by_gene(ih)
+                        if isinstance(summ, pd.DataFrame) and not summ.empty:
+                            # Toma fila del gen
+                            row = summ.iloc[0]
+                            effects = []
+                            if float(row.get('upregulated_score', 0)) > float(row.get('downregulated_score', 0)):
+                                effects.append('tendencia a sobreexpresión')
+                            elif float(row.get('downregulated_score', 0)) > float(row.get('upregulated_score', 0)):
+                                effects.append('tendencia a subexpresión')
+                            prog = 'desfavorable' if float(row.get('prognosis_bad_score', 0)) > float(row.get('prognosis_good_score', 0)) else ('favorable' if float(row.get('prognosis_good_score', 0)) > 0 else 'incierta')
+                            flags = [k for k in ['proliferation','invasion','migration','metastasis','drug_resistance','drug_sensitivity','apoptosis','emt_related'] if row.get(k, 0) > 0]
+                            texto = (
+                                f"Heurística complementaria: para {gname or 'el gen seleccionado'} se observa {', '.join(effects) if effects else 'un efecto de expresión incierto'}, "
+                                f"y una señal pronóstica {prog}. Funciones implicadas: {', '.join(flags) if flags else 'no concluyentes'}."
+                            )
+                            st.caption(texto)
+                    except Exception:
+                        pass
+
+                    # Resumen de sentimiento global
+                    sent = res.get("sentiment", {}) or {}
+                    s1, s2, s3 = st.columns(3)
+                    with s1:
+                        st.metric("Sentimiento promedio", f"{float(sent.get('avg_score', 0.0)):.2f}")
+                    with s2:
+                        st.metric("Magnitud promedio", f"{float(sent.get('avg_magnitude', 0.0)):.2f}")
+                    with s3:
+                        st.metric("Artículos analizados", int(sent.get('n', 0)))
+
+                    # Entidades más salientes
+                    ents = pd.DataFrame(res.get("entities") or [])
+                    if not ents.empty:
+                        st.subheader("Entidades más relevantes")
+                        show = ents.rename(columns={"salience_sum": "saliencia_acum", "mentions": "menciones"})
+                        st.dataframe(show.head(50))
+
+                    # Entidades con mayor carga emocional
+                    entsent = pd.DataFrame(res.get("entity_sentiment") or [])
+                    if not entsent.empty:
+                        st.subheader("Entidades con sentimiento (promedios)")
+                        show2 = entsent.rename(columns={
+                            "avg_sentiment": "sent_prom",
+                            "avg_magnitude": "magn_prom",
+                            "mentions": "menciones",
+                        })
+                        st.dataframe(show2.head(50))
+
+                    # Categorías temáticas
+                    cats = pd.DataFrame(res.get("categories") or [])
+                    if not cats.empty:
+                        st.subheader("Categorías (classifyText)")
+                        try:
+                            import plotly.express as px
+                            figc = px.bar(cats.head(20), x="confidence_sum", y="category", orientation="h", title="Top categorías")
+                            st.plotly_chart(figc, use_container_width=True)
+                        except Exception:
+                            pass
+                        st.dataframe(cats)
+
 # -----------------------------------------------------------------------------
 # Guía rápida
 # -----------------------------------------------------------------------------
