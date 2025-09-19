@@ -38,6 +38,9 @@ Fecha: 2025-09-10
 - [ ] Soporte opcional `.xls` (o guía para convertir a `.xlsx`)
 
 **Cambios Recientes (Changelog)**
+- 2025-09-12
+  - Se introdujo `web_app/app_state.py` para centralizar preferencias de sesión (política ND, contexto, bandera de genes estables).
+  - La barra lateral de Streamlit ahora recuerda selecciones previas usando el contenedor tipado en lugar de claves sueltas.
 - 2025-09-10
   - Merge a `master` de `feature/webapp-ensembl-integration` (Ensembl interactivo, UX de clasificación mejorada, parser A4/B4 + heurística).
 - 2025-09-10

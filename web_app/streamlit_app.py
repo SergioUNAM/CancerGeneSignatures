@@ -101,6 +101,7 @@ from src.core.visuals import (
     clustered_expression_by_level,
 )
 from src.integrations.google_nlp import GoogleNLPClient, aggregate_insights
+from app_state import AppSessionState
 
 # Cache de firmas para evitar recomputar al cambiar solo la selección visual
 import hashlib
@@ -180,6 +181,8 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+app_state = AppSessionState.load()
 
 st.title("Análisis de datos de expresión diferencial por qPCR")
 st.write(
@@ -266,41 +269,46 @@ with st.sidebar:
 
     st.header("2) Parámetros del estudio")
     cancer_type = st.selectbox("Tipo de cáncer", MENU["menu"]["cancer_types"], index=0)
-    context_sel_label = st.selectbox("Contexto", [c["label"] for c in MENU["menu"]["contexts"]], index=0)
+    context_options = [c["label"] for c in MENU["menu"]["contexts"]]
+    context_default_idx = context_options.index(app_state.context_label) if app_state.context_label in context_options else 0
+    context_sel_label = st.selectbox("Contexto", context_options, index=context_default_idx)
     norm_sel_label = st.selectbox("Método preferido", [n["label"] for n in MENU["menu"]["normalization_methods"]], index=1)
 
     st.header("3) Política 'Undetermined/ND'")
+    und_options = ["nan", "ctmax", "value"]
+    und_default_idx = und_options.index(app_state.undetermined.policy) if app_state.undetermined.policy in und_options else 0
     und_policy = st.selectbox(
         "Cómo tratar valores 'Undetermined' (ND)",
-        options=["nan", "ctmax", "value"],
-        index=0,
+        options=und_options,
+        index=und_default_idx,
         help="\n- nan: deja como NaN (se puede imputar después).\n- ctmax: usa el Ct máximo observado por columna.\n- value: usa un valor fijo (p. ej., 40).",
     )
     und_value = st.number_input(
         "Valor fijo para 'value'",
-        value=40.0,
+        value=float(app_state.undetermined.value),
         min_value=0.0,
         max_value=100.0,
         step=0.5,
     )
-    # Persistir en sesión para usarlo durante todo el flujo
-    st.session_state["und_policy"] = und_policy
-    st.session_state["und_value"] = float(und_value)
-    st.session_state["context_sel_label"] = context_sel_label
 
     # Preferencia global de gráficos: excluir genes 'estables'
     exclude_stable = st.checkbox(
         "Excluir genes 'estables' en gráficos",
-        value=bool(st.session_state.get("exclude_stable", False)),
+        value=bool(app_state.exclude_stable),
         help="Cuando está activado, los gráficos omiten los genes clasificados como 'estables'.",
     )
-    st.session_state["exclude_stable"] = bool(exclude_stable)
     run_btn = st.button("Procesar archivo", type="primary")
+
+app_state.undetermined.policy = und_policy
+app_state.undetermined.value = float(und_value)
+app_state.context_label = context_sel_label
+app_state.exclude_stable = bool(exclude_stable)
+app_state.persist()
 
 # -----------------------------------------------------------------------------
 # Carga de archivo y preprocesamiento
 # -----------------------------------------------------------------------------
-df_loaded: Optional[LoadResult] = st.session_state.get("df_loaded")
+df_loaded: Optional[LoadResult] = app_state.df_loaded
 if uploaded is not None and run_btn:
     try:
         uploaded.seek(0)
@@ -321,7 +329,8 @@ if uploaded is not None and run_btn:
             df_loaded = parse_qpcr_wide(uploaded, sheet_name=sheet)
         logger.info(f"Archivo cargado: name={df_loaded.source_name}, sheet={df_loaded.sheet_name}, shape={df_loaded.df.shape}")
         # Persistir en sesión para evitar perderlo al enviar el formulario
-        st.session_state["df_loaded"] = df_loaded
+        app_state.df_loaded = df_loaded
+        app_state.persist()
     except Exception as e:
         st.warning(f"Encabezado A4/B4 no válido o firma previa detectada ({e}). Probando detección automática…")
         logger.warning("Fallo modo coords; intentando auto")
@@ -337,7 +346,8 @@ if uploaded is not None and run_btn:
                 )
             except TypeError:
                 df_loaded = parse_qpcr_wide(uploaded, sheet_name=sheet)
-            st.session_state["df_loaded"] = df_loaded
+            app_state.df_loaded = df_loaded
+            app_state.persist()
             logger.info("Carga con modo auto exitosa")
         except Exception as e2:
             st.error(f"Error al cargar el archivo: {e2}")
@@ -625,7 +635,7 @@ if df_loaded is not None:
         controles_df.loc[:, 'ct'] = pd.to_numeric(controles_df['ct'], errors='coerce')
         muestras_df.loc[:, 'ct'] = pd.to_numeric(muestras_df['ct'], errors='coerce')
 
-        und_policy = st.session_state.get('und_policy', 'nan')
+        und_policy = app_state.undetermined.policy
         if und_policy == 'nan':
             v_max = pd.concat([controles_df['ct'], muestras_df['ct']]).max()
             max_str = f"{v_max:.2f}" if pd.notna(v_max) else "NaN"
@@ -657,7 +667,7 @@ if df_loaded is not None:
             import plotly.graph_objects as go
             fig = go.Figure()
             # Aplicar preferencia de exclusión de 'estables' solo para gráficos
-            exclude_stable = bool(st.session_state.get('exclude_stable', False))
+            exclude_stable = bool(app_state.exclude_stable)
             try:
                 # Usar df_expr ya calculado para determinar objetivos a mostrar
                 targets_plot = (
@@ -738,7 +748,7 @@ if df_loaded is not None:
                 import plotly.express as px
                 order_levels = ['estable', 'subexpresado', 'sobreexpresado']
                 # Aplicar exclusión de 'estables' en el gráfico de distribución si corresponde
-                exclude_stable = bool(st.session_state.get('exclude_stable', False))
+                exclude_stable = bool(app_state.exclude_stable)
                 df_expr_plot = df_expr[df_expr['nivel_expresion'] != 'estable'] if exclude_stable else df_expr
                 counts = df_expr_plot['nivel_expresion'].value_counts().reindex(order_levels, fill_value=0)
                 bar = px.bar(x=counts.index, y=counts.values, labels={'x': 'Nivel de expresión', 'y': 'Frecuencia'}, title='Distribución de niveles de expresión')
@@ -747,7 +757,7 @@ if df_loaded is not None:
             # Genes por nivel de expresión: lista/tablas y treemap
             st.markdown("### Genes por nivel de expresión")
             # Base para visualizaciones (respetar preferencia de exclusión de 'estables')
-            df_expr_vis = df_expr[df_expr['nivel_expresion'] != 'estable'].copy() if bool(st.session_state.get('exclude_stable', False)) else df_expr.copy()
+            df_expr_vis = df_expr[df_expr['nivel_expresion'] != 'estable'].copy() if bool(app_state.exclude_stable) else df_expr.copy()
             # Orden sugerido
             levels_vis = ['subexpresado', 'estable', 'sobreexpresado']
             levels_vis = [lvl for lvl in levels_vis if lvl in df_expr_vis['nivel_expresion'].astype(str).unique()]
@@ -932,7 +942,7 @@ if df_loaded is not None:
                 default=['subexpresado', 'sobreexpresado']
             )
             # Respetar preferencia global de exclusión de 'estables'
-            exclude_stable_pref = bool(st.session_state.get('exclude_stable', False))
+            exclude_stable_pref = bool(app_state.exclude_stable)
             if exclude_stable_pref and 'estable' in sel_levels:
                 sel_levels = [lvl for lvl in sel_levels if lvl != 'estable']
                 st.caption("Preferencia activa: excluyendo 'estable' del enriquecimiento")
@@ -1119,7 +1129,7 @@ if df_loaded is not None:
                     tmp['ensembl_id'] = ''
                     genes_df = tmp[['target', 'ensembl_id', 'nivel_expresion']]
                 # Respetar preferencia global de exclusión de 'estables'
-                if bool(st.session_state.get('exclude_stable', False)):
+                if bool(app_state.exclude_stable):
                     n_before = len(genes_df)
                     genes_df = genes_df[genes_df['nivel_expresion'] != 'estable']
                     n_after = len(genes_df)
@@ -1585,7 +1595,7 @@ else:
                 if isinstance(df_levels, pd.DataFrame) and not df_levels.empty:
                     lev = df_levels[['target', 'nivel_expresion', 'fold_change']].drop_duplicates('target').rename(columns={'target':'Gene'})
                     merged = pd.merge(summary, lev, on='Gene', how='left')
-                    if bool(st.session_state.get('exclude_stable', False)):
+                    if bool(app_state.exclude_stable):
                         merged = merged[merged['nivel_expresion'] != 'estable']
                     func_score_cols = [c for c in merged.columns if c.endswith('_score') and not c.startswith(('upregulated','downregulated','prognosis_'))]
                     func_flags = [c.replace('_score','') for c in func_score_cols]
