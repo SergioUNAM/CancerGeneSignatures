@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import io, os, json, sys, re
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 import logging
 
 import pandas as pd
@@ -66,6 +66,7 @@ except Exception:
                 samp.drop(columns=["test_str"]) if not samp.empty else samp)
 from src.core.cleaning import drop_machine_controls
 from src.core.fold_change import compute_fold_change
+from src.core.imputation import procesar_ct_column
 from src.core.tables import fc_comparison_table
 from src.core.ensembl import add_ensembl_info_batch
 from src.core.string_enrichment import (
@@ -579,8 +580,10 @@ if df_loaded is not None:
     st.write("Controles clasificados:", len(controles_df))
     st.write("Muestras clasificadas:", len(muestras_df))
     # Resumen de clasificación (análogos al notebook)
+    ok_for_fc = False
     if not controles_df.empty or not muestras_df.empty:
         st.subheader("Resumen de clasificación")
+        ok_for_fc = True
         for tipo, df_tipo in [("Controles", controles_df), ("Muestras", muestras_df)]:
             if not df_tipo.empty:
                 uniq = df_tipo['test'].astype(str).unique().tolist()
@@ -626,30 +629,99 @@ if df_loaded is not None:
                 st.warning("Ningún gen cumple el mínimo de réplicas en ambos grupos. Considera reducir el umbral o revisar datos.")
 
     extras = {}
-    # Imputación estilo notebook: NaN -> valor máximo global de CT (solo si política es 'nan')
+    ready_for_fc = ok_for_fc and not controles_df.empty and not muestras_df.empty
+
     if not controles_df.empty and not muestras_df.empty and ok_for_fc:
-        import pandas as pd
-        # Coerción a numérico
         controles_df = controles_df.copy()
         muestras_df = muestras_df.copy()
         controles_df.loc[:, 'ct'] = pd.to_numeric(controles_df['ct'], errors='coerce')
         muestras_df.loc[:, 'ct'] = pd.to_numeric(muestras_df['ct'], errors='coerce')
 
-        und_policy = app_state.undetermined.policy
-        if und_policy == 'nan':
-            v_max = pd.concat([controles_df['ct'], muestras_df['ct']]).max()
-            max_str = f"{v_max:.2f}" if pd.notna(v_max) else "NaN"
-            st.info(f"Imputación posterior: NaN de Ct → {max_str} (máximo global)")
-            controles_df.loc[:, 'ct'] = controles_df['ct'].fillna(v_max)
-            muestras_df.loc[:, 'ct'] = muestras_df['ct'].fillna(v_max)
-        else:
-            st.info("Valores 'Undetermined' ya tratados durante la carga (sin imputación adicional).")
+        st.subheader("Imputación de Ct (resumen)")
+        policy_applied = app_state.undetermined.policy
+        st.caption(f"Política seleccionada: {policy_applied}")
 
-        # Guardar CSV limpios
+        impute_by_cols = [c for c in ['plate_id', 'target'] if c in controles_df.columns and c in muestras_df.columns]
+        impute_kwargs: dict[str, Any] = {"columna_ct": 'ct', "by": impute_by_cols or None}
+
+        imputation_summary = pd.DataFrame()
+        used_info: Optional[str] = None
+
+        if policy_applied == 'ctmax':
+            try:
+                controles_df, muestras_df = procesar_ct_column(
+                    controles_df,
+                    muestras_df,
+                    **impute_kwargs,
+                )
+            except ValueError as exc:
+                ready_for_fc = False
+                st.error(f"Imputación fallida: {exc}")
+            else:
+                used_info = controles_df.attrs.get('imputation_info')
+        elif policy_applied == 'value':
+            try:
+                controles_df, muestras_df = procesar_ct_column(
+                    controles_df,
+                    muestras_df,
+                    max_ct=float(app_state.undetermined.value),
+                    **impute_kwargs,
+                )
+            except ValueError as exc:
+                ready_for_fc = False
+                st.error(f"Imputación fallida: {exc}")
+            else:
+                used_info = controles_df.attrs.get('imputation_info')
+        else:
+            st.info("La política actual mantiene los valores 'Undetermined' como NaN.")
+
+        if used_info:
+            st.success(used_info)
+
+        if 'ct_imputed' in controles_df.columns or 'ct_imputed' in muestras_df.columns:
+            ctrl_imp = controles_df.loc[controles_df.get('ct_imputed', False)].copy()
+            ctrl_imp['grupo'] = 'control'
+            samp_imp = muestras_df.loc[muestras_df.get('ct_imputed', False)].copy()
+            samp_imp['grupo'] = 'muestra'
+            imputation_summary = pd.concat([ctrl_imp, samp_imp], ignore_index=True, sort=False)
+
+        if not imputation_summary.empty:
+            counts = imputation_summary['grupo'].value_counts()
+            st.metric("Total imputaciones", len(imputation_summary))
+            st.caption(
+                f"Controles imputados: {int(counts.get('control', 0))} · "
+                f"Muestras imputadas: {int(counts.get('muestra', 0))}"
+            )
+            cols_show = [c for c in ['grupo', 'test', 'target', 'plate_id', 'well', 'ct', 'ct_imputed'] if c in imputation_summary.columns]
+            st.dataframe(imputation_summary[cols_show])
+            extras['ct_imputaciones.csv'] = imputation_summary.to_csv(index=False)
+            st.download_button(
+                label="Descargar detalle de imputaciones",
+                data=imputation_summary.to_csv(index=False),
+                file_name="detalle_imputaciones.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+        elif policy_applied != 'nan':
+            st.info("No se detectaron filas que requieran imputación con la política seleccionada.")
+
+        rem_ctrl = controles_df['ct'].isna().sum()
+        rem_samp = muestras_df['ct'].isna().sum()
+        if rem_ctrl or rem_samp:
+            ready_for_fc = False
+            st.warning(
+                "Persisten valores Ct faltantes. Ajusta la política en la barra lateral y vuelve a procesar el archivo."
+            )
+
         extras['controles_limpios.csv'] = controles_df.to_csv(index=False)
         extras['muestras_limpias.csv'] = muestras_df.to_csv(index=False)
+    else:
+        ready_for_fc = False
 
-        # Calcular Fold Change (promedio y gen de referencia)
+    if not ready_for_fc and not controles_df.empty and not muestras_df.empty:
+        st.stop()
+
+    if ready_for_fc:
         try:
             fc = compute_fold_change(controles_df, muestras_df)
             logger.info(f"FC consolidado shape: {fc.consolidated.shape}")

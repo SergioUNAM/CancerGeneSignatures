@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -195,6 +195,8 @@ def parse_qpcr_wide(
     sample_cols_names = sample_names
     # Tokens extendidos para "Undetermined" con normalización (minúsculas, sin espacios ni puntuación)
     undet_tokens = {"undetermined", "undet", "und", "nd", "neg", "na"}
+    undetermined_records: list[dict[str, Any]] = []
+
     for c in sample_cols_names:
         s = df[c].apply(_cell_str)
         norm = (
@@ -205,23 +207,26 @@ def parse_qpcr_wide(
         mask_undet = norm.isin(undet_tokens)
         # Coerce numeric
         num = pd.to_numeric(df[c], errors="coerce")
-        # Apply policy
-        if undetermined_policy == "nan":
-            num = num.mask(mask_undet, np.nan)
-        elif undetermined_policy == "ctmax":
-            # Use max observed per column (excluding undet/NaN) or fallback undetermined_value
-            col_max = pd.to_numeric(s, errors="coerce").max()
-            fill_val = float(col_max) if pd.notna(col_max) else float(undetermined_value)
-            num = num.mask(mask_undet, fill_val)
-        elif undetermined_policy == "value":
-            num = num.mask(mask_undet, float(undetermined_value))
-        else:
-            raise ValueError("undetermined_policy debe ser uno de: nan|ctmax|value")
+        num = num.mask(mask_undet, np.nan)
+
+        if mask_undet.any():
+            for idx in df.index[mask_undet]:
+                undetermined_records.append(
+                    {
+                        "test": c,
+                        "well": df.loc[idx, "Well"],
+                        "target": df.loc[idx, "Target Name"],
+                        "raw_value": s.loc[idx],
+                    }
+                )
         df[c] = num
 
     meta = {
         "header_row": int(header_row),
         "sample_name_row": int(sample_name_row) if sample_name_row is not None else None,
         "sample_names": sample_names,
+        "imputation_policy": undetermined_policy,
+        "imputation_value": float(undetermined_value),
+        "undetermined_records": undetermined_records,
     }
     return LoadResult(df=df, source_name=getattr(file, "name", "uploaded"), sheet_name=sheet_name, meta=meta)
