@@ -382,7 +382,7 @@ def aggregate_counts_by_level_and_cancer(df: pd.DataFrame) -> pd.DataFrame:
     g = t.groupby(["nivel_expresion", "cancer_type"], as_index=False).size().rename(columns={"size": "count"})
     return g
 
-
+    
 # ---------------- Heurística de interpretación por cáncer -----------------
 
 def _norm(s: str) -> str:
