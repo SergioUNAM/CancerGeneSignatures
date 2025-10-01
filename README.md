@@ -1,167 +1,88 @@
 # CancerGeneSignatures
-Generador de firmas genéticas asociadas a tipos de cáncer mediante análisis de expresión génica, integración bibliográfica y construcción de redes de interacción. Facilita la identificación de genes clave y su aplicación en investigación oncológica, diagnóstico o pronóstico.
+Generador de firmas genéticas asociadas a tipos de cáncer mediante análisis de expresión génica, integración bibliográfica y construcción de redes de interacción. La meta es ofrecer un flujo reproducible que ayude a equipos oncológicos a priorizar genes candidatos, explorar literatura relevante y producir reportes consistentes.
 
-## 🚀 Características Principales
+## Panorama rápido
+- Pipeline completo: importación de qPCR, cálculos de Fold Change, enriquecimiento STRING/Hallmarks y síntesis bibliográfica.
+- Servicios especializados desacoplados de Streamlit (`web_app/app/services/*`) para favorecer pruebas y reutilización.
+- UI modular multipágina en construcción, apoyada en secciones reutilizables (`web_app/app/ui/sections.py`).
+- Configuración centralizada (`AppConfig`, `ServicesConfig`) con soporte para distintos entornos y credenciales externas.
 
-- **Análisis de Genes Normalizadores**: Identificación robusta de genes de referencia para qPCR
-- **Validación Estadística Completa**: Múltiples estrategias de validación de genes normalizadores
-- **Análisis de Expresión Diferencial**: Detección de genes con expresión alterada
-- **Integración Bibliográfica**: Análisis de literatura científica
-- **Construcción de Redes**: Análisis de interacciones génicas
+## Flujo funcional
+1. **Ingesta qPCR** (`app/services/qpcr.py`): limpieza, clasificación de muestras/controles, imputación de Ct y panel de calidad.
+2. **Fold Change y métricas** (`app/services/fold_change.py`): reglas de `Undetermined`, control de NaN por grupo y cálculo de métricas.
+3. **Anotación y enriquecimiento** (`app/services/string_enrichment.py`, `app/services/signatures.py`): integración Ensembl/STRING, hallmarks, filtros y consolidación.
+4. **Bibliografía y heurística** (`app/services/bibliography.py`, `app/services/heuristics.py`): consultas PubMed, etiquetado heurístico y visualizaciones.
+5. **Insights NLP** (`app/services/nlp.py`): generación de corpus, etiquetado por tema y agregación con resultados de expresión.
+6. **UI multipágina (WIP)** (`app/ui/sections.py`, `app/ui/pages/*`): vistas independientes para qPCR, enriquecimiento, bibliografía e insights.
 
-## 📋 Módulos Principales
-
-### 🔬 Validación de Genes Normalizadores (`src/validation.py`)
-Módulo completo para validar la robustez de genes normalizadores seleccionados:
-
-- **Validación Cruzada K-fold**: Evalúa estabilidad en diferentes subconjuntos
-- **Análisis de Bootstrap**: Determina robustez mediante remuestreo
-- **Validación de Estabilidad Temporal**: Analiza consistencia a lo largo del tiempo
-- **Análisis de Sensibilidad**: Evalúa robustez ante perturbaciones
-- **Validación de Correlación Técnica**: Verifica independencia de variables técnicas
-- **Análisis de Reproducibilidad**: Valida consistencia inter-experimental
-
-### 📊 Análisis de Datos (`src/data_processing.py`)
-Procesamiento y análisis de datos de expresión génica.
-
-### 💬 Mensajería (`src/messaging.py`)
-Sistema de notificaciones y reportes.
-
-### 💾 Guardado de Resultados (`src/save_results.py`)
-Gestión de resultados y exportación de datos.
-
-## 🛠️ Instalación
-
-1. Crea un entorno virtual (opcional pero recomendado):
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   ```
-
-2. Instala las dependencias necesarias:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-## 📖 Uso
-
-### Validación de Genes Normalizadores
-
-```python
-from src.validation import validacion_completa_genes_normalizadores
-import pandas as pd
-
-# Cargar datos
-controles_df = pd.read_csv('datos_controles.csv')
-muestras_df = pd.read_csv('datos_muestras.csv')
-
-# Genes de referencia a validar
-genes_referencia = ['GAPDH', 'ACTB', '18S']
-
-# Ejecutar validación completa
-validador = validacion_completa_genes_normalizadores(
-    df_controles=controles_df,
-    df_muestras=muestras_df,
-    genes_referencia=genes_referencia,
-    generar_graficos=True,
-    guardar_reporte=True
-)
-```
-
-### Script de Ejemplo
-
-```bash
-# Ejecutar ejemplo de validación
-python src/ejemplo_validacion.py
-```
-
-### Notebook de Validación
-
-```bash
-# Abrir notebook de validación
-jupyter notebook notebooks/validacion_genes_normalizadores.ipynb
-```
-
-## 📊 Estrategias de Validación Implementadas
-
-### 1. Validación Cruzada K-fold
-- **Objetivo**: Evaluar estabilidad de genes de referencia
-- **Métrica**: Correlación entre estabilidades en train/test
-- **Criterio**: Score > 0.7 indica buena estabilidad
-
-### 2. Análisis de Bootstrap
-- **Objetivo**: Determinar robustez mediante remuestreo
-- **Métrica**: Frecuencia de aparición como gen más estable
-- **Criterio**: Frecuencia > 50% indica alta robustez
-
-### 3. Análisis de Sensibilidad
-- **Objetivo**: Evaluar robustez ante perturbaciones
-- **Métrica**: Cambio porcentual en score de separación
-- **Criterio**: Cambio < 10% indica alta robustez
-
-### 4. Validación de Estabilidad Temporal
-- **Objetivo**: Analizar consistencia a lo largo del tiempo
-- **Métrica**: Correlación con tiempo
-- **Criterio**: |Correlación| < 0.3 indica estabilidad temporal
-
-### 5. Validación de Correlación Técnica
-- **Objetivo**: Verificar independencia de variables técnicas
-- **Métrica**: Correlación con variables técnicas
-- **Criterio**: |Correlación| < 0.5 indica independencia
-
-### 6. Análisis de Reproducibilidad
-- **Objetivo**: Validad consistencia inter-experimental
-- **Métrica**: ICC (Intraclass Correlation Coefficient)
-- **Criterio**: ICC > 0.75 indica excelente reproducibilidad
-
-## 📈 Interpretación de Resultados
-
-- **Score Global > 0.8**: Excelente confiabilidad
-- **Score Global 0.6-0.8**: Buena confiabilidad  
-- **Score Global 0.4-0.6**: Aceptable, requiere monitoreo
-- **Score Global < 0.4**: Problemático, reevaluar genes
-
-## 📁 Estructura del Proyecto
-
+## Arquitectura del repositorio
 ```
 CancerGeneSignatures/
-├── src/
-│   ├── validation.py              # Módulo de validación
-│   ├── data_processing.py         # Procesamiento de datos
-│   ├── messaging.py               # Sistema de mensajería
-│   ├── save_results.py            # Guardado de resultados
-│   └── ejemplo_validacion.py      # Script de ejemplo
-├── notebooks/
-│   ├── genes_normalizadores.ipynb # Análisis de genes normalizadores
-│   └── validacion_genes_normalizadores.ipynb # Validación completa
-├── raw_data/                      # Datos crudos
-├── gen-sets_GSEA_MSigDB/          # Conjuntos de genes
-└── requirements.txt               # Dependencias
+├── web_app/                 # Streamlit app (bootstrap, configuración, servicios, UI, estado)
+│   ├── streamlit_app.py
+│   └── app/
+│       ├── config/          # Modelos de configuración y cargadores tipados
+│       ├── services/        # Lógica de negocio desacoplada
+│       ├── ui/              # Componentes y páginas (en expansión)
+│       └── state/           # Manejo de `st.session_state`
+├── src/                     # Núcleo reusable (core analytics, integraciones)
+│   ├── core/
+│   └── integrations/
+├── docs/                    # ADRs, especificaciones y planes de modularización
+├── notebooks/               # Experimentación y validación exploratoria
+├── raw_data/                # Datasets fuente (mantener anonimizado)
+├── resultados/              # Salidas generadas durante el análisis
+├── MEJORAS.md               # Backlog priorizado por fases
+├── README_PLAN_ETAPAS.md    # Roadmap detallado
+└── README.md                # Este documento
 ```
 
-## 🔧 Dependencias
+## Requisitos previos
+- Python 3.10+ (recomendado 3.11 para aprovechar mejoras recientes).
+- `pip` o `uv`; opcionalmente `conda` para gestionar dependencias científicas.
+- Credenciales opcionales para APIs externas: PubMed (email + api key), STRING, Google Natural Language.
 
-- pandas >= 1.3.0
-- numpy >= 1.21.0
-- matplotlib >= 3.4.0
-- seaborn >= 0.11.0
-- scipy >= 1.7.0
-- scikit-learn >= 1.0.0
-- plotly >= 5.0.0
-- jupyter >= 1.0.0
+## Instalación rápida
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r requirements.txt          # dependencias núcleo
+pip install -r web_app/requirements.txt  # dependencias específicas de la app Streamlit
+```
 
-## 📚 Referencias
+## Ejecución de la app
+```bash
+streamlit run web_app/streamlit_app.py
+```
+- Se puede definir `CGS_MENU_PATH` para apuntar a un menú alternativo (`web_app/config/menu.json` por defecto).
+- `CGS_LOGLEVEL`, `CGS_PUBMED_EMAIL`, `CGS_PUBMED_API_KEY` y `CGS_GOOGLE_NLP_API_KEY` permiten ajustar logs y credenciales.
+- Para despliegues, sobrescribir variables mediante `st.secrets` o ficheros `.env` gestionados fuera del control de versiones.
 
-- Vandesompele et al. (2002) - geNorm
-- Andersen et al. (2004) - NormFinder  
-- Pfaffl et al. (2004) - BestKeeper
-- Livak & Schmittgen (2001) - Método ΔΔCt
-- Bustin et al. (2009) - Guidelines MIQE
+## Trabajo con datos
+- Colocar ficheros qPCR en `raw_data/` o cargarlos desde la UI; mantener identificadores anonimizados.
+- Las llamadas a PubMed/STRING se cachean mediante `@st.cache_data` (TTL configurable en `app/services/*`).
+- Referencias a datasets de ejemplo y fixtures se documentarán en la sub-etapa 1.5 (`README_PLAN_ETAPAS.md`).
 
-## 🤝 Contribuciones
+## Pruebas rápidas
+- Ejecutar `pytest` en la raíz para lanzar las pruebas básicas (`tests/`).
+- Los fixtures sintéticos viven en `tests/conftest.py` e incluyen un workbook qPCR en memoria para los servicios de ingesta.
+- `pytest.ini` fija rutas y filtros mínimos; se puede ampliar con marcadores según crezca la batería.
 
-Las contribuciones son bienvenidas. Por favor, abre un issue o pull request para sugerir mejoras.
+## Documentación relacionada
+- `docs/etapa1_modularizacion_config.md`: decisiones sobre configuración y modularización actual.
+- `MEJORAS.md`: backlog ordenado por fases con estado granular.
+- `README_PLAN_ETAPAS.md`: roadmap detallado y criterios de salida.
 
-## 📄 Licencia
+## Roadmap activo
+- **Etapa 1 (en curso)**: separación completa en `app/ui/pages`, plantillas de configuración y documentación final de la arquitectura.
+- **Etapa 1.5 (en curso)**: ampliación de fixtures sintéticos, estructura `tests/` y automatización inicial.
+- **Etapas 2-3**: calidad, pruebas y cobertura con CI. Detalles completos en el README de etapas.
 
-Este proyecto está bajo la Licencia MIT. Ver el archivo `LICENSE` para más detalles.
+## Contribuir
+1. Crear rama descriptiva (`feature/`, `fix/`, `docs/`).
+2. Mantener la lógica en `app/services` o `src/core` sin dependencias explícitas de Streamlit.
+3. Añadir pruebas (cuando existan fixtures) y documentar decisiones clave en `docs/`.
+4. Enviar PR incluyendo referencias a tareas del roadmap o checklist en `MEJORAS.md`.
+
+## Licencia
+Proyecto bajo Licencia MIT (`LICENSE`).
