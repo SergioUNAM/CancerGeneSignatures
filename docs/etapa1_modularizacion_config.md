@@ -96,9 +96,10 @@ web_app/
 1. **Preparación**
    - Crear paquete `web_app/app/` con estructura vacía.
    - Mover `AppSessionState` a `app/state/session.py`; adaptar importaciones sin cambiar comportamiento.
-2. **Config**
-   - Implementar `config/models.py` y `loader.py` con tests unitarios.
-   - Reemplazar uso directo de `MENU = load_menu()` por `config = load_app_config()`.
+   2. **Config**
+      - Implementar `config/models.py` y `loader.py` con tests unitarios.
+      - Reemplazar uso directo de `MENU = load_menu()` por `config = load_app_config()`.
+      - [x] Unificar credenciales vía `AppConfig.services` (PubMed, Google NLP) eliminando dependencias de `os.getenv` en la UI.
 3. **Servicios y Adaptadores**
    - Extraer funciones puras de `streamlit_app.py` hacia `services/` empezando por flujo qPCR (carga + clasificación + fold change).
      - [x] `app/services/qpcr.py` contiene `build_long_table`, `summarize_extraction` y clasificadores reutilizables (prefijos, sufijos, regex, selección, resolución de colisiones).

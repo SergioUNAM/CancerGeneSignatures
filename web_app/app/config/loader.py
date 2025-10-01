@@ -110,11 +110,29 @@ def _load_services_config(
     string_base_url = env.get("CGS_STRING_BASE_URL") or defaults["string"]["base_url"]
     string_species = _read_int(env.get("CGS_STRING_SPECIES"), defaults["string"]["species"], warn)
 
-    pubmed_email = env.get("CGS_PUBMED_EMAIL", defaults["pubmed"].get("default_email"))
-    pubmed_api_key = _get_secret("pubmed_api_key", env_key="CGS_PUBMED_API_KEY", env=env, secrets=secrets)
+    pubmed_email = (
+        env.get("CGS_PUBMED_EMAIL")
+        or env.get("NCBI_EMAIL")
+        or defaults["pubmed"].get("default_email")
+    )
+    pubmed_api_key = _get_secret(
+        "pubmed_api_key",
+        env_key="CGS_PUBMED_API_KEY",
+        env=env,
+        secrets=secrets,
+        alt_env_keys=["NCBI_API_KEY"],
+        alt_secret_keys=["NCBI_API_KEY"],
+    )
     pubmed_max_per_gene = _read_int(env.get("CGS_PUBMED_MAX_PER_GENE"), defaults["pubmed"]["max_per_gene"], warn)
 
-    google_api_key = _get_secret("google_nlp_api_key", env_key="CGS_GOOGLE_NLP_API_KEY", env=env, secrets=secrets)
+    google_api_key = _get_secret(
+        "google_nlp_api_key",
+        env_key="CGS_GOOGLE_NLP_API_KEY",
+        env=env,
+        secrets=secrets,
+        alt_env_keys=["GOOGLE_NLP_API_KEY"],
+        alt_secret_keys=["GOOGLE_NLP_API_KEY"],
+    )
 
     ensembl_cfg = EnsemblConfig(max_workers=ensembl_max_workers)
     string_cfg = StringConfig(base_url=string_base_url, species=string_species)
@@ -159,9 +177,24 @@ def _get_secret(
 ) -> Optional[str]:
     if env_key in env and env[env_key]:
         return env[env_key]
+    alt_env_keys = []
+    alt_secret_keys = []
+    if key == "pubmed_api_key":
+        alt_env_keys.append("NCBI_API_KEY")
+        alt_secret_keys.append("NCBI_API_KEY")
+    if key == "google_nlp_api_key":
+        alt_env_keys.append("GOOGLE_NLP_API_KEY")
+        alt_secret_keys.append("GOOGLE_NLP_API_KEY")
+    for alt in alt_env_keys:
+        if alt in env and env[alt]:
+            return env[alt]
     if secrets is not None and key in secrets and secrets[key]:
         value = secrets[key]
         return str(value)
+    if secrets is not None:
+        for alt in alt_secret_keys:
+            if alt in secrets and secrets[alt]:
+                return str(secrets[alt])
     return None
 
 

@@ -58,6 +58,7 @@ except ConfigError as exc:
     st.stop()
 
 MENU = APP_CONFIG.menu
+SERVICES = APP_CONFIG.services
 from src.core.qpcr import (
     suggest_name_affixes,
 )
@@ -915,7 +916,14 @@ if df_loaded is not None:
             with cconf3:
                 top_n = st.number_input("Top N", value=25, min_value=1, max_value=200, step=1)
             with cconf4:
-                species = st.selectbox("Especie (NCBI Taxon)", options=[9606], index=0)
+                species_default = int(getattr(SERVICES.string, "species", 9606) or 9606)
+                species = st.number_input(
+                    "Especie (NCBI Taxon)",
+                    value=species_default,
+                    min_value=1,
+                    max_value=1_000_000,
+                    step=1,
+                )
 
             run_enrich = st.button("Ejecutar enriquecimiento (STRING)", type="primary")
 
@@ -1049,8 +1057,7 @@ if df_loaded is not None:
             "Busca artículos por gen y contexto (TEM o micro RNAs) en PubMed. "
             "Puedes ingresar tu email/API key aquí para la demo."
         )
-        # Entrada directa (demo): email y API key NCBI
-        # Credenciales: intentar st.secrets si existen; tolerar ausencia de secrets.toml
+        pubmed_cfg = SERVICES.pubmed
         try:
             sec_email = st.secrets["NCBI_EMAIL"]
         except Exception:
@@ -1059,15 +1066,31 @@ if df_loaded is not None:
             sec_key = st.secrets["NCBI_API_KEY"]
         except Exception:
             sec_key = ""
-        env_email = sec_email or os.getenv("NCBI_EMAIL", "")
-        env_key = sec_key or os.getenv("NCBI_API_KEY", "")
+        default_email = (sec_email or pubmed_cfg.default_email or "")
+        default_api_key = (sec_key or (pubmed_cfg.api_key or ""))
         ccreds1, ccreds2 = st.columns([2, 2])
         with ccreds1:
-            ncbi_email_input = st.text_input("NCBI Email (obligatorio)", value=env_email, placeholder="tu_email@dominio.com")
+            ncbi_email_input = st.text_input(
+                "NCBI Email (obligatorio)",
+                value=default_email,
+                placeholder="tu_email@dominio.com",
+            )
         with ccreds2:
-            ncbi_api_key_input = st.text_input("NCBI API Key (opcional)", value=env_key, placeholder="api_key")
+            ncbi_api_key_input = st.text_input(
+                "NCBI API Key (opcional)",
+                value=default_api_key,
+                placeholder="api_key",
+            )
 
-        max_per_gene = st.number_input("Máximo de artículos por gen", value=100, min_value=10, max_value=300, step=10)
+        max_default = int(pubmed_cfg.max_per_gene or 100)
+        max_default = max(10, min(300, max_default))
+        max_per_gene = st.number_input(
+            "Máximo de artículos por gen",
+            value=max_default,
+            min_value=10,
+            max_value=300,
+            step=10,
+        )
         run_pubmed = st.button("Buscar en PubMed", disabled=not bool(ncbi_email_input.strip()))
         st.caption("Las consultas a PubMed se cachean (24h) por combinación de genes, contexto y credenciales.")
 
@@ -1641,17 +1664,18 @@ else:
 st.markdown("---")
 st.header("Insights de la literatura (Google NLP)")
 
+google_cfg = SERVICES.google_nlp
 try:
     sec_gkey = st.secrets["GOOGLE_NLP_API_KEY"]
 except Exception:
     sec_gkey = ""
-env_gkey = sec_gkey or os.getenv("GOOGLE_NLP_API_KEY", "")
+default_google_key = sec_gkey or (google_cfg.api_key or "")
 
 ins_col1, ins_col2, ins_col3 = st.columns([2,1,1])
 with ins_col1:
     g_api_key = st.text_input(
         "Google NLP API Key",
-        value=env_gkey,
+        value=default_google_key,
         type="password",
         help="Se recomienda usar st.secrets['GOOGLE_NLP_API_KEY'] o la variable de entorno GOOGLE_NLP_API_KEY.",
     )
@@ -1773,7 +1797,7 @@ if run_insights:
         bib_df = st.session_state.get("bibliografia_clasificada")
     if not (isinstance(bib_df, pd.DataFrame) and not bib_df.empty):
         st.info("Primero genera o carga la bibliografía clasificada en la sección anterior.")
-    elif not (g_api_key or os.getenv("GOOGLE_NLP_API_KEY")):
+    elif not (g_api_key or google_cfg.api_key):
         st.warning("Falta la API Key de Google NLP. Ingresa una o configúrala en el entorno/secrets.")
     else:
         with st.spinner("Analizando textos con Google NLP…"):
