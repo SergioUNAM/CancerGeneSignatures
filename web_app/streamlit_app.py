@@ -117,11 +117,22 @@ from app.services.visuals import (
     build_fc_detail_figure,
     build_expression_distribution,
     build_expression_treemap,
+    build_heuristic_heatmap,
+    build_heuristic_sankey,
 )
 from app.services.bibliography import (
     PubMedRequest,
     fetch_pubmed_articles,
     merge_expression_levels,
+)
+from app.services.heuristics import (
+    compute_heuristic_summary,
+    build_heatmap_data,
+    build_sankey_data,
+    merge_with_expression,
+    build_function_long,
+    compute_function_counts,
+    map_functions_to_hallmarks,
 )
 
 # Cache de firmas para evitar recomputar al cambiar solo la selección visual
@@ -1478,161 +1489,104 @@ if not (isinstance(focused, pd.DataFrame) and not focused.empty):
 else:
     try:
         st.subheader("Interpretación heurística de relaciones (enfocada al cáncer seleccionado)")
-        interp = interpret_gene_relations(focused)
-        if interp is None or interp.empty:
+        summary = compute_heuristic_summary(focused)
+        if summary.empty:
             st.info("No se pudieron etiquetar relaciones con las heurísticas actuales.")
         else:
-            summary = summarize_relations_by_gene(interp)
-            st.dataframe(summary.sort_values('heuristic_summary').reset_index(drop=True))
+            ordered_summary = summary.sort_values('heuristic_summary').reset_index(drop=True)
+            st.dataframe(ordered_summary)
             st.download_button(
                 label="Descargar resumen heurístico (CSV)",
-                data=summary.to_csv(index=False),
+                data=ordered_summary.to_csv(index=False),
                 file_name="resumen_heuristico_relaciones.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
 
-            # Heatmap genes × funciones (scores normalizados)
-            try:
-                import numpy as np
-                import plotly.express as px
-                func_cols = [
-                    c for c in summary.columns
-                    if c.endswith('_score') and not c.startswith(('upregulated','downregulated','prognosis_'))
-                ]
-                if func_cols:
-                    sm = summary.copy()
-                    sm['_total_score'] = sm[func_cols].sum(axis=1)
-                    top = sm.sort_values('_total_score', ascending=False).head(30)
-                    Z = (top[func_cols] - top[func_cols].min()) / (top[func_cols].max() - top[func_cols].min() + 1e-9)
-                    fig_hm = px.imshow(
-                        Z.values,
-                        labels=dict(x='Función', y='Gen', color='Score norm.'),
-                        x=[c.replace('_score','') for c in func_cols],
-                        y=top['Gene'].tolist(),
-                        aspect='auto',
-                        title='Heatmap genes × funciones (scores normalizados)'
-                    )
-                    fig_hm.update_layout(margin=dict(l=60,r=20,t=40,b=40))
-                    st.plotly_chart(fig_hm, use_container_width=True)
-            except Exception:
-                pass
+            heatmap_fig = build_heuristic_heatmap(build_heatmap_data(summary))
+            if heatmap_fig is not None:
+                st.plotly_chart(heatmap_fig, use_container_width=True)
 
-            # Sankey: Gen → efecto expresión → pronóstico dominante
-            try:
-                import numpy as np
-                import plotly.graph_objects as go
-                bad = summary.get('prognosis_bad_score', 0)
-                good = summary.get('prognosis_good_score', 0)
-                if hasattr(bad, 'values') and hasattr(good, 'values'):
-                    dom = np.where(bad.values > good.values, 'prognosis_bad', np.where(good.values > 0, 'prognosis_good', 'prognosis_uncertain'))
-                    left = summary['Gene'].tolist()
-                    midl = summary['net_expression_effect'].astype(str).tolist() if 'net_expression_effect' in summary.columns else ['uncertain'] * len(left)
-                    right = dom.tolist()
-                    nodes = list(dict.fromkeys(left + midl + right))
-                    idx = {n:i for i,n in enumerate(nodes)}
-                    links = []
-                    links += [(idx[l], idx[m], 1) for l, m in zip(left, midl)]
-                    links += [(idx[m], idx[r], 1) for m, r in zip(midl, right)]
-                    link = dict(source=[s for s,_,_ in links], target=[t for _,t,_ in links], value=[v for _,_,v in links])
-                    node = dict(label=nodes, pad=12, thickness=12)
-                    fig_sk = go.Figure(go.Sankey(node=node, link=link))
-                    fig_sk.update_layout(margin=dict(l=10,r=10,t=10,b=10), title='Flujo expresión → pronóstico')
-                    st.plotly_chart(fig_sk, use_container_width=True)
-            except Exception:
-                pass
+            sankey_fig = build_heuristic_sankey(build_sankey_data(summary))
+            if sankey_fig is not None:
+                st.plotly_chart(sankey_fig, use_container_width=True)
 
             # Relación heurística ↔ niveles de expresión y firmas
             try:
                 import numpy as np
                 import plotly.express as px
                 df_levels = st.session_state.get('df_expr')
-                if isinstance(df_levels, pd.DataFrame) and not df_levels.empty:
-                    lev = df_levels[['target', 'nivel_expresion', 'fold_change']].drop_duplicates('target').rename(columns={'target':'Gene'})
-                    merged = pd.merge(summary, lev, on='Gene', how='left')
-                    if bool(app_state.exclude_stable):
-                        merged = merged[merged['nivel_expresion'] != 'estable']
-                    func_score_cols = [c for c in merged.columns if c.endswith('_score') and not c.startswith(('upregulated','downregulated','prognosis_'))]
-                    func_flags = [c.replace('_score','') for c in func_score_cols]
-                    long_rows = []
-                    for fscore, fname in zip(func_score_cols, func_flags):
-                        sub = merged[["Gene", "nivel_expresion", fscore]].copy()
-                        sub['funcion'] = fname
-                        sub['flag'] = (sub[fscore] >= 1.2).astype(int)
-                        long_rows.append(sub.rename(columns={fscore: 'score'}))
-                    long = pd.concat(long_rows, ignore_index=True) if long_rows else pd.DataFrame()
-                    if not long.empty:
-                        st.subheader("Niveles × funciones")
-                        colm1, colm2, colm3 = st.columns([1,1,1])
-                        with colm1:
-                            agg_mode = st.selectbox("Métrica", ["conteo", "score"], index=1, key="agg_mode_heu")
-                        with colm2:
-                            top_funcs = st.number_input("Top funciones", min_value=3, max_value=20, value=8, step=1, key="top_funcs_heu")
-                        with colm3:
-                            norm_scores = st.checkbox("Normalizar por columna", value=True, key="norm_scores_heu")
-                        if agg_mode == 'conteo':
-                            pivot = long.groupby(['nivel_expresion','funcion'])['flag'].sum().unstack(fill_value=0)
-                        else:
-                            pivot = long.groupby(['nivel_expresion','funcion'])['score'].sum().unstack(fill_value=0)
-                        totals = pivot.sum(axis=0).sort_values(ascending=False)
-                        top_cols = totals.head(int(top_funcs)).index.tolist()
-                        pivot_top = pivot[top_cols]
-                        if norm_scores:
-                            pivot_top = (pivot_top - pivot_top.min()) / (pivot_top.max() - pivot_top.min() + 1e-9)
-                        fig_lv = px.imshow(
-                            pivot_top.values,
-                            labels=dict(x='Función', y='Nivel expresión', color='Valor'),
-                            x=top_cols,
-                            y=pivot_top.index.tolist(),
-                            aspect='auto',
-                            title=f"Niveles × Funciones ({agg_mode})"
-                        )
-                        st.plotly_chart(fig_lv, use_container_width=True)
+                merged = merge_with_expression(summary, df_levels, bool(app_state.exclude_stable))
+                long_df = build_function_long(merged)
+                if long_df.empty:
+                    st.info("Sin datos combinados de heurística y niveles de expresión.")
+                else:
+                    st.subheader("Niveles × funciones")
+                    colm1, colm2, colm3 = st.columns([1, 1, 1])
+                    with colm1:
+                        agg_mode = st.selectbox("Métrica", ["conteo", "score"], index=1, key="agg_mode_heu")
+                    with colm2:
+                        top_funcs = st.number_input("Top funciones", min_value=3, max_value=20, value=8, step=1, key="top_funcs_heu")
+                    with colm3:
+                        norm_scores = st.checkbox("Normalizar por columna", value=True, key="norm_scores_heu")
 
-                        # Treemap: Nivel → Función → Gen (score×|log2FC|)
-                        trea = long.copy().merge(lev, on='Gene', how='left')
+                    if agg_mode == 'conteo':
+                        pivot = long_df.pivot_table(index='nivel_expresion', columns='funcion', values='flag', aggfunc='sum', fill_value=0)
+                    else:
+                        pivot = long_df.pivot_table(index='nivel_expresion', columns='funcion', values='score', aggfunc='sum', fill_value=0.0)
+                    totals = pivot.sum(axis=0).sort_values(ascending=False)
+                    top_cols = totals.head(int(top_funcs)).index.tolist()
+                    pivot_top = pivot[top_cols]
+                    if norm_scores:
+                        pivot_top = (pivot_top - pivot_top.min()) / (pivot_top.max() - pivot_top.min() + 1e-9)
+                    fig_lv = px.imshow(
+                        pivot_top.values,
+                        labels=dict(x='Función', y='Nivel expresión', color='Valor'),
+                        x=top_cols,
+                        y=pivot_top.index.tolist(),
+                        aspect='auto',
+                        title=f"Niveles × Funciones ({agg_mode})",
+                    )
+                    st.plotly_chart(fig_lv, use_container_width=True)
+
+                    view_mode_lvl = st.radio("Vista complementaria", ["Tabla detallada", "Treemap"], horizontal=True, index=0)
+                    if view_mode_lvl == "Tabla detallada":
+                        st.dataframe(long_df)
+                    else:
+                        trea = long_df.merge(merged[['Gene', 'nivel_expresion', 'fold_change']].drop_duplicates('Gene'), on='Gene', how='left')
                         trea['log2fc_abs'] = np.log2(trea['fold_change'].clip(lower=1e-12)).abs()
                         trea['weight'] = trea['score'] * (1.0 + trea['log2fc_abs'])
                         fig_tree = px.treemap(
                             trea,
-                            path=['nivel_expresion','funcion','Gene'],
+                            path=['nivel_expresion', 'funcion', 'Gene'],
                             values='weight',
-                            color='score', color_continuous_scale='Viridis',
+                            color='score',
+                            color_continuous_scale='Viridis',
                             title='Treemap: Nivel → Función → Gen (peso = score×|log2FC|)'
                         )
                         st.plotly_chart(fig_tree, use_container_width=True)
 
-                        # Función → Hallmarks si hay firmas
-                        df_sigs_v = st.session_state.get('df_signatures')
-                        if isinstance(df_sigs_v, pd.DataFrame) and not df_sigs_v.empty:
-                            st.subheader("Funciones ↔ Hallmarks (firmas)")
-                            try:
-                                base_s = df_sigs_v[df_sigs_v.get('cancer_type') == cancer_type]
-                                recs = []
-                                for _, r in base_s.iterrows():
-                                    for col in r.index:
-                                        if col.startswith('hallmark_') and col.endswith('_genes'):
-                                            term = col[len('hallmark_'):-len('_genes')]
-                                            genes_hm = r[col] if isinstance(r[col], list) else []
-                                            for g in genes_hm:
-                                                recs.append({'Gene': g, 'hallmark': term})
-                                if recs:
-                                    map_hm = pd.DataFrame(recs).drop_duplicates()
-                                    mf = pd.merge(long[['Gene','funcion','flag']], map_hm, on='Gene', how='inner')
-                                    agg_hm = mf.groupby(['funcion','hallmark'])['flag'].sum().reset_index(name='n')
-                                    import plotly.graph_objects as go
-                                    funcs = agg_hm['funcion'].unique().tolist()
-                                    terms = agg_hm['hallmark'].unique().tolist()
-                                    nodes = funcs + terms
-                                    idx = {n:i for i,n in enumerate(nodes)}
-                                    src = [idx[f] for f in agg_hm['funcion']]
-                                    tgt = [idx[t] for t in agg_hm['hallmark']]
-                                    val = agg_hm['n'].astype(float).tolist()
-                                    fig_fh = go.Figure(go.Sankey(node=dict(label=nodes, pad=12, thickness=12), link=dict(source=src, target=tgt, value=val)))
-                                    fig_fh.update_layout(margin=dict(l=10,r=10,t=10,b=10), title='Funciones → Hallmarks (conteos)')
-                                    st.plotly_chart(fig_fh, use_container_width=True)
-                            except Exception:
-                                pass
+                    df_sigs_v = st.session_state.get('df_signatures')
+                    if isinstance(df_sigs_v, pd.DataFrame) and not df_sigs_v.empty:
+                        st.subheader("Funciones ↔ Hallmarks (firmas)")
+                        try:
+                            map_hm = map_functions_to_hallmarks(summary, df_sigs_v, cancer_type)
+                            if not map_hm.empty:
+                                mf = pd.merge(long_df, map_hm, on='Gene', how='inner')
+                                agg_hm = mf.groupby(['funcion', 'hallmark'])['flag'].sum().reset_index(name='n')
+                                import plotly.graph_objects as go
+                                funcs = agg_hm['funcion'].unique().tolist()
+                                terms = agg_hm['hallmark'].unique().tolist()
+                                nodes = funcs + terms
+                                idx = {n: i for i, n in enumerate(nodes)}
+                                src = [idx[f] for f in agg_hm['funcion']]
+                                tgt = [idx[t] for t in agg_hm['hallmark']]
+                                val = agg_hm['n'].astype(float).tolist()
+                                fig_fh = go.Figure(go.Sankey(node=dict(label=nodes, pad=12, thickness=12), link=dict(source=src, target=tgt, value=val)))
+                                fig_fh.update_layout(margin=dict(l=10, r=10, t=10, b=10), title='Funciones → Hallmarks (conteos)')
+                                st.plotly_chart(fig_fh, use_container_width=True)
+                        except Exception:
+                            pass
             except Exception:
                 pass
     except Exception as e:

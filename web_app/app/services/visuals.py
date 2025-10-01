@@ -167,4 +167,38 @@ __all__ = [
     "build_fc_detail_figure",
     "build_expression_distribution",
     "build_expression_treemap",
+    "build_heuristic_heatmap",
+    "build_heuristic_sankey",
 ]
+
+
+def build_heuristic_heatmap(matrix: Optional[pd.DataFrame]) -> Optional[go.Figure]:
+    """Crea el heatmap genes × funciones a partir de la matriz normalizada."""
+
+    if matrix is None or matrix.empty:
+        return None
+    fig = px.imshow(
+        matrix.values,
+        labels=dict(x="Función", y="Gen", color="Score norm."),
+        x=matrix.columns.tolist(),
+        y=matrix.index.tolist(),
+        aspect="auto",
+        title="Heatmap genes × funciones (scores normalizados)",
+    )
+    fig.update_layout(margin=dict(l=60, r=20, t=40, b=40))
+    return fig
+
+
+def build_heuristic_sankey(sankey: Optional["SankeyData"]) -> Optional[go.Figure]:
+    """Construye el diagrama de Sankey para expresión → pronóstico."""
+
+    if sankey is None:
+        return None
+    fig = go.Figure(
+        go.Sankey(
+            node=dict(label=sankey.nodes, pad=12, thickness=12),
+            link=dict(source=sankey.sources, target=sankey.targets, value=sankey.values),
+        )
+    )
+    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), title="Flujo expresión → pronóstico")
+    return fig

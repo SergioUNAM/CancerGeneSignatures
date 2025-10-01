@@ -35,6 +35,16 @@ from .bibliography import (  # noqa: F401
     fetch_pubmed_articles,
     merge_expression_levels,
 )
+from .heuristics import (  # noqa: F401
+    SankeyData,
+    compute_heuristic_summary,
+    build_heatmap_data,
+    build_sankey_data,
+    merge_with_expression,
+    build_function_long,
+    compute_function_counts,
+    map_functions_to_hallmarks,
+)
 
 __all__ = [
     "ExtractionSummary",
@@ -62,4 +72,12 @@ __all__ = [
     "PubMedRequest",
     "fetch_pubmed_articles",
     "merge_expression_levels",
+    "SankeyData",
+    "compute_heuristic_summary",
+    "build_heatmap_data",
+    "build_sankey_data",
+    "merge_with_expression",
+    "build_function_long",
+    "compute_function_counts",
+    "map_functions_to_hallmarks",
 ]

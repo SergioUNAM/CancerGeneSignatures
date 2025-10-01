@@ -106,6 +106,7 @@ web_app/
         - [x] `app/services/fold_change.py` encapsula imputación de Ct, métricas de calidad y generación de tablas de expresión.
         - [x] `app/services/string_enrichment.py` concentra la ejecución y filtrado de enriquecimiento STRING.
         - [x] `app/services/bibliography.py` expone helpers para PubMed y anexo de niveles de expresión.
+        - [x] `app/services/heuristics.py` centraliza la interpretación heurística y datos derivados para visualizaciones.
    - Crear adaptadores finos para integraciones externas (PubMed, STRING, Google).
 4. **UI y Páginas**
    - Dividir `streamlit_app.py` en páginas bajo `ui/pages/` manteniendo primero el flujo qPCR.
