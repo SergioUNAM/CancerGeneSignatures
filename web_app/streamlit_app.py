@@ -122,6 +122,7 @@ from app.services.bibliography import (
     fetch_pubmed_articles,
     merge_expression_levels,
 )
+from app.services.string_enrichment import perform_string_enrichment
 from app.ui.sections import (
     render_heuristics_section,
     render_google_nlp_section,
