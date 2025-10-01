@@ -120,9 +120,7 @@ def _load_services_config(
         env_key="CGS_PUBMED_API_KEY",
         env=env,
         secrets=secrets,
-        alt_env_keys=["NCBI_API_KEY"],
-        alt_secret_keys=["NCBI_API_KEY"],
-    )
+    ) or _get_secret("NCBI_API_KEY", env_key="NCBI_API_KEY", env=env, secrets=secrets)
     pubmed_max_per_gene = _read_int(env.get("CGS_PUBMED_MAX_PER_GENE"), defaults["pubmed"]["max_per_gene"], warn)
 
     google_api_key = _get_secret(
@@ -130,9 +128,7 @@ def _load_services_config(
         env_key="CGS_GOOGLE_NLP_API_KEY",
         env=env,
         secrets=secrets,
-        alt_env_keys=["GOOGLE_NLP_API_KEY"],
-        alt_secret_keys=["GOOGLE_NLP_API_KEY"],
-    )
+    ) or _get_secret("GOOGLE_NLP_API_KEY", env_key="GOOGLE_NLP_API_KEY", env=env, secrets=secrets)
 
     ensembl_cfg = EnsemblConfig(max_workers=ensembl_max_workers)
     string_cfg = StringConfig(base_url=string_base_url, species=string_species)

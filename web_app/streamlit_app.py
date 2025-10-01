@@ -48,12 +48,12 @@ except Exception:
 # -----------------------------------------------------------------------------
 _config_warnings: list[str] = []
 try:
-    secrets_source: Optional[Any] = st.secrets  # type: ignore[attr-defined]
+    secrets_source = st.secrets  # type: ignore[attr-defined]
 except Exception:
     secrets_source = None
 try:
     APP_CONFIG = load_app_config(
-        secrets=secrets_source,
+        secrets=secrets_source if secrets_source is not None else None,
         warn=_config_warnings.append,
     )
 except ConfigError as exc:
