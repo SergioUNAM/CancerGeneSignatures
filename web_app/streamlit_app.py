@@ -562,6 +562,7 @@ if df_loaded is not None:
                 st.warning(f"No se detectaron {tipo.lower()} con los criterios actuales.")
 
         impute_by_cols = [c for c in ['plate_id', 'target'] if c in controles_df.columns and c in muestras_df.columns]
+        policy_applied = app_state.undetermined.policy
         try:
             imputation_output = apply_undetermined_policy(
                 controles_df,
