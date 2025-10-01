@@ -44,3 +44,39 @@ Este documento establece las prácticas de ingeniería que guiarán la evolució
 - Revisar deuda en cada iteración; si no se aborda una tarea crítica, documentar el impacto.
 
 Este README actúa como contrato de ingeniería: cualquier excepción debe justificarse y planificarse para su regularización en el backlog.
+
+---
+
+## Anexo A — Diseño de la Normalización Avanzada (qPCR)
+
+Objetivo: por exploración exhaustiva (fuerza bruta) elegir el conjunto de genes de referencia que mejor actúa como regla común (estable intra-grupo y sin sesgo entre grupos), normalizar Ct a expresión relativa (log2), y evaluar separación Control vs Muestra con evidencia estadística robusta. El set elegido se reutiliza para fold change posterior.
+
+Implementación actual (producida en `app.core.reference_normalization` y orquestada desde `app.services.normalization`):
+
+- Candidatos y búsqueda K (1–3)
+  - Se calculan candidatos por baja desviación estándar de Ct por gen.
+  - Se prueban combinaciones de tamaño K y se puntúan con `stability_score_for_refs` (promedio ponderado: variabilidad intra-grupo + diferencia inter-grupo sobre el Ct de referencia medio por test).
+- Normalización con referencias elegidas
+  - Para cada test se promedia el Ct de las referencias → `ref_ct`; se computa `ΔCt = Ct - ref_ct` y `log2_rel_expr = -ΔCt`.
+- Evaluación de evidencia y robustez
+  - Estadística diferencial por gen (t-test, p y q Benjamini–Hochberg).
+  - Frecuencia bootstrap de significancia (re-muestreo de tests).
+  - Tasa empírica de falsos positivos por permutación de etiquetas Control/Muestra.
+- Salidas
+  - `df_norm` (tabla normalizada), `df_heatmap` (genes×tests), `reference_result` (refs elegidas + ranking), `differential` (tabla con p, q, efectos, bootstrap, FPR).
+  - En la UI se ofrecen heatmaps con dendrogramas y un comparativo con métodos básicos (promedio global, gen de referencia único) para todo el panel o subconjuntos.
+
+Estado de adecuación al objetivo: CUMPLE. La versión actual explora combinaciones, elige el set más estable y aporta métricas de robustez. Se integra con el cálculo de fold change y visualizaciones comparativas.
+
+Mejoras recomendadas (no bloqueantes):
+- Selección con criterio compuesto: además de estabilidad de referencias, incluir una métrica de separación post‑normalización (p.ej., mediana de |log2FC| o varianza explicada entre grupos) con validación cruzada para evitar sobreajuste.
+- Penalizar referencias con alta fracción imputada o cobertura incompleta por test.
+- Permitir opción de mediana (en vez de media) al promediar Ct de referencias o al promedio global por test.
+- Umbrales de elegibilidad: replicados mínimos por grupo, |Δmedia(Ct)| entre grupos < 0.5–1.0 Ct para considerar un gen como referencia candidata.
+- Afinar supuestos del método de promedios: calcular la línea base sobre genes comunes entre grupos y permitir seleccionar media/mediana.
+
+Trazabilidad de módulos:
+- Selección/normalización/estadística: `web_app/app/core/reference_normalization.py`
+- Orquestación y matrices comparativas: `web_app/app/services/normalization.py`
+- Heatmaps con dendrogramas: `web_app/app/services/heatmap_visuals.py`
+- Comparativos ΔΔCT/FC (métodos básicos): `web_app/app/core/fold_change.py`, `web_app/app/services/fold_change_visuals.py`

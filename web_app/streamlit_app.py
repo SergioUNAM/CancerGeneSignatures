@@ -25,14 +25,21 @@ from app.services.fold_change import (
     FoldChangePreparationError,
     QualityMetrics,
     apply_undetermined_policy,
+    compute_fold_change_with_expression,
     compute_quality_metrics,
 )
 from app.services.normalization import (
     AdvancedNormalizationError,
     AdvancedNormalizationParams,
     AdvancedNormalizationResult,
+    build_method_matrices,
     execute_advanced_normalization,
 )
+from app.services.fold_change_visuals import (
+    build_fold_change_chart,
+    build_fold_change_table,
+)
+from app.services.heatmap_visuals import build_dendrogram_heatmap
 from app.services.qpcr import (
     build_long_table,
     classify_tests_by_prefixes,
@@ -431,20 +438,12 @@ def _render_advanced_results(
     heat_df = result.df_heatmap
     if isinstance(heat_df, pd.DataFrame) and not heat_df.empty:
         try:
-            import plotly.express as px
-
-            fig = px.imshow(
-                heat_df,
-                color_continuous_scale=[[0.0, "#2c7bb6"], [0.5, "#ffffb2"], [1.0, "#d7191c"]],
-                aspect="auto",
-                origin="upper",
-                color_continuous_midpoint=0,
-                labels={"x": "Test", "y": "Gen", "color": "log2 Expr."},
-            )
-            fig.update_layout(title="Matriz log2 de expresión relativa")
-            st.plotly_chart(fig, use_container_width=True)
+            fig_heat = build_dendrogram_heatmap(heat_df, title="Avanzada — Heatmap con dendrogramas")
+            st.plotly_chart(fig_heat, use_container_width=True)
         except Exception:
             st.dataframe(heat_df)
+
+    # (comparativo 3 métodos se realiza en la vista principal, donde están controles/muestras)
 
     expr_summary = _build_expression_summary(result.differential, params.alpha)
     if expr_summary.empty:
@@ -563,7 +562,6 @@ def _render_ensembl_section(expr_summary: pd.DataFrame) -> None:
 def main() -> None:
     st.set_page_config(
         page_title="CancerGeneSignatures",
-        page_icon="🧬",
         layout="wide",
         initial_sidebar_state="expanded",
     )
@@ -796,6 +794,62 @@ def main() -> None:
         return
 
     st.divider()
+    st.subheader("ΔΔCT y fold change")
+    try:
+        fold_result = compute_fold_change_with_expression(controles_df, muestras_df)
+    except ValueError as exc:
+        st.error(f"No se pudo calcular el fold change: {exc}")
+        return
+
+    fc_core = fold_result.computation
+    st.info(f"Gen de referencia seleccionado: {fc_core.reference_gene}")
+
+    st.markdown("**Tabla consolidada de métricas**")
+    st.dataframe(fc_core.consolidated.head(100))
+    st.download_button(
+        "Descargar consolidado (CSV)",
+        fc_core.consolidated.to_csv(index=False),
+        file_name="fold_change_consolidado.csv",
+        use_container_width=True,
+    )
+
+    col_prom, col_ref = st.columns(2)
+    with col_prom:
+        st.markdown("**Método: Promedio global**")
+        st.dataframe(fc_core.by_means.head(100))
+        st.download_button(
+            "Descargar promedios (CSV)",
+            fc_core.by_means.to_csv(index=False),
+            file_name="fold_change_promedios.csv",
+            use_container_width=True,
+        )
+    with col_ref:
+        st.markdown("**Método: Gen de referencia**")
+        st.dataframe(fc_core.by_refgene.head(100))
+        st.download_button(
+            "Descargar gen de referencia (CSV)",
+            fc_core.by_refgene.to_csv(index=False),
+            file_name="fold_change_gen_referencia.csv",
+            use_container_width=True,
+        )
+
+    st.markdown("**Comparativa visual**")
+    table_fig = build_fold_change_table(fc_core.consolidated, reference_gene=fc_core.reference_gene)
+    st.plotly_chart(table_fig, use_container_width=True)
+
+    chart_fig = build_fold_change_chart(fc_core.consolidated)
+    st.plotly_chart(chart_fig, use_container_width=True)
+
+    st.markdown("**Clasificación por nivel de expresión**")
+    st.dataframe(fold_result.expression_table.head(100))
+    st.download_button(
+        "Descargar clasificación (CSV)",
+        fold_result.expression_table.to_csv(index=False),
+        file_name="fold_change_categorizacion.csv",
+        use_container_width=True,
+    )
+
+    st.divider()
     st.subheader("Normalización avanzada")
     adv_key = f"adv::{file_key}"
     adv_state = st.session_state.setdefault(adv_key, {})
@@ -874,6 +928,86 @@ def main() -> None:
 
     expr_summary = _render_advanced_results(result, adv_state.get("params", params))
     st.session_state["_expression_summary"] = expr_summary
+
+    st.divider()
+    # Comparativo de métodos: avanzada vs promedio global vs gen de referencia básico
+    st.subheader("Comparativo de expresión relativa (3 métodos)")
+    try:
+        # Selección de conjunto de genes y opciones de visualización
+        genes_all = sorted(result.df_norm["target"].dropna().astype(str).unique().tolist())
+        col_opts1, col_opts2 = st.columns([2, 1])
+        with col_opts1:
+            genes_mode = st.radio(
+                "Genes para heatmap",
+                options=["Significativos/Top-20", "Panel completo (todos)"],
+                horizontal=True,
+                help="Usa el panel completo para visualizar los 89 genes (o todos los disponibles).",
+            )
+        with col_opts2:
+            zscore_rows = st.checkbox(
+                "Estandarizar por gen (z-score)",
+                value=True,
+                help="Normaliza cada fila para resaltar patrones relativos entre tests.",
+            )
+
+        genes_for_heatmap = genes_all if genes_mode.endswith("(todos)") else None
+
+        matrices, basic_ref_gene = build_method_matrices(
+            controles_df,
+            muestras_df,
+            result,
+            genes_for_heatmap=genes_for_heatmap,
+        )
+
+        refs_adv = ", ".join(result.reference_result.references)
+        if len(result.reference_result.references) == 1 and refs_adv == str(basic_ref_gene):
+            st.caption(
+                "Las referencias avanzadas coinciden con el gen de referencia básico (K=1), "
+                "por eso las visualizaciones pueden verse muy similares."
+            )
+
+        tab_adv, tab_gm, tab_ref = st.tabs(["Avanzada", "Promedio global", f"Gen ref básico ({basic_ref_gene})"])
+        with tab_adv:
+            fig_a = build_dendrogram_heatmap(
+                matrices["advanced"],
+                title="Avanzada — z-score por gen" if zscore_rows else "Avanzada",
+                zscore_by_gene=zscore_rows,
+            )
+            st.plotly_chart(fig_a, use_container_width=True)
+            st.download_button(
+                "Descargar matriz avanzada (CSV)",
+                matrices["advanced"].to_csv(),
+                file_name="heatmap_avanzada.csv",
+                use_container_width=True,
+            )
+        with tab_gm:
+            fig_g = build_dendrogram_heatmap(
+                matrices["global_mean"],
+                title="Promedio global — z-score por gen" if zscore_rows else "Promedio global",
+                zscore_by_gene=zscore_rows,
+            )
+            st.plotly_chart(fig_g, use_container_width=True)
+            st.download_button(
+                "Descargar matriz promedio global (CSV)",
+                matrices["global_mean"].to_csv(),
+                file_name="heatmap_promedio_global.csv",
+                use_container_width=True,
+            )
+        with tab_ref:
+            fig_r = build_dendrogram_heatmap(
+                matrices["refgene"],
+                title=f"Gen de referencia ({basic_ref_gene}) — z-score por gen" if zscore_rows else f"Gen de referencia ({basic_ref_gene})",
+                zscore_by_gene=zscore_rows,
+            )
+            st.plotly_chart(fig_r, use_container_width=True)
+            st.download_button(
+                "Descargar matriz gen de referencia (CSV)",
+                matrices["refgene"].to_csv(),
+                file_name="heatmap_gen_referencia.csv",
+                use_container_width=True,
+            )
+    except Exception as exc:
+        st.info(f"No se pudo construir el comparativo de métodos: {exc}")
 
     st.divider()
     _render_ensembl_section(expr_summary)
