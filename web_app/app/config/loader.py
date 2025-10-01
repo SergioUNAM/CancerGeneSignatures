@@ -79,7 +79,7 @@ def _load_menu_config(
                 warn(f"No se encontró el archivo definido en CGS_MENU_PATH: {path}")
 
     if menu_data is None and secrets is not None:
-        menu_secret = secrets.get("menu")
+        menu_secret = _secret_get(secrets, "menu")
         if isinstance(menu_secret, Mapping):
             menu_data = menu_secret
 
@@ -177,8 +177,8 @@ def _get_secret(
 ) -> Optional[str]:
     if env_key in env and env[env_key]:
         return env[env_key]
-    alt_env_keys = []
-    alt_secret_keys = []
+    alt_env_keys: list[str] = []
+    alt_secret_keys: list[str] = []
     if key == "pubmed_api_key":
         alt_env_keys.append("NCBI_API_KEY")
         alt_secret_keys.append("NCBI_API_KEY")
@@ -188,14 +188,25 @@ def _get_secret(
     for alt in alt_env_keys:
         if alt in env and env[alt]:
             return env[alt]
-    if secrets is not None and key in secrets and secrets[key]:
-        value = secrets[key]
-        return str(value)
-    if secrets is not None:
-        for alt in alt_secret_keys:
-            if alt in secrets and secrets[alt]:
-                return str(secrets[alt])
+    secret_val = _secret_get(secrets, key)
+    if secret_val:
+        return str(secret_val)
+    for alt in alt_secret_keys:
+        alt_val = _secret_get(secrets, alt)
+        if alt_val:
+            return str(alt_val)
     return None
+
+
+def _secret_get(secrets: Optional[Mapping[str, Any]], key: str) -> Optional[Any]:
+    if secrets is None:
+        return None
+    try:
+        if hasattr(secrets, "get"):
+            return secrets.get(key)  # type: ignore[attr-defined]
+        return secrets[key]  # type: ignore[index]
+    except Exception:
+        return None
 
 
 __all__ = [

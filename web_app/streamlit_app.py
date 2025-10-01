@@ -47,7 +47,10 @@ except Exception:
 # Configuración centralizada de la aplicación
 # -----------------------------------------------------------------------------
 _config_warnings: list[str] = []
-secrets_source: Optional[Any] = getattr(st, "secrets", None)
+try:
+    secrets_source: Optional[Any] = st.secrets  # type: ignore[attr-defined]
+except Exception:
+    secrets_source = None
 try:
     APP_CONFIG = load_app_config(
         secrets=secrets_source,
