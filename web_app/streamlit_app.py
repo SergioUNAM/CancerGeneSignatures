@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-import io, os, json, sys, re
+import io, os, sys, re
 from pathlib import Path
 from typing import Any, Optional
 import logging
@@ -21,6 +21,8 @@ import logging
 import pandas as pd
 import numpy as np
 import streamlit as st
+
+from app.config.loader import load_app_config, ConfigError
 
 # Ensure project root is importable so `src.*` works when running from web_app/
 _PROJ_ROOT = Path(__file__).resolve().parents[1]
@@ -40,33 +42,25 @@ try:
     parse_qpcr_wide = _cgs_io.parse_qpcr_wide  # type: ignore
 except Exception:
     pass
-from src.core.qpcr import (
-    melt_wide_to_long,
-    classify_tests,  # case-insensitive
-    suggest_name_affixes,
-    classify_by_prefixes,
-    classify_by_suffixes,
-)
-# Compatibilidad: si la instalación local aún no expone classify_by_regex, usar fallback local
+
+# -----------------------------------------------------------------------------
+# Configuración centralizada de la aplicación
+# -----------------------------------------------------------------------------
+_config_warnings: list[str] = []
+secrets_source: Optional[Any] = getattr(st, "secrets", None)
 try:
-    from src.core.qpcr import classify_by_regex  # type: ignore
-except Exception:
-    def classify_by_regex(df_long, ctrl_pattern: str, sample_pattern: str):
-        t = df_long.copy()
-        t["test_str"] = t["test"].astype(str)
-        ctrl = (
-            t[t["test_str"].str.contains(ctrl_pattern, regex=True, na=False)]
-            if ctrl_pattern else t.iloc[0:0]
-        )
-        samp = (
-            t[t["test_str"].str.contains(sample_pattern, regex=True, na=False)]
-            if sample_pattern else t.iloc[0:0]
-        )
-        return (ctrl.drop(columns=["test_str"]) if not ctrl.empty else ctrl,
-                samp.drop(columns=["test_str"]) if not samp.empty else samp)
-from src.core.cleaning import drop_machine_controls
-from src.core.fold_change import compute_fold_change
-from src.core.imputation import procesar_ct_column
+    APP_CONFIG = load_app_config(
+        secrets=secrets_source,
+        warn=_config_warnings.append,
+    )
+except ConfigError as exc:
+    st.error(f"Error cargando configuración: {exc}")
+    st.stop()
+
+MENU = APP_CONFIG.menu
+from src.core.qpcr import (
+    suggest_name_affixes,
+)
 from src.core.tables import fc_comparison_table
 from src.core.ensembl import add_ensembl_info_batch
 from src.core.string_enrichment import (
@@ -102,7 +96,29 @@ from src.core.visuals import (
     clustered_expression_by_level,
 )
 from src.integrations.google_nlp import GoogleNLPClient, aggregate_insights
-from app_state import AppSessionState
+from app.state import AppSessionState
+from app.services.qpcr import (
+    build_long_table,
+    summarize_extraction,
+    classify_tests_by_prefixes,
+    classify_tests_by_suffixes,
+    classify_tests_by_regex,
+    classify_tests_by_selection,
+    detect_collisions,
+    apply_collision_strategy,
+)
+from app.services.fold_change import (
+    apply_undetermined_policy,
+    compute_quality_metrics,
+    compute_fold_change_with_expression,
+    FoldChangePreparationError,
+    QualityMetrics,
+)
+from app.services.visuals import (
+    build_fc_detail_figure,
+    build_expression_distribution,
+    build_expression_treemap,
+)
 
 # Cache de firmas para evitar recomputar al cambiar solo la selección visual
 import hashlib
@@ -177,11 +193,14 @@ except Exception:
 # Configuración de la página Streamlit
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="CancerGeneSignatures - Web App",
+    page_title=APP_CONFIG.project_name,
     page_icon="🧬",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+for _cfg_warning in _config_warnings:
+    st.warning(_cfg_warning)
 
 app_state = AppSessionState.load()
 
@@ -201,55 +220,13 @@ def _safe_concat(*dfs: Optional[pd.DataFrame]) -> pd.DataFrame:
 
 # -----------------------------------------------------------------------------
 # Logging
-# Configure a basic logger once; use env CGS_LOGLEVEL to override
+# Configure a basic logger once con el nivel definido en AppConfig
 if "_log_configured" not in st.session_state:
-    level_name = os.getenv("CGS_LOGLEVEL", "INFO").upper()
+    level_name = APP_CONFIG.log_level.upper() if APP_CONFIG.log_level else "INFO"
     level = getattr(logging, level_name, logging.INFO)
     logging.basicConfig(level=level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     st.session_state["_log_configured"] = True
 logger = logging.getLogger("cgs.web_app")
-
- 
-# -----------------------------------------------------------------------------
-# Menú de configuración (JSON con fallback)
-# -----------------------------------------------------------------------------
-def _default_menu() -> dict:
-    return {
-        "version": 1,
-        "menu": {
-            "cancer_types": ["Breast Cancer", "Melanoma", "Colon Cancer"],
-            "contexts": [
-                {"key": "TEM", "label": "Cáncer y TEM"},
-                {"key": "micro_rnas", "label": "Cáncer y micro RNAs"},
-            ],
-            "normalization_methods": [
-                {"key": "reference_gene", "label": "gen de referencia"},
-                {"key": "means", "label": "promedios"},
-            ],
-        },
-    }
-
-@st.cache_data
-def load_menu() -> dict:
-    env_path = os.getenv("CGS_MENU_PATH")
-    if env_path:
-        try:
-            with open(env_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            st.warning("No se pudo cargar menú desde CGS_MENU_PATH; usando valores por defecto.")
-            return _default_menu()
-    cfg_path = Path(__file__).parent / "config" / "menu.json"
-    try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        st.warning("No se encontró config/menu.json; usando valores por defecto.")
-        return _default_menu()
-
-MENU = load_menu()
-
- 
 
 # -----------------------------------------------------------------------------
 # Sidebar: parámetros de entrada y configuración
@@ -269,11 +246,13 @@ with st.sidebar:
                 st.warning(f"No se pudieron listar hojas: {e}")
 
     st.header("2) Parámetros del estudio")
-    cancer_type = st.selectbox("Tipo de cáncer", MENU["menu"]["cancer_types"], index=0)
-    context_options = [c["label"] for c in MENU["menu"]["contexts"]]
+    cancer_type = st.selectbox("Tipo de cáncer", MENU.cancer_types, index=0)
+    context_options = [ctx.label for ctx in MENU.contexts]
     context_default_idx = context_options.index(app_state.context_label) if app_state.context_label in context_options else 0
     context_sel_label = st.selectbox("Contexto", context_options, index=context_default_idx)
-    norm_sel_label = st.selectbox("Método preferido", [n["label"] for n in MENU["menu"]["normalization_methods"]], index=1)
+    norm_options = [method.label for method in MENU.normalization_methods]
+    norm_default_idx = 1 if len(norm_options) > 1 else 0
+    norm_sel_label = st.selectbox("Método preferido", norm_options, index=norm_default_idx)
 
     st.header("3) Política 'Undetermined/ND'")
     und_options = ["nan", "ctmax", "value"]
@@ -372,39 +351,28 @@ if df_loaded is not None:
     with c3:
         st.info(f"Tipo cáncer: {cancer_type}")
 
-    # Construir largo y filtrar controles de máquina por defecto
-    long_df = melt_wide_to_long(df_loaded.df)
-    try:
-        long_df = drop_machine_controls(long_df, column="target", controls=["PPC", "RTC"])  # como en el notebook
-    except Exception as e:
-        st.warning(f"No se pudieron filtrar controles de máquina: {e}")
-        logger.warning(f"No se filtraron controles de máquina: {e}")
+    # Construir dataframe largo y filtrar controles de máquina por defecto
+    long_df, controls_warning = build_long_table(df_loaded)
+    if controls_warning:
+        st.warning(f"No se pudieron filtrar controles de máquina: {controls_warning}")
+        logger.warning(f"No se filtraron controles de máquina: {controls_warning}")
 
     # Resultados de la extracción (análogos al notebook)
     st.subheader("Resultados de la extracción")
     try:
-        # Nombres de pruebas (desde meta o columnas)
-        sample_names = []
-        if isinstance(df_loaded.meta, dict):
-            sample_names = df_loaded.meta.get('sample_names') or []
-        if not sample_names:
-            sample_names = [c for c in df_loaded.df.columns if c not in ("Well", "Target Name")]
-        # Genes y pozos desde el dataframe ancho
-        genes_col = df_loaded.df.get('Target Name')
-        genes = [str(g).strip() for g in genes_col.dropna().unique().tolist()] if genes_col is not None else []
-        wells_col = df_loaded.df.get('Well')
-        pozos = [str(w).strip() for w in wells_col.dropna().unique().tolist()] if wells_col is not None else []
-
+        extraction = summarize_extraction(df_loaded)
         st.markdown("- Nombres de las pruebas realizadas")
-        # Usar todos los nombres de prueba (sin omitir el primero) y filtrar vacíos
-        tests_filtered = [s for s in sample_names if str(s).strip()]
-        st.info(f"Total {len(tests_filtered)}: {', '.join(tests_filtered)}")
+        st.info(f"Total {len(extraction.sample_names)}: {', '.join(extraction.sample_names)}")
         st.markdown("- Genes objetivo analizados")
-        genes_filtered = [g for g in genes if g]
-        st.info(f"Total {len(genes_filtered)}: {', '.join(genes_filtered)}")
+        st.info(f"Total {len(extraction.genes)}: {', '.join(extraction.genes)}")
         st.markdown("- Pozos detectados")
-        st.info(f"Total {len(pozos)}: {', '.join(pozos)}")
-        logger.debug(f"Extracción -> tests={len(sample_names)}, genes={len(genes_filtered)}, pozos={len(pozos)}")
+        st.info(f"Total {len(extraction.wells)}: {', '.join(extraction.wells)}")
+        logger.debug(
+            "Extracción -> tests=%s, genes=%s, pozos=%s",
+            len(extraction.sample_names),
+            len(extraction.genes),
+            len(extraction.wells),
+        )
     except Exception as e:
         st.warning(f"No se pudo mostrar el resumen de extracción: {e}")
         logger.warning(f"Fallo en resumen de extracción: {e}")
@@ -502,25 +470,24 @@ if df_loaded is not None:
 
     # Utilidad local para resolver colisiones
     def _resolve_collisions(ctrl_df: pd.DataFrame, samp_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-        inter = set(ctrl_df['test'].astype(str)).intersection(set(samp_df['test'].astype(str)))
-        if not inter:
+        collisions = detect_collisions(ctrl_df, samp_df)
+        if not collisions:
             return ctrl_df, samp_df
-        st.warning(f"Colisiones: {len(inter)} pruebas aparecen en ambos grupos → {', '.join(sorted(list(inter))[:10])}{' …' if len(inter)>10 else ''}")
-        choice = st.radio("Resolver colisiones", ["priorizar controles", "priorizar muestras", "excluir colisiones"], horizontal=True, index=0)
-        if choice == "priorizar controles":
-            samp_df = samp_df[~samp_df['test'].astype(str).isin(inter)]
-        elif choice == "priorizar muestras":
-            ctrl_df = ctrl_df[~ctrl_df['test'].astype(str).isin(inter)]
-        else:
-            ctrl_df = ctrl_df[~ctrl_df['test'].astype(str).isin(inter)]
-            samp_df = samp_df[~samp_df['test'].astype(str).isin(inter)]
-        return ctrl_df, samp_df
+        preview = ', '.join(collisions[:10]) + (' …' if len(collisions) > 10 else '')
+        st.warning(f"Colisiones: {len(collisions)} pruebas aparecen en ambos grupos → {preview}")
+        choice = st.radio(
+            "Resolver colisiones",
+            ["priorizar controles", "priorizar muestras", "excluir colisiones"],
+            horizontal=True,
+            index=0,
+        )
+        return apply_collision_strategy(ctrl_df, samp_df, collisions, choice)
 
     if submitted_pref:
         if not ctrl_prefix and not samp_prefix:
             st.warning("Debes ingresar al menos un prefijo (controles o muestras)")
-        pref_ctrl_df, pref_samp_df = classify_by_prefixes(long_df, [ctrl_prefix] if ctrl_prefix else [], [samp_prefix] if samp_prefix else [])
-        pref_ctrl_df, pref_samp_df = _resolve_collisions(pref_ctrl_df, pref_samp_df)
+        result = classify_tests_by_prefixes(long_df, [ctrl_prefix], [samp_prefix])
+        pref_ctrl_df, pref_samp_df = _resolve_collisions(result.controles, result.muestras)
         state['ctrl_prefix'] = ctrl_prefix
         state['samp_prefix'] = samp_prefix
         state['controles_df'] = pref_ctrl_df
@@ -532,8 +499,8 @@ if df_loaded is not None:
             st.warning("Alguna de las categorías resultó vacía. Revisa los prefijos o usa 'Selección manual'.")
 
     if 'submitted_suff' in locals() and submitted_suff:
-        pref_ctrl_df, pref_samp_df = classify_by_suffixes(long_df, suff_ctrl_list, suff_samp_list)
-        pref_ctrl_df, pref_samp_df = _resolve_collisions(pref_ctrl_df, pref_samp_df)
+        result = classify_tests_by_suffixes(long_df, suff_ctrl_list, suff_samp_list)
+        pref_ctrl_df, pref_samp_df = _resolve_collisions(result.controles, result.muestras)
         state['ctrl_suff'] = ctrl_suff
         state['samp_suff'] = samp_suff
         state['controles_df'] = pref_ctrl_df
@@ -546,8 +513,8 @@ if df_loaded is not None:
 
     if 'submitted_regex' in locals() and submitted_regex:
         try:
-            pref_ctrl_df, pref_samp_df = classify_by_regex(long_df, ctrl_re, samp_re)
-            pref_ctrl_df, pref_samp_df = _resolve_collisions(pref_ctrl_df, pref_samp_df)
+            result = classify_tests_by_regex(long_df, ctrl_re, samp_re)
+            pref_ctrl_df, pref_samp_df = _resolve_collisions(result.controles, result.muestras)
             state['ctrl_re'] = ctrl_re
             state['samp_re'] = samp_re
             state['controles_df'] = pref_ctrl_df
@@ -561,12 +528,12 @@ if df_loaded is not None:
             st.error(f"Regex inválido: {ex}")
 
     if submitted_sel:
-        # Validar colisiones
-        inter = set(selected_ctrl).intersection(set(selected_samp))
-        if inter:
-            st.warning(f"Hay pruebas en ambas categorías: {', '.join(sorted(inter))}")
-        sel_ctrl_df = long_df[long_df['test'].astype(str).isin(selected_ctrl)] if selected_ctrl else long_df.iloc[0:0]
-        sel_samp_df = long_df[long_df['test'].astype(str).isin(selected_samp)] if selected_samp else long_df.iloc[0:0]
+        result = classify_tests_by_selection(long_df, selected_ctrl, selected_samp)
+        collisions = detect_collisions(result.controles, result.muestras)
+        if collisions:
+            preview = ', '.join(collisions[:10]) + (' …' if len(collisions) > 10 else '')
+            st.warning(f"Hay pruebas en ambas categorías: {preview}")
+        sel_ctrl_df, sel_samp_df = result.controles, result.muestras
         state['selected_ctrl'] = selected_ctrl
         state['selected_samp'] = selected_samp
         state['controles_df'] = sel_ctrl_df
@@ -579,8 +546,13 @@ if df_loaded is not None:
 
     st.write("Controles clasificados:", len(controles_df))
     st.write("Muestras clasificadas:", len(muestras_df))
-    # Resumen de clasificación (análogos al notebook)
+
+    extras: dict[str, str] = {}
     ok_for_fc = False
+    ready_for_fc = False
+    metrics: Optional[QualityMetrics] = None
+    imputation_output = None
+
     if not controles_df.empty or not muestras_df.empty:
         st.subheader("Resumen de clasificación")
         ok_for_fc = True
@@ -589,47 +561,98 @@ if df_loaded is not None:
                 uniq = df_tipo['test'].astype(str).unique().tolist()
                 st.success(f"{tipo}: {len(uniq)} pruebas → {', '.join(uniq)}")
             else:
-                st.warning(f"No se detectaron {tipo.lower()} con los prefijos actuales.")
+                st.warning(f"No se detectaron {tipo.lower()} con los criterios actuales.")
 
-        # Panel de calidad antes de FC
-        st.subheader("Calidad de datos (pre-FC)")
-        ok_for_fc = True
-        # Métricas básicas
-        ctrl_targets = set(controles_df['target'].dropna().astype(str)) if not controles_df.empty else set()
-        samp_targets = set(muestras_df['target'].dropna().astype(str)) if not muestras_df.empty else set()
-        common_targets = ctrl_targets.intersection(samp_targets)
-        ctrl_nan_ratio = float(controles_df['ct'].isna().mean()) if not controles_df.empty else 1.0
-        samp_nan_ratio = float(muestras_df['ct'].isna().mean()) if not muestras_df.empty else 1.0
-
-        mqa1, mqa2, mqa3, mqa4 = st.columns(4)
-        with mqa1:
-            st.metric("Genes (controles)", len(ctrl_targets))
-        with mqa2:
-            st.metric("Genes (muestras)", len(samp_targets))
-        with mqa3:
-            st.metric("Genes en común", len(common_targets))
-        with mqa4:
-            st.metric("NaN ct (ctrl/mues)", f"{ctrl_nan_ratio:.0%} / {samp_nan_ratio:.0%}")
-
-        if len(common_targets) == 0:
-            st.error("No hay intersección de genes entre controles y muestras. Ajusta tu clasificación.")
+        impute_by_cols = [c for c in ['plate_id', 'target'] if c in controles_df.columns and c in muestras_df.columns]
+        try:
+            imputation_output = apply_undetermined_policy(
+                controles_df,
+                muestras_df,
+                policy=policy_applied,
+                fixed_value=float(app_state.undetermined.value),
+                group_columns=impute_by_cols or None,
+            )
+        except FoldChangePreparationError as exc:
+            st.error(f"Imputación fallida: {exc}")
+            controles_df = pd.DataFrame()
+            muestras_df = pd.DataFrame()
             ok_for_fc = False
-        if ctrl_nan_ratio >= 1.0 or samp_nan_ratio >= 1.0:
-            st.error("Todos los valores Ct son NaN en algún grupo. Revisa la política de 'Undetermined' o tus datos.")
-            ok_for_fc = False
+        else:
+            controles_df = imputation_output.controles
+            muestras_df = imputation_output.muestras
+            if imputation_output.message:
+                if imputation_output.policy == 'nan':
+                    st.info(imputation_output.message)
+                else:
+                    st.success(imputation_output.message)
 
-        # N mínimo por gen y grupo
-        n_min = st.number_input("Mínimo de réplicas por gen y grupo", min_value=1, max_value=10, value=1, step=1)
-        if common_targets:
-            counts_ctrl = controles_df.dropna(subset=['ct']).groupby('target')['ct'].size()
-            counts_samp = muestras_df.dropna(subset=['ct']).groupby('target')['ct'].size()
-            eligible = [t for t in common_targets if counts_ctrl.get(t, 0) >= n_min and counts_samp.get(t, 0) >= n_min]
-            st.info(f"Genes que cumplen n≥{n_min} en ambos grupos: {len(eligible)}")
-            if len(eligible) == 0:
+            if not imputation_output.summary.empty:
+                counts = imputation_output.summary['grupo'].value_counts()
+                st.metric("Total imputaciones", len(imputation_output.summary))
+                st.caption(
+                    f"Controles imputados: {int(counts.get('control', 0))} · "
+                    f"Muestras imputadas: {int(counts.get('muestra', 0))}"
+                )
+                cols_show = [
+                    c for c in ['grupo', 'test', 'target', 'plate_id', 'well', 'ct', 'ct_imputed']
+                    if c in imputation_output.summary.columns
+                ]
+                st.dataframe(imputation_output.summary[cols_show])
+                extras['ct_imputaciones.csv'] = imputation_output.summary.to_csv(index=False)
+                st.download_button(
+                    label="Descargar detalle de imputaciones",
+                    data=imputation_output.summary.to_csv(index=False),
+                    file_name="detalle_imputaciones.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+            elif imputation_output and imputation_output.policy != 'nan':
+                st.info("No se detectaron filas que requieran imputación con la política seleccionada.")
+
+        if not controles_df.empty and not muestras_df.empty:
+            metrics = compute_quality_metrics(controles_df, muestras_df)
+            st.subheader("Calidad de datos (post-imputación)")
+            mqa1, mqa2, mqa3, mqa4 = st.columns(4)
+            with mqa1:
+                st.metric("Genes (controles)", len(metrics.ctrl_targets))
+            with mqa2:
+                st.metric("Genes (muestras)", len(metrics.sample_targets))
+            with mqa3:
+                st.metric("Genes en común", len(metrics.common_targets))
+            with mqa4:
+                st.metric(
+                    "NaN ct (ctrl/mues)",
+                    f"{metrics.ctrl_nan_ratio:.0%} / {metrics.sample_nan_ratio:.0%}"
+                )
+
+            if not metrics.common_targets:
+                st.error("No hay intersección de genes entre controles y muestras. Ajusta tu clasificación.")
+                ok_for_fc = False
+            if metrics.ctrl_nan_ratio >= 1.0 or metrics.sample_nan_ratio >= 1.0:
+                st.error("Todos los valores Ct son NaN en algún grupo. Revisa la política de 'Undetermined' o tus datos.")
+                ok_for_fc = False
+
+            n_min = st.number_input(
+                "Mínimo de réplicas por gen y grupo",
+                min_value=1,
+                max_value=10,
+                value=1,
+                step=1,
+            )
+            eligible = metrics.eligible_genes(int(n_min)) if metrics else []
+            st.info(f"Genes que cumplen n≥{int(n_min)} en ambos grupos: {len(eligible)}")
+            if not eligible:
                 st.warning("Ningún gen cumple el mínimo de réplicas en ambos grupos. Considera reducir el umbral o revisar datos.")
 
-    extras = {}
-    ready_for_fc = ok_for_fc and not controles_df.empty and not muestras_df.empty
+            if imputation_output and imputation_output.has_missing:
+                st.warning(
+                    "Persisten valores Ct faltantes. Ajusta la política en la barra lateral y vuelve a procesar el archivo."
+                )
+                ready_for_fc = False
+            else:
+                ready_for_fc = ok_for_fc and bool(metrics.common_targets)
+
+    ready_for_fc = ready_for_fc and not controles_df.empty and not muestras_df.empty
 
     if not controles_df.empty and not muestras_df.empty and ok_for_fc:
         controles_df = controles_df.copy()
@@ -641,89 +664,18 @@ if df_loaded is not None:
         policy_applied = app_state.undetermined.policy
         st.caption(f"Política seleccionada: {policy_applied}")
 
-        impute_by_cols = [c for c in ['plate_id', 'target'] if c in controles_df.columns and c in muestras_df.columns]
-        impute_kwargs: dict[str, Any] = {"columna_ct": 'ct', "by": impute_by_cols or None}
-
-        imputation_summary = pd.DataFrame()
-        used_info: Optional[str] = None
-
-        if policy_applied == 'ctmax':
-            try:
-                controles_df, muestras_df = procesar_ct_column(
-                    controles_df,
-                    muestras_df,
-                    **impute_kwargs,
-                )
-            except ValueError as exc:
-                ready_for_fc = False
-                st.error(f"Imputación fallida: {exc}")
-            else:
-                used_info = controles_df.attrs.get('imputation_info')
-        elif policy_applied == 'value':
-            try:
-                controles_df, muestras_df = procesar_ct_column(
-                    controles_df,
-                    muestras_df,
-                    max_ct=float(app_state.undetermined.value),
-                    **impute_kwargs,
-                )
-            except ValueError as exc:
-                ready_for_fc = False
-                st.error(f"Imputación fallida: {exc}")
-            else:
-                used_info = controles_df.attrs.get('imputation_info')
-        else:
-            st.info("La política actual mantiene los valores 'Undetermined' como NaN.")
-
-        if used_info:
-            st.success(used_info)
-
-        if 'ct_imputed' in controles_df.columns or 'ct_imputed' in muestras_df.columns:
-            ctrl_imp = controles_df.loc[controles_df.get('ct_imputed', False)].copy()
-            ctrl_imp['grupo'] = 'control'
-            samp_imp = muestras_df.loc[muestras_df.get('ct_imputed', False)].copy()
-            samp_imp['grupo'] = 'muestra'
-            imputation_summary = pd.concat([ctrl_imp, samp_imp], ignore_index=True, sort=False)
-
-        if not imputation_summary.empty:
-            counts = imputation_summary['grupo'].value_counts()
-            st.metric("Total imputaciones", len(imputation_summary))
-            st.caption(
-                f"Controles imputados: {int(counts.get('control', 0))} · "
-                f"Muestras imputadas: {int(counts.get('muestra', 0))}"
-            )
-            cols_show = [c for c in ['grupo', 'test', 'target', 'plate_id', 'well', 'ct', 'ct_imputed'] if c in imputation_summary.columns]
-            st.dataframe(imputation_summary[cols_show])
-            extras['ct_imputaciones.csv'] = imputation_summary.to_csv(index=False)
-            st.download_button(
-                label="Descargar detalle de imputaciones",
-                data=imputation_summary.to_csv(index=False),
-                file_name="detalle_imputaciones.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
-        elif policy_applied != 'nan':
-            st.info("No se detectaron filas que requieran imputación con la política seleccionada.")
-
-        rem_ctrl = controles_df['ct'].isna().sum()
-        rem_samp = muestras_df['ct'].isna().sum()
-        if rem_ctrl or rem_samp:
-            ready_for_fc = False
-            st.warning(
-                "Persisten valores Ct faltantes. Ajusta la política en la barra lateral y vuelve a procesar el archivo."
-            )
-
-        extras['controles_limpios.csv'] = controles_df.to_csv(index=False)
-        extras['muestras_limpias.csv'] = muestras_df.to_csv(index=False)
-    else:
-        ready_for_fc = False
+        if not controles_df.empty and not muestras_df.empty:
+            extras['controles_limpios.csv'] = controles_df.to_csv(index=False)
+            extras['muestras_limpias.csv'] = muestras_df.to_csv(index=False)
 
     if not ready_for_fc and not controles_df.empty and not muestras_df.empty:
         st.stop()
 
     if ready_for_fc:
         try:
-            fc = compute_fold_change(controles_df, muestras_df)
+            fc_result = compute_fold_change_with_expression(controles_df, muestras_df)
+            fc = fc_result.computation
+            df_expr = fc_result.expression_table
             logger.info(f"FC consolidado shape: {fc.consolidated.shape}")
             st.subheader("Fold Change y ΔΔCt")
             m1, m2 = st.columns(2)
@@ -736,95 +688,37 @@ if df_loaded is not None:
                 st.dataframe(fc.consolidated)
             st.plotly_chart(fc_comparison_table(fc.consolidated), use_container_width=True)
 
-            import plotly.graph_objects as go
-            fig = go.Figure()
-            # Aplicar preferencia de exclusión de 'estables' solo para gráficos
             exclude_stable = bool(app_state.exclude_stable)
-            try:
-                # Usar df_expr ya calculado para determinar objetivos a mostrar
-                targets_plot = (
-                    df_expr.loc[df_expr['nivel_expresion'] != 'estable', 'target']
-                    if exclude_stable else df_expr['target']
-                )
-                consolidated_plot = fc.consolidated[fc.consolidated['target'].isin(targets_plot)]
-            except Exception:
-                consolidated_plot = fc.consolidated
-            x_vals = consolidated_plot['target']
-            ddct_mean = consolidated_plot['delta_delta_ct_promedio']
-            ddct_ref = consolidated_plot['delta_delta_ct_gen_ref']
-            fc_mean = consolidated_plot['fold_change_promedio']
-            fc_ref = consolidated_plot['fold_change_gen_ref']
-
             y2_scale = st.radio("Escala FC", ["log", "lineal"], horizontal=True, index=0)
-            y2_type = 'log' if y2_scale == 'log' else 'linear'
-
-            fig.add_trace(go.Bar(
-                x=x_vals, y=ddct_mean, name='ΔΔCT (Promedios)', marker_color='#1f77b4', opacity=0.85, yaxis='y',
-                hovertemplate='Gen=%{x}<br>ΔΔCT Promedios=%{y:.3f}<extra></extra>'
-            ))
-            fig.add_trace(go.Bar(
-                x=x_vals, y=ddct_ref, name='ΔΔCT (Gen Ref)', marker_color='#ff7f0e', opacity=0.85, yaxis='y',
-                hovertemplate='Gen=%{x}<br>ΔΔCT GenRef=%{y:.3f}<extra></extra>'
-            ))
-            fig.add_trace(go.Scatter(
-                x=x_vals, y=fc_mean, name='Fold Change (Promedios)', mode='markers+lines',
-                marker=dict(color='#2ca02c', size=8, symbol='diamond'),
-                line=dict(color='#2ca02c', width=2, dash='dot'), yaxis='y2',
-                hovertemplate='Gen=%{x}<br>FC Promedios=%{y:.3f}<extra></extra>'
-            ))
-            fig.add_trace(go.Scatter(
-                x=x_vals, y=fc_ref, name='Fold Change (Gen Ref)', mode='markers+lines',
-                marker=dict(color='#d62728', size=8, symbol='diamond'),
-                line=dict(color='#d62728', width=2, dash='dot'), yaxis='y2',
-                hovertemplate='Gen=%{x}<br>FC GenRef=%{y:.3f}<extra></extra>'
-            ))
-
-            # Resaltar el gen de referencia
-            try:
-                ref_gene = fc.reference_gene
-                ref_mask = x_vals == ref_gene
-                fig.add_trace(go.Scatter(
-                    x=x_vals[ref_mask], y=fc_ref[ref_mask], mode='markers', name='Ref gene',
-                    marker=dict(color='black', size=12, symbol='star'), yaxis='y2',
-                    hovertemplate='Gen de referencia=%{x}<br>FC GenRef=%{y:.3f}<extra></extra>'
-                ))
-            except Exception:
-                pass
-
-            fig.update_layout(
-                title=dict(text='Análisis comparativo de métodos de cálculo', x=0.5),
-                template='plotly_white', barmode='group',
-                yaxis=dict(title='ΔΔCT', showgrid=True, gridcolor='lightgray'),
-                yaxis2=dict(title=f"Fold Change ({y2_scale})", overlaying='y', side='right', type=y2_type, showgrid=False),
-                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
-                height=600, margin=dict(b=80, t=80, l=60, r=60)
+            fc_figure = build_fc_detail_figure(
+                fc.consolidated,
+                df_expr,
+                exclude_stable=exclude_stable,
+                reference_gene=fc.reference_gene,
+                scale=y2_scale,
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fc_figure, use_container_width=True)
 
             # Clasificación por nivel de expresión (por método preferido del menú)
             st.subheader("Clasificación por nivel de expresión")
             default_idx = 1 if norm_sel_label == 'gen de referencia' else 0
             fc_source = st.radio("Fuente de Fold Change", ["promedios", "gen de referencia"], horizontal=True, index=default_idx)
-            use_col = 'fold_change_promedio' if fc_source == 'promedios' else 'fold_change_gen_ref'
-            df_expr = fc.consolidated[['target', use_col]].rename(columns={use_col: 'fold_change'}).copy()
-            df_expr['nivel_expresion'] = pd.cut(
-                df_expr['fold_change'],
-                bins=[-float('inf'), 1.0, 2.0, float('inf')],
-                labels=['subexpresado', 'estable', 'sobreexpresado'],
-                right=False,
+            expr_result = compute_fold_change_with_expression(
+                controles_df,
+                muestras_df,
+                fold_source=fc_source,
+                precomputed=fc,
             )
+            df_expr = expr_result.expression_table
             cexp1, cexp2 = st.columns(2)
             with cexp1:
                 st.dataframe(df_expr)
             with cexp2:
-                import plotly.express as px
-                order_levels = ['estable', 'subexpresado', 'sobreexpresado']
-                # Aplicar exclusión de 'estables' en el gráfico de distribución si corresponde
-                exclude_stable = bool(app_state.exclude_stable)
-                df_expr_plot = df_expr[df_expr['nivel_expresion'] != 'estable'] if exclude_stable else df_expr
-                counts = df_expr_plot['nivel_expresion'].value_counts().reindex(order_levels, fill_value=0)
-                bar = px.bar(x=counts.index, y=counts.values, labels={'x': 'Nivel de expresión', 'y': 'Frecuencia'}, title='Distribución de niveles de expresión')
-                st.plotly_chart(bar, use_container_width=True)
+                dist_fig = build_expression_distribution(
+                    df_expr,
+                    exclude_stable=bool(app_state.exclude_stable),
+                )
+                st.plotly_chart(dist_fig, use_container_width=True)
 
             # Genes por nivel de expresión: lista/tablas y treemap
             st.markdown("### Genes por nivel de expresión")
@@ -857,25 +751,11 @@ if df_loaded is not None:
                             use_container_width=True,
                         )
             else:
-                try:
-                    import plotly.express as px
-                    treedata = df_expr_vis.copy()
-                    if treedata.empty:
-                        st.info("Sin genes para graficar con los filtros actuales.")
-                    else:
-                        treedata['log2fc'] = np.log2(treedata['fold_change'].clip(lower=1e-12))
-                        fig_t = px.treemap(
-                            treedata,
-                            path=['nivel_expresion', 'target'],
-                            values=treedata['log2fc'].abs(),
-                            color='log2fc',
-                            color_continuous_scale='RdBu',
-                            color_continuous_midpoint=0.0,
-                            title='Genes por nivel (tamaño = |log2FC|, color = log2FC)'
-                        )
-                        st.plotly_chart(fig_t, use_container_width=True)
-                except Exception as _:
-                    st.info("No se pudo generar el treemap con los datos actuales.")
+                treemap_fig = build_expression_treemap(df_expr_vis)
+                if treemap_fig is None:
+                    st.info("Sin genes para graficar con los filtros actuales.")
+                else:
+                    st.plotly_chart(treemap_fig, use_container_width=True)
 
             # Persistir para páginas
             st.session_state['fc_consolidated'] = fc.consolidated.copy()
