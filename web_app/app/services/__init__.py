@@ -21,35 +21,12 @@ from .fold_change import (  # noqa: F401
     QualityMetrics,
     FoldChangeResult,
 )
-from .visuals import (  # noqa: F401
-    build_fc_detail_figure,
-    build_expression_distribution,
-    build_expression_treemap,
-)
-from .string_enrichment import (  # noqa: F401
-    EnrichmentResult,
-    perform_string_enrichment,
-)
-from .bibliography import (  # noqa: F401
-    PubMedRequest,
-    fetch_pubmed_articles,
-    merge_expression_levels,
-)
-from .heuristics import (  # noqa: F401
-    SankeyData,
-    compute_heuristic_summary,
-    build_heatmap_data,
-    build_sankey_data,
-    merge_with_expression,
-    build_function_long,
-    compute_function_counts,
-    map_functions_to_hallmarks,
-)
-from .nlp import (  # noqa: F401
-    NLPCorpusInfo,
-    prepare_corpus,
-    extract_texts,
-    analyze_texts,
+from .normalization import (  # noqa: F401
+    AdvancedNormalizationParams,
+    AdvancedNormalizationResult,
+    AdvancedNormalizationError,
+    build_total_dataframe,
+    execute_advanced_normalization,
 )
 
 __all__ = [
@@ -70,24 +47,9 @@ __all__ = [
     "ImputationOutput",
     "QualityMetrics",
     "FoldChangeResult",
-    "build_fc_detail_figure",
-    "build_expression_distribution",
-    "build_expression_treemap",
-    "EnrichmentResult",
-    "perform_string_enrichment",
-    "PubMedRequest",
-    "fetch_pubmed_articles",
-    "merge_expression_levels",
-    "SankeyData",
-    "compute_heuristic_summary",
-    "build_heatmap_data",
-    "build_sankey_data",
-    "merge_with_expression",
-    "build_function_long",
-    "compute_function_counts",
-    "map_functions_to_hallmarks",
-    "NLPCorpusInfo",
-    "prepare_corpus",
-    "extract_texts",
-    "analyze_texts",
+    "AdvancedNormalizationParams",
+    "AdvancedNormalizationResult",
+    "AdvancedNormalizationError",
+    "build_total_dataframe",
+    "execute_advanced_normalization",
 ]

@@ -1,329 +1,693 @@
-# -*- coding: utf-8 -*-
-# -----------------------------------------------------------------------------
-# CancerGeneSignatures - Web App
-# -----------------------------------------------------------------------------
-# Esta app de Streamlit implementa el flujo del notebook de análisis qPCR:
-#   1) Carga de Excel (.xlsx/.xls)
-#   2) Selección de parámetros desde menu.json
-#   3) Filtrado de controles de máquina (PPC, RTC)
-#   4) Selección de controles/muestras (tests o prefijos sugeridos)
-#   5) Cálculo de Fold Change (promedios vs gen de referencia)
-#   6) Visualizaciones y descarga de resultados
-# -----------------------------------------------------------------------------
-
 from __future__ import annotations
 
-import io, os, sys, re
-from pathlib import Path
-from typing import Any, Optional
+import io
 import logging
+import re
+import sys
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 import streamlit as st
 
-from app.config.loader import load_app_config, ConfigError
-
-# Ensure web_app package is importable cuando se ejecuta desde distintos directorios
+# Asegura que el paquete ``web_app`` sea importable al ejecutar con ``streamlit run``
 _PROJ_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJ_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJ_ROOT))
 
-# Importamos funciones propias del proyecto
-from app.core.io import LoadResult, list_excel_sheets, parse_qpcr_wide
-
-# Hot-reload core IO to pick up signature changes during dev sessions
-try:
-    import importlib
-    import app.core.io as _cgs_io
-    _cgs_io = importlib.reload(_cgs_io)
-    LoadResult = _cgs_io.LoadResult  # type: ignore
-    list_excel_sheets = _cgs_io.list_excel_sheets  # type: ignore
-    parse_qpcr_wide = _cgs_io.parse_qpcr_wide  # type: ignore
-except Exception:
-    pass
-
-# -----------------------------------------------------------------------------
-# Configuración centralizada de la aplicación
-# -----------------------------------------------------------------------------
-_config_warnings: list[str] = []
-try:
-    secrets_source = st.secrets  # type: ignore[attr-defined]
-except Exception:
-    secrets_source = None
-try:
-    APP_CONFIG = load_app_config(
-        secrets=secrets_source if secrets_source is not None else None,
-        warn=_config_warnings.append,
-    )
-except ConfigError as exc:
-    st.error(f"Error cargando configuración: {exc}")
-    st.stop()
-
-MENU = APP_CONFIG.menu
-SERVICES = APP_CONFIG.services
-from app.core.qpcr import (
-    suggest_name_affixes,
-)
-from app.core.tables import fc_comparison_table
+from app.config.loader import ConfigError, load_app_config
 from app.core.ensembl import add_ensembl_info_batch
-from app.core.string_enrichment import dfs_to_excel_bytes
-# Hot-reload bibliography helpers during dev (ensure new functions are visible)
-try:
-    import importlib as _importlib
-    import app.core.bibliography as _cgs_bib
-    _cgs_bib = _importlib.reload(_cgs_bib)
-    search_pubmed_by_genes = _cgs_bib.search_pubmed_by_genes  # type: ignore
-    classify_bibliography = _cgs_bib.classify_bibliography  # type: ignore
-    aggregate_counts_by_level_and_cancer = _cgs_bib.aggregate_counts_by_level_and_cancer  # type: ignore
-    filter_bibliography_by_cancer = getattr(_cgs_bib, 'filter_bibliography_by_cancer')  # type: ignore
-    interpret_gene_relations = getattr(_cgs_bib, 'interpret_gene_relations')  # type: ignore
-    summarize_relations_by_gene = getattr(_cgs_bib, 'summarize_relations_by_gene')  # type: ignore
-except Exception:
-    # Fallbacks (should not be needed if module is available)
-    from app.core import bibliography as _fallback_bib
-
-    search_pubmed_by_genes = _fallback_bib.search_pubmed_by_genes  # type: ignore
-    classify_bibliography = _fallback_bib.classify_bibliography  # type: ignore
-    aggregate_counts_by_level_and_cancer = _fallback_bib.aggregate_counts_by_level_and_cancer  # type: ignore
-    filter_bibliography_by_cancer = getattr(_fallback_bib, 'filter_bibliography_by_cancer', None)  # type: ignore
-from app.core.signatures import (
-    create_signatures,
-)
-from app.core.visuals import (
-    hallmarks_polar_chart,
-    fingerprint_heatmap,
-    clustered_expression_by_level,
-)
-from app.state import AppSessionState
-from app.services.qpcr import (
-    build_long_table,
-    summarize_extraction,
-    classify_tests_by_prefixes,
-    classify_tests_by_suffixes,
-    classify_tests_by_regex,
-    classify_tests_by_selection,
-    detect_collisions,
-    apply_collision_strategy,
-)
+from app.core.io import LoadResult, list_excel_sheets, parse_qpcr_wide
+from app.core.qpcr import suggest_name_affixes
+from app.core.reference_normalization import DifferentialExpressionResult
 from app.services.fold_change import (
-    apply_undetermined_policy,
-    compute_quality_metrics,
-    compute_fold_change_with_expression,
     FoldChangePreparationError,
     QualityMetrics,
+    apply_undetermined_policy,
+    compute_quality_metrics,
 )
 from app.services.normalization import (
-    AdvancedNormalizationParams,
     AdvancedNormalizationError,
+    AdvancedNormalizationParams,
+    AdvancedNormalizationResult,
     execute_advanced_normalization,
 )
-from app.services.visuals import (
-    build_fc_detail_figure,
-    build_expression_distribution,
-    build_expression_treemap,
+from app.services.qpcr import (
+    build_long_table,
+    classify_tests_by_prefixes,
+    classify_tests_by_regex,
+    classify_tests_by_selection,
+    classify_tests_by_suffixes,
+    detect_collisions,
+    summarize_extraction,
 )
-from app.services.bibliography import (
-    PubMedRequest,
-    fetch_pubmed_articles,
-    merge_expression_levels,
-)
-from app.services.string_enrichment import perform_string_enrichment
-from app.ui.sections import (
-    render_heuristics_section,
-    render_google_nlp_section,
-)
+from app.state import AppSessionState
 
-NORMALIZATION_METHOD_DESCRIPTIONS = {
-    "promedios": "Promedios globales (ΔΔCt con medias por grupo)",
-    "ref_gene": "Gen de referencia (mínima desviación estándar)",
-    "advanced": "Normalización avanzada (búsqueda de referencias estables)",
-}
-# Cache de firmas para evitar recomputar al cambiar solo la selección visual
-import hashlib
-@st.cache_data(show_spinner=False)
-def _compute_signatures_cached(bib_csv: str, ctx: str, hall_gmt: str, back_gmt: str, sel_tipo: str) -> pd.DataFrame:
-    try:
-        df_bib = pd.read_csv(io.StringIO(bib_csv))
-    except Exception:
-        return pd.DataFrame()
-    from app.core.signatures import HallmarkConfig
-    cfg = HallmarkConfig(hallmark_gmt=hall_gmt, background_gmt=back_gmt)
-    return create_signatures(df_bib, contexto_biologico=ctx, hallmark_cfg=cfg)
 
-# Cache de anotación Ensembl (evitar llamadas repetidas a red en cada rerun)
 @st.cache_data(show_spinner=False, ttl=3600)
 def _annotate_ensembl_cached(df_csv: str, max_workers: int = 3) -> pd.DataFrame:
     try:
-        df_in = pd.read_csv(io.StringIO(df_csv))
+        df = pd.read_csv(io.StringIO(df_csv))
     except Exception:
         return pd.DataFrame()
-    return add_ensembl_info_batch(df_in, symbol_col='target', max_workers=max_workers)
-
-@st.cache_data(show_spinner=False, ttl=3600)
-def _string_enrichment_cached(
-    df_expr_csv: str,
-    levels: list[str],
-    species: int,
-    sources: list[str],
-    max_fdr: float,
-    min_size: int,
-    top_n: int,
-) -> dict:
-    try:
-        df_expr = pd.read_csv(io.StringIO(df_expr_csv))
-    except Exception:
-        return {"combined": pd.DataFrame(), "by_level": {}}
-    result = perform_string_enrichment(
-        df_expr,
-        levels=levels,
-        species=species,
-        sources=sources,
-        max_fdr=max_fdr,
-        min_term_genes=min_size,
-        top_n=top_n,
-    )
-    return {
-        "combined": result.combined,
-        "by_level": result.by_level,
-    }
-
-@st.cache_data(show_spinner=False, ttl=86400)
-def _pubmed_cached(genes_df_csv: str, context: str, max_per_gene: int, email: str, api_key: str|None) -> pd.DataFrame:
-    try:
-        genes_df = pd.read_csv(io.StringIO(genes_df_csv))
-    except Exception:
+    if df.empty:
         return pd.DataFrame()
-    request = PubMedRequest(
-        context=context,
-        max_per_gene=int(max_per_gene),
-        email=email,
-        api_key=api_key,
+    return add_ensembl_info_batch(df, symbol_col="target", max_workers=max_workers)
+
+
+def _format_list_preview(items: List[str], limit: int = 20) -> str:
+    if not items:
+        return "(sin coincidencias)"
+    head = items[:limit]
+    suffix = " …" if len(items) > limit else ""
+    return ", ".join(head) + suffix
+
+
+def _store_classification(
+    state: Dict[str, object],
+    ctrl_df: pd.DataFrame,
+    samp_df: pd.DataFrame,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    ctrl_df = ctrl_df.copy()
+    samp_df = samp_df.copy()
+    collisions = detect_collisions(ctrl_df, samp_df)
+    if collisions:
+        preview = _format_list_preview(collisions, limit=10)
+        st.warning(
+            "Algunas pruebas aparecen tanto en controles como en muestras. "
+            "Se priorizarán como controles: "
+            f"{preview}"
+        )
+        samp_df = samp_df[~samp_df["test"].astype(str).isin(collisions)].copy()
+    state["controles_df"] = ctrl_df
+    state["muestras_df"] = samp_df
+    return ctrl_df, samp_df
+
+
+def _clear_classification_state(state: Dict[str, object]) -> None:
+    for key in (
+        "ctrl_prefix",
+        "samp_prefix",
+        "ctrl_suffix",
+        "samp_suffix",
+        "ctrl_regex",
+        "samp_regex",
+        "selected_ctrl",
+        "selected_samp",
+        "controles_df",
+        "muestras_df",
+    ):
+        state.pop(key, None)
+    # Limpiar entradas asociadas en session_state de Streamlit
+    for ui_key in list(st.session_state.keys()):
+        if any(ui_key.startswith(prefix) for prefix in (
+            "ctrl_prefix_input::",
+            "samp_prefix_input::",
+            "ctrl_suffix_input::",
+            "samp_suffix_input::",
+            "pref_ctrl_suggest::",
+            "pref_samp_suggest::",
+            "suff_ctrl_suggest::",
+            "suff_samp_suggest::",
+        )):
+            st.session_state.pop(ui_key, None)
+
+
+def _render_classification_ui(long_df: pd.DataFrame, file_key: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    state = st.session_state.setdefault(file_key, {})
+    unique_tests = sorted(long_df["test"].astype(str).dropna().unique().tolist())
+    sugg = suggest_name_affixes(unique_tests, top_n=10)
+    suggested_prefixes = [p for p, _ in (sugg.get("prefixes") or [])]
+    suggested_suffixes = [s for s, _ in (sugg.get("suffixes") or [])]
+
+    tab_pref, tab_suff, tab_regex, tab_manual = st.tabs(
+        ["Por prefijos", "Por sufijos", "Por regex", "Selección manual"]
     )
-    return fetch_pubmed_articles(genes_df, request)
 
-# -----------------------------------------------------------------------------
-# Configuración de la página Streamlit
-# -----------------------------------------------------------------------------
-st.set_page_config(
-    page_title=APP_CONFIG.project_name,
-    page_icon="🧬",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+    with tab_pref:
+        col_pref_ctrl, col_pref_samp = st.columns(2)
+        ctrl_suggest = ""
+        samp_suggest = ""
+        if suggested_prefixes:
+            ctrl_options = ["(vacío)"] + suggested_prefixes
+            samp_options = ["(vacío)"] + suggested_prefixes
+            with col_pref_ctrl:
+                ctrl_suggest = st.selectbox(
+                    "Sugerencia controles",
+                    options=ctrl_options,
+                    index=0,
+                    key=f"pref_ctrl_suggest::{file_key}",
+                )
+            with col_pref_samp:
+                samp_suggest = st.selectbox(
+                    "Sugerencia muestras",
+                    options=samp_options,
+                    index=0,
+                    key=f"pref_samp_suggest::{file_key}",
+                )
+        with col_pref_ctrl:
+            default_ctrl = state.get("ctrl_prefix") or ("" if ctrl_suggest in {"", "(vacío)"} else ctrl_suggest)
+            ctrl_prefix = st.text_input(
+                "Prefijo controles",
+                value=default_ctrl,
+                help="Introduce un prefijo común de los tests de control.",
+                key=f"ctrl_prefix_input::{file_key}",
+            )
+        with col_pref_samp:
+            default_samp = state.get("samp_prefix") or ("" if samp_suggest in {"", "(vacío)"} else samp_suggest)
+            samp_prefix = st.text_input(
+                "Prefijo muestras",
+                value=default_samp,
+                help="Introduce un prefijo común de los tests de muestra.",
+                key=f"samp_prefix_input::{file_key}",
+            )
+        if suggested_prefixes:
+            st.caption("Sugerencias detectadas: " + ", ".join(suggested_prefixes))
+        prev_ctrl = [t for t in unique_tests if ctrl_prefix and str(t).startswith(ctrl_prefix)]
+        prev_samp = [t for t in unique_tests if samp_prefix and str(t).startswith(samp_prefix)]
+        st.caption(f"Controles previstos: {_format_list_preview(prev_ctrl)}")
+        st.caption(f"Muestras previstas: {_format_list_preview(prev_samp)}")
+        if st.button("Clasificar por prefijos", key=f"btn_pref_{file_key}"):
+            if not ctrl_prefix and not samp_prefix:
+                st.warning("Introduce al menos un prefijo para clasificar.")
+            else:
+                result = classify_tests_by_prefixes(
+                    long_df,
+                    [ctrl_prefix] if ctrl_prefix else [],
+                    [samp_prefix] if samp_prefix else [],
+                )
+                ctrl_df, samp_df = _store_classification(state, result.controles, result.muestras)
+                state["ctrl_prefix"] = ctrl_prefix
+                state["samp_prefix"] = samp_prefix
+                st.success(
+                    f"Clasificación aplicada → controles: {len(ctrl_df)}, muestras: {len(samp_df)}"
+                )
 
-for _cfg_warning in _config_warnings:
-    st.warning(_cfg_warning)
+    with tab_suff:
+        col_suff_ctrl, col_suff_samp = st.columns(2)
+        suff_suggest_ctrl = ""
+        suff_suggest_samp = ""
+        if suggested_suffixes:
+            suff_ctrl_options = ["(vacío)"] + suggested_suffixes
+            suff_samp_options = ["(vacío)"] + suggested_suffixes
+            with col_suff_ctrl:
+                suff_suggest_ctrl = st.selectbox(
+                    "Sugerencia controles",
+                    options=suff_ctrl_options,
+                    index=0,
+                    key=f"suff_ctrl_suggest::{file_key}",
+                )
+            with col_suff_samp:
+                suff_suggest_samp = st.selectbox(
+                    "Sugerencia muestras",
+                    options=suff_samp_options,
+                    index=0,
+                    key=f"suff_samp_suggest::{file_key}",
+                )
+        with col_suff_ctrl:
+            default_ctrl_suff = state.get("ctrl_suffix") or ("" if suff_suggest_ctrl in {"", "(vacío)"} else suff_suggest_ctrl)
+            ctrl_suffix = st.text_input(
+                "Sufijos controles (separados por coma)",
+                value=default_ctrl_suff,
+                key=f"ctrl_suffix_input::{file_key}",
+            )
+        with col_suff_samp:
+            default_samp_suff = state.get("samp_suffix") or ("" if suff_suggest_samp in {"", "(vacío)"} else suff_suggest_samp)
+            samp_suffix = st.text_input(
+                "Sufijos muestras (separados por coma)",
+                value=default_samp_suff,
+                key=f"samp_suffix_input::{file_key}",
+            )
+        if suggested_suffixes:
+            st.caption("Sugerencias detectadas: " + ", ".join(suggested_suffixes))
+        ctrl_suffixes = [s.strip() for s in ctrl_suffix.split(",") if s.strip()]
+        samp_suffixes = [s.strip() for s in samp_suffix.split(",") if s.strip()]
+        prev_ctrl = [t for t in unique_tests if any(str(t).endswith(s) for s in ctrl_suffixes)]
+        prev_samp = [t for t in unique_tests if any(str(t).endswith(s) for s in samp_suffixes)]
+        st.caption(f"Controles previstos: {_format_list_preview(prev_ctrl)}")
+        st.caption(f"Muestras previstas: {_format_list_preview(prev_samp)}")
+        if st.button("Clasificar por sufijos", key=f"btn_suff_{file_key}"):
+            if not ctrl_suffixes and not samp_suffixes:
+                st.warning("Define al menos un sufijo para clasificar.")
+            else:
+                result = classify_tests_by_suffixes(long_df, ctrl_suffixes, samp_suffixes)
+                ctrl_df, samp_df = _store_classification(state, result.controles, result.muestras)
+                state["ctrl_suffix"] = ctrl_suffix
+                state["samp_suffix"] = samp_suffix
+                st.success(
+                    f"Clasificación aplicada → controles: {len(ctrl_df)}, muestras: {len(samp_df)}"
+                )
 
-app_state = AppSessionState.load()
+    with tab_regex:
+        col_regex_ctrl, col_regex_samp = st.columns(2)
+        with col_regex_ctrl:
+            ctrl_regex = st.text_input(
+                "Regex controles",
+                value=state.get("ctrl_regex", ""),
+            )
+        with col_regex_samp:
+            samp_regex = st.text_input(
+                "Regex muestras",
+                value=state.get("samp_regex", ""),
+            )
+        try:
+            ctrl_pattern = re.compile(ctrl_regex) if ctrl_regex else None
+        except re.error:
+            ctrl_pattern = None
+            st.warning("Regex de controles inválido, actualízalo antes de clasificar.")
+        try:
+            samp_pattern = re.compile(samp_regex) if samp_regex else None
+        except re.error:
+            samp_pattern = None
+            st.warning("Regex de muestras inválido, actualízalo antes de clasificar.")
+        prev_ctrl = [t for t in unique_tests if ctrl_pattern and ctrl_pattern.search(str(t))]
+        prev_samp = [t for t in unique_tests if samp_pattern and samp_pattern.search(str(t))]
+        st.caption(f"Controles previstos: {_format_list_preview(prev_ctrl)}")
+        st.caption(f"Muestras previstas: {_format_list_preview(prev_samp)}")
+        if st.button("Clasificar por regex", key=f"btn_regex_{file_key}"):
+            if not ctrl_regex and not samp_regex:
+                st.warning("Introduce al menos un patrón regex para clasificar.")
+            else:
+                try:
+                    result = classify_tests_by_regex(long_df, ctrl_regex, samp_regex)
+                except re.error as exc:  # type: ignore[name-defined]
+                    st.error(f"Regex inválido: {exc}")
+                else:
+                    ctrl_df, samp_df = _store_classification(state, result.controles, result.muestras)
+                    state["ctrl_regex"] = ctrl_regex
+                    state["samp_regex"] = samp_regex
+                    st.success(
+                        f"Clasificación aplicada → controles: {len(ctrl_df)}, muestras: {len(samp_df)}"
+                    )
 
-st.title("Análisis de datos de expresión diferencial por qPCR")
-st.write(
-    "De datos de qPCR a redes génicas sustentadas en evidencia bibliográfica "
-    "para profundizar en la comprensión de las vías oncológicas."
-)
+    with tab_manual:
+        col_sel_ctrl, col_sel_samp = st.columns(2)
+        with col_sel_ctrl:
+            selected_ctrl = st.multiselect(
+                "Pruebas controles",
+                options=unique_tests,
+                default=state.get("selected_ctrl", []),
+            )
+        with col_sel_samp:
+            selected_samp = st.multiselect(
+                "Pruebas muestras",
+                options=unique_tests,
+                default=state.get("selected_samp", []),
+            )
+        if st.button("Clasificar selección", key=f"btn_sel_{file_key}"):
+            if not selected_ctrl and not selected_samp:
+                st.warning("Selecciona al menos una prueba en cualquiera de los grupos.")
+            else:
+                result = classify_tests_by_selection(long_df, selected_ctrl, selected_samp)
+                ctrl_df, samp_df = _store_classification(state, result.controles, result.muestras)
+                state["selected_ctrl"] = selected_ctrl
+                state["selected_samp"] = selected_samp
+                st.success(
+                    f"Clasificación aplicada → controles: {len(ctrl_df)}, muestras: {len(samp_df)}"
+                )
 
-# -----------------------------------------------------------------------------
-# Funciones auxiliares
-# -----------------------------------------------------------------------------
-def _safe_concat(*dfs: Optional[pd.DataFrame]) -> pd.DataFrame:
-    """Une varios DataFrames ignorando los que estén vacíos o None."""
-    parts = [d for d in dfs if d is not None and isinstance(d, pd.DataFrame) and not d.empty]
-    return pd.concat(parts, ignore_index=True).drop_duplicates() if parts else pd.DataFrame()
+    st.button(
+        "Limpiar clasificación",
+        key=f"btn_clear_{file_key}",
+        on_click=_clear_classification_state,
+        kwargs={"state": state},
+    )
 
-# -----------------------------------------------------------------------------
-# Logging
-# Configure a basic logger once con el nivel definido en AppConfig
-if "_log_configured" not in st.session_state:
-    level_name = APP_CONFIG.log_level.upper() if APP_CONFIG.log_level else "INFO"
-    level = getattr(logging, level_name, logging.INFO)
-    logging.basicConfig(level=level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    st.session_state["_log_configured"] = True
-logger = logging.getLogger("cgs.web_app")
+    controles_df = state.get("controles_df")
+    muestras_df = state.get("muestras_df")
+    if not isinstance(controles_df, pd.DataFrame):
+        controles_df = pd.DataFrame()
+    if not isinstance(muestras_df, pd.DataFrame):
+        muestras_df = pd.DataFrame()
+    return controles_df, muestras_df
 
-# -----------------------------------------------------------------------------
-# Sidebar: parámetros de entrada y configuración
-# -----------------------------------------------------------------------------
-with st.sidebar:
-    st.header("1) Datos de entrada (Excel qPCR)")
-    uploaded = st.file_uploader("Archivo (.xlsx, .xls)", type=["xlsx", "xls"])
-    sheet: Optional[str] = None
-    if uploaded is not None:
-        uploaded.seek(0)  # Reinicia el buffer
-        if uploaded.name.lower().endswith((".xlsx", ".xls")):
+
+def _quality_summary(metrics: QualityMetrics) -> None:
+    cols = st.columns(4)
+    cols[0].metric("Genes controles", len(metrics.ctrl_targets))
+    cols[1].metric("Genes muestras", len(metrics.sample_targets))
+    cols[2].metric("Genes comunes", len(metrics.common_targets))
+    cols[3].metric(
+        "NaN Ct (ctrl/mues)",
+        f"{metrics.ctrl_nan_ratio:.0%} / {metrics.sample_nan_ratio:.0%}"
+    )
+
+
+def _build_expression_summary(
+    diff: DifferentialExpressionResult,
+    alpha: float,
+) -> pd.DataFrame:
+    stats = diff.stats.copy()
+    if stats.empty:
+        return pd.DataFrame(
+            columns=[
+                "target",
+                "fold_change",
+                "log2_fc",
+                "mean_ctrl",
+                "mean_case",
+                "q",
+                "bootstrap_freq",
+                "nivel_expresion",
+                "significativo",
+            ]
+        )
+    df = stats.rename(columns={"gene": "target"}).copy()
+    if "bootstrap_freq" not in df.columns:
+        df["bootstrap_freq"] = diff.bootstrap_freq.reindex(df["target"]).fillna(0.0).values
+    df["log2_fc"] = df["mean_case"] - df["mean_ctrl"]
+    df["fold_change"] = np.power(2.0, df["log2_fc"])
+    df["nivel_expresion"] = pd.cut(
+        df["fold_change"],
+        bins=[-np.inf, 1.0, 2.0, np.inf],
+        labels=["subexpresado", "estable", "sobreexpresado"],
+        right=False,
+    )
+    df["significativo"] = df["q"] < float(alpha)
+    ordered = df.sort_values(["significativo", "q"], ascending=[False, True])
+    columns = [
+        "target",
+        "fold_change",
+        "log2_fc",
+        "mean_ctrl",
+        "mean_case",
+        "q",
+        "bootstrap_freq",
+        "nivel_expresion",
+        "significativo",
+    ]
+    return ordered[columns]
+
+
+def _render_advanced_results(
+    result: AdvancedNormalizationResult,
+    params: AdvancedNormalizationParams,
+) -> pd.DataFrame:
+    st.subheader("Resultados de la normalización avanzada")
+    summary = result.summary()
+    if summary:
+        metric_cols = st.columns(len(summary))
+        for (label, value), col in zip(summary.items(), metric_cols):
+            with col:
+                display = ", ".join(map(str, value)) if isinstance(value, (list, tuple)) else value
+                st.metric(label.replace("_", " "), display)
+
+    ref_res = result.reference_result
+    if not ref_res.candidate_scores.empty:
+        candidates = ref_res.candidate_scores.copy()
+        candidates["refs"] = candidates["refs"].apply(lambda ref: ", ".join(ref))
+        st.markdown("**Ranking de combinaciones candidata**")
+        st.dataframe(candidates[["refs", "score"]].head(30))
+        st.download_button(
+            "Descargar ranking (CSV)",
+            candidates.to_csv(index=False),
+            file_name="normalizacion_avanzada_candidatos.csv",
+            use_container_width=True,
+        )
+
+    st.markdown("**Tabla normalizada (df_norm)**")
+    st.dataframe(result.df_norm.head(100))
+    st.download_button(
+        "Descargar df_norm (CSV)",
+        result.df_norm.to_csv(index=False),
+        file_name="normalizacion_avanzada_df_norm.csv",
+        use_container_width=True,
+    )
+
+    stats_df = result.differential.stats.copy()
+    if not stats_df.empty:
+        st.markdown("**Estadísticas diferenciales**")
+        st.dataframe(stats_df.head(50))
+        st.download_button(
+            "Descargar estadísticas (CSV)",
+            stats_df.to_csv(index=False),
+            file_name="normalizacion_avanzada_stats.csv",
+            use_container_width=True,
+        )
+    else:
+        st.info("No se obtuvieron estadísticas significativas con los parámetros actuales.")
+
+    heat_df = result.df_heatmap
+    if isinstance(heat_df, pd.DataFrame) and not heat_df.empty:
+        try:
+            import plotly.express as px
+
+            fig = px.imshow(
+                heat_df,
+                color_continuous_scale=[[0.0, "#2c7bb6"], [0.5, "#ffffb2"], [1.0, "#d7191c"]],
+                aspect="auto",
+                origin="upper",
+                color_continuous_midpoint=0,
+                labels={"x": "Test", "y": "Gen", "color": "log2 Expr."},
+            )
+            fig.update_layout(title="Matriz log2 de expresión relativa")
+            st.plotly_chart(fig, use_container_width=True)
+        except Exception:
+            st.dataframe(heat_df)
+
+    expr_summary = _build_expression_summary(result.differential, params.alpha)
+    if expr_summary.empty:
+        st.info("No se generó un resumen de expresión. Ajusta parámetros o revisa la clasificación.")
+    else:
+        st.markdown("**Resumen de expresión diferenciada**")
+        st.dataframe(expr_summary.head(50))
+        st.download_button(
+            "Descargar resumen (CSV)",
+            expr_summary.to_csv(index=False),
+            file_name="normalizacion_avanzada_resumen_expresion.csv",
+            use_container_width=True,
+        )
+        counts = expr_summary["nivel_expresion"].value_counts()
+        st.success(
+            "Resultados: "
+            f"{counts.get('subexpresado', 0)} subexpresados · "
+            f"{counts.get('estable', 0)} estables · "
+            f"{counts.get('sobreexpresado', 0)} sobreexpresados"
+        )
+    return expr_summary
+
+
+def _render_ensembl_section(expr_summary: pd.DataFrame) -> None:
+    st.subheader("Anotación Ensembl (IDs génicos)")
+    if expr_summary is None or expr_summary.empty:
+        st.info("Ejecuta la normalización avanzada para generar un listado de genes.")
+        return
+
+    genes_df = (
+        expr_summary[["target", "nivel_expresion", "fold_change"]]
+        .drop_duplicates(subset=["target"])
+        .sort_values("target")
+        .reset_index(drop=True)
+    )
+    if genes_df.empty:
+        st.info("No hay genes disponibles para anotar.")
+        return
+
+    genes_key = ",".join(genes_df["target"].astype(str).tolist())
+    session_key = st.session_state.get("_ensembl_genes_key")
+    cached_df = st.session_state.get("_ensembl_df")
+
+    col_left, col_right = st.columns([1, 1])
+    with col_left:
+        workers = st.number_input(
+            "Hilos simultáneos",
+            min_value=1,
+            max_value=16,
+            value=3,
+            step=1,
+            help="Número máximo de hilos para consultas Ensembl.",
+        )
+        need_refresh = (
+            session_key != genes_key
+            or not isinstance(cached_df, pd.DataFrame)
+            or cached_df.empty
+        )
+        if need_refresh:
+            if st.button("Consultar Ensembl", key="btn_run_ensembl"):
+                with st.spinner("Consultando Ensembl…"):
+                    annotated = _annotate_ensembl_cached(
+                        genes_df.to_csv(index=False),
+                        max_workers=int(workers),
+                    )
+                st.session_state["_ensembl_df"] = annotated
+                st.session_state["_ensembl_genes_key"] = genes_key
+                cached_df = annotated
+        else:
+            st.success("Usando anotación almacenada para esta lista de genes.")
+            if st.button("Recalcular anotación", key="btn_refresh_ensembl"):
+                with st.spinner("Consultando Ensembl…"):
+                    annotated = _annotate_ensembl_cached(
+                        genes_df.to_csv(index=False),
+                        max_workers=int(workers),
+                    )
+                st.session_state["_ensembl_df"] = annotated
+                st.session_state["_ensembl_genes_key"] = genes_key
+                cached_df = annotated
+
+    if isinstance(cached_df, pd.DataFrame) and not cached_df.empty:
+        annotated = cached_df.copy()
+        annotated["has_desc"] = (
+            annotated["description"].fillna("").astype(str).str.strip().ne("")
+        )
+        tot = len(annotated)
+        with col_right:
+            st.metric("Genes consultados", tot)
+            st.metric("Con Ensembl ID", int((annotated["ensembl_id"] != "Not found").sum()))
+            st.metric("Con descripción", int(annotated["has_desc"].sum()))
+
+        st.dataframe(annotated)
+        st.download_button(
+            "Descargar anotaciones (CSV)",
+            annotated.to_csv(index=False),
+            file_name="ensembl_anotado.csv",
+            use_container_width=True,
+        )
+
+        st.markdown("**Enlaces rápidos**")
+        top = annotated.head(100)
+        for _, row in top.iterrows():
+            gene = str(row.get("target", ""))
+            eid = str(row.get("ensembl_id", ""))
+            desc = str(row.get("description", ""))
+            lvl = str(row.get("nivel_expresion", ""))
+            if eid and eid != "Not found":
+                url = f"https://www.ensembl.org/Homo_sapiens/Gene/Summary?g={eid}"
+                st.markdown(f"- [{gene}]({url}) · {lvl} — {desc}")
+            else:
+                st.markdown(f"- {gene} · {lvl} — {desc}")
+    else:
+        st.info("Ejecuta la consulta para obtener IDs Ensembl.")
+
+
+def main() -> None:
+    st.set_page_config(
+        page_title="CancerGeneSignatures",
+        page_icon="🧬",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+
+    warnings: List[str] = []
+    try:
+        secrets_source = st.secrets  # type: ignore[attr-defined]
+    except Exception:
+        secrets_source = None
+
+    try:
+        app_config = load_app_config(
+            secrets=secrets_source if secrets_source is not None else None,
+            warn=warnings.append,
+        )
+    except ConfigError as exc:
+        st.error(f"Error cargando configuración: {exc}")
+        st.stop()
+        return
+
+    if "_log_configured" not in st.session_state:
+        level_name = getattr(app_config, "log_level", "INFO")
+        level = getattr(logging, str(level_name).upper(), logging.INFO)
+        logging.basicConfig(
+            level=level,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        )
+        st.session_state["_log_configured"] = True
+    logger = logging.getLogger("cgs.web_app")
+
+    for warning_msg in warnings:
+        st.warning(warning_msg)
+
+    app_state = AppSessionState.load()
+
+    st.title("Flujo qPCR → Normalización avanzada → IDs Ensembl")
+    st.write(
+        "Carga tu hoja qPCR, clasifica controles y muestras, ejecuta la normalización avanzada "
+        "y obtén IDs Ensembl con descripciones asociadas."
+    )
+
+    with st.sidebar:
+        st.header("1) Datos de entrada")
+        uploaded = st.file_uploader("Archivo Excel", type=["xlsx", "xls"])
+        sheet: Optional[str] = None
+        if uploaded is not None:
+            uploaded.seek(0)
             try:
                 sheets = list_excel_sheets(uploaded)
-                if sheets:
-                    sheet = st.selectbox("Hoja de Excel", options=sheets, index=0)
-            except Exception as e:
-                st.warning(f"No se pudieron listar hojas: {e}")
+            except Exception as exc:
+                st.warning(f"No se pudieron listar hojas: {exc}")
+                sheets = []
+            if sheets:
+                sheet = st.selectbox("Hoja", options=sheets, index=0)
 
-    st.header("2) Parámetros del estudio")
-    cancer_type = st.selectbox("Tipo de cáncer", MENU.cancer_types, index=0)
-    context_options = [ctx.label for ctx in MENU.contexts]
-    context_default_idx = context_options.index(app_state.context_label) if app_state.context_label in context_options else 0
-    context_sel_label = st.selectbox("Contexto", context_options, index=context_default_idx)
-    st.header("3) Política 'Undetermined/ND'")
-    und_options = ["nan", "ctmax", "value"]
-    und_default_idx = und_options.index(app_state.undetermined.policy) if app_state.undetermined.policy in und_options else 0
-    und_policy = st.selectbox(
-        "Cómo tratar valores 'Undetermined' (ND)",
-        options=und_options,
-        index=und_default_idx,
-        help="\n- nan: deja como NaN (se puede imputar después).\n- ctmax: usa el Ct máximo observado por columna.\n- value: usa un valor fijo (p. ej., 40).",
-    )
-    und_value = st.number_input(
-        "Valor fijo para 'value'",
-        value=float(app_state.undetermined.value),
-        min_value=0.0,
-        max_value=100.0,
-        step=0.5,
-    )
+        st.header("2) Valores 'Undetermined/ND'")
+        und_policy = st.selectbox(
+            "Política",
+            options=["nan", "ctmax", "value"],
+            index=["nan", "ctmax", "value"].index(app_state.undetermined.policy)
+            if app_state.undetermined.policy in {"nan", "ctmax", "value"}
+            else 0,
+        )
+        und_value = st.number_input(
+            "Valor fijo (si aplica)",
+            value=float(app_state.undetermined.value),
+            min_value=0.0,
+            max_value=100.0,
+            step=0.5,
+        )
 
-    # Preferencia global de gráficos: excluir genes 'estables'
-    exclude_stable = st.checkbox(
-        "Excluir genes 'estables' en gráficos",
-        value=bool(app_state.exclude_stable),
-        help="Cuando está activado, los gráficos omiten los genes clasificados como 'estables'.",
-    )
-    run_btn = st.button("Procesar archivo", type="primary")
+        st.header("3) Opciones del estudio")
+        cancer_types = app_config.menu.cancer_types
+        if not cancer_types:
+            st.error("El menú de configuración no define tipos de cáncer disponibles.")
+            cancer_types = ["Sin definir"]
+        default_cancer = (
+            cancer_types.index(app_state.cancer_type)
+            if app_state.cancer_type in cancer_types
+            else 0
+        )
+        cancer_selected = st.selectbox(
+            "Tipo de cáncer",
+            options=cancer_types,
+            index=default_cancer,
+        )
 
-app_state.undetermined.policy = und_policy
-app_state.undetermined.value = float(und_value)
-app_state.context_label = context_sel_label
-app_state.exclude_stable = bool(exclude_stable)
-app_state.persist()
+        context_options = [ctx.label for ctx in app_config.menu.contexts]
+        default_context_idx = (
+            context_options.index(app_state.context_label)
+            if app_state.context_label in context_options
+            else 0
+        )
+        context_selected = st.selectbox(
+            "Contexto biológico",
+            options=context_options,
+            index=default_context_idx,
+        )
 
-# -----------------------------------------------------------------------------
-# Carga de archivo y preprocesamiento
-# -----------------------------------------------------------------------------
-df_loaded: Optional[LoadResult] = app_state.df_loaded
-if uploaded is not None and run_btn:
-    try:
-        uploaded.seek(0)
-        # Primero intentamos con coordenadas fijas (A4/B4)
+        run_btn = st.button("Procesar archivo", type="primary")
+
+    app_state.undetermined.policy = und_policy
+    app_state.undetermined.value = float(und_value)
+    app_state.cancer_type = str(cancer_selected)
+    app_state.context_label = str(context_selected)
+    app_state.persist()
+
+    df_loaded: Optional[LoadResult] = app_state.df_loaded
+
+    if uploaded is not None and run_btn:
         try:
+            uploaded.seek(0)
             df_loaded = parse_qpcr_wide(
                 uploaded,
                 sheet_name=sheet,
                 header_mode="coords",
-                header_row_idx=3,  # A4/B4
+                header_row_idx=3,
                 well_col_idx=0,
                 target_col_idx=1,
                 undetermined_policy=und_policy,
                 undetermined_value=float(und_value),
             )
-        except TypeError:
-            # Compatibilidad con versiones antiguas sin nuevos parámetros
-            df_loaded = parse_qpcr_wide(uploaded, sheet_name=sheet)
-        logger.info(f"Archivo cargado: name={df_loaded.source_name}, sheet={df_loaded.sheet_name}, shape={df_loaded.df.shape}")
-        # Persistir en sesión para evitar perderlo al enviar el formulario
-        app_state.df_loaded = df_loaded
-        app_state.persist()
-    except Exception as e:
-        st.warning(f"Encabezado A4/B4 no válido o firma previa detectada ({e}). Probando detección automática…")
-        logger.warning("Fallo modo coords; intentando auto")
-        try:
+        except Exception as exc:
+            st.warning(f"Cabecera esperada no encontrada ({exc}); intentando detección automática…")
             uploaded.seek(0)
             try:
                 df_loaded = parse_qpcr_wide(
@@ -333,1561 +697,187 @@ if uploaded is not None and run_btn:
                     undetermined_policy=und_policy,
                     undetermined_value=float(und_value),
                 )
-            except TypeError:
-                df_loaded = parse_qpcr_wide(uploaded, sheet_name=sheet)
+            except Exception as exc_auto:
+                st.error(f"No se pudo leer el archivo: {exc_auto}")
+                logger.exception("Fallo al parsear archivo", exc_info=exc_auto)
+                df_loaded = None
+        if df_loaded is not None:
             app_state.df_loaded = df_loaded
             app_state.persist()
-            logger.info("Carga con modo auto exitosa")
-        except Exception as e2:
-            st.error(f"Error al cargar el archivo: {e2}")
-            logger.exception("Fallo al cargar archivo (auto)")
+            logger.info(
+                "Archivo cargado: %s | hoja=%s | forma=%s",
+                df_loaded.source_name,
+                df_loaded.sheet_name,
+                df_loaded.df.shape,
+            )
 
-# -----------------------------------------------------------------------------
-# Vista previa, análisis y gráficas
-# -----------------------------------------------------------------------------
-if df_loaded is not None:
-    logger.debug("Usando df_loaded desde sesión para renderizado")
-    st.subheader("Vista previa de datos (qPCR)")
-    st.caption(f"Archivo: {df_loaded.source_name} | Hoja: {df_loaded.sheet_name or '-'} | Forma: {df_loaded.df.shape}")
+    if df_loaded is None:
+        st.info("Carga un archivo Excel y pulsa 'Procesar archivo' para comenzar.")
+        return
+
+    st.subheader("Vista previa de datos")
+    st.caption(
+        f"Archivo: {df_loaded.source_name} | Hoja: {df_loaded.sheet_name or '-'} | "
+        f"Forma: {df_loaded.df.shape}"
+    )
     st.dataframe(df_loaded.df.head(20))
 
-    # Mostrar parámetros elegidos desde menú
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.info(f"Contexto: {context_sel_label}")
-    with c2:
-        st.info("Método de normalización: selecciona en el paso 3")
-    with c3:
-        st.info(f"Tipo cáncer: {cancer_type}")
-
-    # Construir dataframe largo y filtrar controles de máquina por defecto
-    long_df, controls_warning = build_long_table(df_loaded)
-    if controls_warning:
-        st.warning(f"No se pudieron filtrar controles de máquina: {controls_warning}")
-        logger.warning(f"No se filtraron controles de máquina: {controls_warning}")
-
-    # Resultados de la extracción (análogos al notebook)
-    st.subheader("Resultados de la extracción")
+    st.subheader("Resumen de extracción")
     try:
         extraction = summarize_extraction(df_loaded)
-        st.markdown("- Nombres de las pruebas realizadas")
-        st.info(f"Total {len(extraction.sample_names)}: {', '.join(extraction.sample_names)}")
-        st.markdown("- Genes objetivo analizados")
-        st.info(f"Total {len(extraction.genes)}: {', '.join(extraction.genes)}")
-        st.markdown("- Pozos detectados")
-        st.info(f"Total {len(extraction.wells)}: {', '.join(extraction.wells)}")
-        logger.debug(
-            "Extracción -> tests=%s, genes=%s, pozos=%s",
-            len(extraction.sample_names),
-            len(extraction.genes),
-            len(extraction.wells),
+        st.info(
+            f"Pruebas detectadas ({len(extraction.sample_names)}): "
+            f"{', '.join(extraction.sample_names)}"
         )
-    except Exception as e:
-        st.warning(f"No se pudo mostrar el resumen de extracción: {e}")
-        logger.warning(f"Fallo en resumen de extracción: {e}")
-
-    # Clasificación con mejor UX: prefijos, sufijos, regex o selección manual
-    st.subheader("Clasificación de controles y muestras")
-    st.caption("Clasifica por prefijos/sufijos/regex o selecciona directamente.")
-
-    file_key = f"assign_{df_loaded.source_name}:{df_loaded.sheet_name}"
-    state = st.session_state.setdefault(file_key, {})
-
-    unique_tests = sorted(long_df['test'].astype(str).dropna().unique().tolist())
-
-    tab_pref, tab_suff, tab_regex, tab_select = st.tabs(["Por prefijos", "Por sufijos", "Por regex", "Selección manual"])
-
-    with tab_pref:
-        sugg = suggest_name_affixes(unique_tests, top_n=10)
-        top_prefixes = [p for p, _ in (sugg.get('prefixes') or [])]
-        colp1, colp2 = st.columns(2)
-        with colp1:
-            ctrl_suggest = st.selectbox("Sugerencia (controles)", options=["(vacío)"] + top_prefixes, index=0)
-            ctrl_default = "" if ctrl_suggest == "(vacío)" else ctrl_suggest
-            ctrl_prefix = st.text_input("Prefijo controles", value=state.get('ctrl_prefix', ctrl_default))
-        with colp2:
-            samp_suggest = st.selectbox("Sugerencia (muestras)", options=["(vacío)"] + top_prefixes, index=0)
-            samp_default = "" if samp_suggest == "(vacío)" else samp_suggest
-            samp_prefix = st.text_input("Prefijo muestras", value=state.get('samp_prefix', samp_default))
-        # Vista previa
-        prev_ctrl = [t for t in unique_tests if ctrl_prefix and str(t).startswith(ctrl_prefix)]
-        prev_samp = [t for t in unique_tests if samp_prefix and str(t).startswith(samp_prefix)]
-        st.caption(f"Previa → Controles: {len(prev_ctrl)} | Muestras: {len(prev_samp)}")
-        if prev_ctrl:
-            st.caption("Controles: " + ", ".join(prev_ctrl[:20]) + (" …" if len(prev_ctrl) > 20 else ""))
-        if prev_samp:
-            st.caption("Muestras: " + ", ".join(prev_samp[:20]) + (" …" if len(prev_samp) > 20 else ""))
-        submitted_pref = st.button("Clasificar por prefijos", type="primary")
-
-    with tab_suff:
-        sugg = suggest_name_affixes(unique_tests, top_n=10)
-        top_suffixes = [s for s, _ in (sugg.get('suffixes') or [])]
-        cols1, cols2 = st.columns(2)
-        with cols1:
-            ctrl_suff = st.text_input("Sufijos controles (coma-sep.)", value=state.get('ctrl_suff', ''))
-        with cols2:
-            samp_suff = st.text_input("Sufijos muestras (coma-sep.)", value=state.get('samp_suff', ''))
-        st.caption("Sugerencias sufijos: " + ", ".join(top_suffixes))
-        suff_ctrl_list = [s.strip() for s in ctrl_suff.split(',') if s.strip()]
-        suff_samp_list = [s.strip() for s in samp_suff.split(',') if s.strip()]
-        prev_ctrl = [t for t in unique_tests if any(str(t).endswith(s) for s in suff_ctrl_list)]
-        prev_samp = [t for t in unique_tests if any(str(t).endswith(s) for s in suff_samp_list)]
-        st.caption(f"Previa → Controles: {len(prev_ctrl)} | Muestras: {len(prev_samp)}")
-        if prev_ctrl:
-            st.caption("Controles: " + ", ".join(prev_ctrl[:20]) + (" …" if len(prev_ctrl) > 20 else ""))
-        if prev_samp:
-            st.caption("Muestras: " + ", ".join(prev_samp[:20]) + (" …" if len(prev_samp) > 20 else ""))
-        submitted_suff = st.button("Clasificar por sufijos", type="primary")
-
-    with tab_regex:
-        colr1, colr2 = st.columns(2)
-        with colr1:
-            ctrl_re = st.text_input("Regex controles", value=state.get('ctrl_re', ''))
-        with colr2:
-            samp_re = st.text_input("Regex muestras", value=state.get('samp_re', ''))
-        try:
-            prev_ctrl = [t for t in unique_tests if (ctrl_re and re.search(ctrl_re, str(t)) is not None)]
-        except Exception:
-            prev_ctrl = []
-        try:
-            prev_samp = [t for t in unique_tests if (samp_re and re.search(samp_re, str(t)) is not None)]
-        except Exception:
-            prev_samp = []
-        st.caption(f"Previa → Controles: {len(prev_ctrl)} | Muestras: {len(prev_samp)}")
-        if prev_ctrl:
-            st.caption("Controles: " + ", ".join(prev_ctrl[:20]) + (" …" if len(prev_ctrl) > 20 else ""))
-        if prev_samp:
-            st.caption("Muestras: " + ", ".join(prev_samp[:20]) + (" …" if len(prev_samp) > 20 else ""))
-        submitted_regex = st.button("Clasificar por regex", type="primary")
-
-    with tab_select:
-        colm1, colm2 = st.columns(2)
-        with colm1:
-            selected_ctrl = st.multiselect("Pruebas de controles", options=unique_tests, default=state.get('selected_ctrl', []))
-        with colm2:
-            selected_samp = st.multiselect("Pruebas de muestras", options=unique_tests, default=state.get('selected_samp', []))
-        submitted_sel = st.button("Clasificar por selección", type="secondary")
-
-    clear_cls = st.button("Limpiar clasificación")
-    if clear_cls:
-        for k in ('ctrl_prefix','samp_prefix','selected_ctrl','selected_samp','controles_df','muestras_df'):
-            state.pop(k, None)
-        logger.info("Clasificación limpiada por el usuario")
-
-    controles_df = state.get('controles_df', pd.DataFrame())
-    muestras_df = state.get('muestras_df', pd.DataFrame())
-
-    # Utilidad local para resolver colisiones
-    def _resolve_collisions(ctrl_df: pd.DataFrame, samp_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-        collisions = detect_collisions(ctrl_df, samp_df)
-        if not collisions:
-            return ctrl_df, samp_df
-        preview = ', '.join(collisions[:10]) + (' …' if len(collisions) > 10 else '')
-        st.warning(f"Colisiones: {len(collisions)} pruebas aparecen en ambos grupos → {preview}")
-        choice = st.radio(
-            "Resolver colisiones",
-            ["priorizar controles", "priorizar muestras", "excluir colisiones"],
-            horizontal=True,
-            index=0,
+        st.info(
+            f"Genes objetivo ({len(extraction.genes)}): {', '.join(extraction.genes)}"
         )
-        return apply_collision_strategy(ctrl_df, samp_df, collisions, choice)
-
-    if submitted_pref:
-        if not ctrl_prefix and not samp_prefix:
-            st.warning("Debes ingresar al menos un prefijo (controles o muestras)")
-        result = classify_tests_by_prefixes(long_df, [ctrl_prefix], [samp_prefix])
-        pref_ctrl_df, pref_samp_df = _resolve_collisions(result.controles, result.muestras)
-        state['ctrl_prefix'] = ctrl_prefix
-        state['samp_prefix'] = samp_prefix
-        state['controles_df'] = pref_ctrl_df
-        state['muestras_df'] = pref_samp_df
-        controles_df = pref_ctrl_df
-        muestras_df = pref_samp_df
-        logger.info(f"Clasificación por prefijos: ctrl='{ctrl_prefix}' -> {len(controles_df)} filas, samp='{samp_prefix}' -> {len(muestras_df)} filas")
-        if controles_df.empty or muestras_df.empty:
-            st.warning("Alguna de las categorías resultó vacía. Revisa los prefijos o usa 'Selección manual'.")
-
-    if 'submitted_suff' in locals() and submitted_suff:
-        result = classify_tests_by_suffixes(long_df, suff_ctrl_list, suff_samp_list)
-        pref_ctrl_df, pref_samp_df = _resolve_collisions(result.controles, result.muestras)
-        state['ctrl_suff'] = ctrl_suff
-        state['samp_suff'] = samp_suff
-        state['controles_df'] = pref_ctrl_df
-        state['muestras_df'] = pref_samp_df
-        controles_df = pref_ctrl_df
-        muestras_df = pref_samp_df
-        logger.info(f"Clasificación por sufijos: ctrl={suff_ctrl_list} -> {len(controles_df)} filas, samp={suff_samp_list} -> {len(muestras_df)} filas")
-        if controles_df.empty or muestras_df.empty:
-            st.warning("Alguna de las categorías resultó vacía. Revisa los sufijos o usa otra pestaña.")
-
-    if 'submitted_regex' in locals() and submitted_regex:
-        try:
-            result = classify_tests_by_regex(long_df, ctrl_re, samp_re)
-            pref_ctrl_df, pref_samp_df = _resolve_collisions(result.controles, result.muestras)
-            state['ctrl_re'] = ctrl_re
-            state['samp_re'] = samp_re
-            state['controles_df'] = pref_ctrl_df
-            state['muestras_df'] = pref_samp_df
-            controles_df = pref_ctrl_df
-            muestras_df = pref_samp_df
-            logger.info(f"Clasificación por regex: ctrl='{ctrl_re}' -> {len(controles_df)} filas, samp='{samp_re}' -> {len(muestras_df)} filas")
-            if controles_df.empty or muestras_df.empty:
-                st.warning("Alguna de las categorías resultó vacía. Revisa los patrones o usa otra pestaña.")
-        except re.error as ex:
-            st.error(f"Regex inválido: {ex}")
-
-    if submitted_sel:
-        result = classify_tests_by_selection(long_df, selected_ctrl, selected_samp)
-        collisions = detect_collisions(result.controles, result.muestras)
-        if collisions:
-            preview = ', '.join(collisions[:10]) + (' …' if len(collisions) > 10 else '')
-            st.warning(f"Hay pruebas en ambas categorías: {preview}")
-        sel_ctrl_df, sel_samp_df = result.controles, result.muestras
-        state['selected_ctrl'] = selected_ctrl
-        state['selected_samp'] = selected_samp
-        state['controles_df'] = sel_ctrl_df
-        state['muestras_df'] = sel_samp_df
-        controles_df = sel_ctrl_df
-        muestras_df = sel_samp_df
-        logger.info(f"Clasificación por selección: ctrl={len(selected_ctrl)} pruebas -> {len(controles_df)} filas, samp={len(selected_samp)} pruebas -> {len(muestras_df)} filas")
-        if controles_df.empty or muestras_df.empty:
-            st.warning("Alguna de las categorías quedó vacía. Selecciona al menos una prueba en cada lado.")
-
-    st.write("Controles clasificados:", len(controles_df))
-    st.write("Muestras clasificadas:", len(muestras_df))
-
-    extras: dict[str, str] = {}
-    ok_for_fc = False
-    ready_for_fc = False
-    metrics: Optional[QualityMetrics] = None
-    imputation_output = None
-
-    if not controles_df.empty or not muestras_df.empty:
-        st.subheader("Resumen de clasificación")
-        ok_for_fc = True
-        for tipo, df_tipo in [("Controles", controles_df), ("Muestras", muestras_df)]:
-            if not df_tipo.empty:
-                uniq = df_tipo['test'].astype(str).unique().tolist()
-                st.success(f"{tipo}: {len(uniq)} pruebas → {', '.join(uniq)}")
-            else:
-                st.warning(f"No se detectaron {tipo.lower()} con los criterios actuales.")
-
-        impute_by_cols = [c for c in ['plate_id', 'target'] if c in controles_df.columns and c in muestras_df.columns]
-        policy_applied = app_state.undetermined.policy
-        try:
-            imputation_output = apply_undetermined_policy(
-                controles_df,
-                muestras_df,
-                policy=policy_applied,
-                fixed_value=float(app_state.undetermined.value),
-                group_columns=impute_by_cols or None,
-            )
-        except FoldChangePreparationError as exc:
-            st.error(f"Imputación fallida: {exc}")
-            controles_df = pd.DataFrame()
-            muestras_df = pd.DataFrame()
-            ok_for_fc = False
-        else:
-            controles_df = imputation_output.controles
-            muestras_df = imputation_output.muestras
-            if imputation_output.message:
-                if imputation_output.policy == 'nan':
-                    st.info(imputation_output.message)
-                else:
-                    st.success(imputation_output.message)
-
-            if not imputation_output.summary.empty:
-                counts = imputation_output.summary['grupo'].value_counts()
-                st.metric("Total imputaciones", len(imputation_output.summary))
-                st.caption(
-                    f"Controles imputados: {int(counts.get('control', 0))} · "
-                    f"Muestras imputadas: {int(counts.get('muestra', 0))}"
-                )
-                cols_show = [
-                    c for c in ['grupo', 'test', 'target', 'plate_id', 'well', 'ct', 'ct_imputed']
-                    if c in imputation_output.summary.columns
-                ]
-                st.dataframe(imputation_output.summary[cols_show])
-                extras['ct_imputaciones.csv'] = imputation_output.summary.to_csv(index=False)
-                st.download_button(
-                    label="Descargar detalle de imputaciones",
-                    data=imputation_output.summary.to_csv(index=False),
-                    file_name="detalle_imputaciones.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
-            elif imputation_output and imputation_output.policy != 'nan':
-                st.info("No se detectaron filas que requieran imputación con la política seleccionada.")
-
-        if not controles_df.empty and not muestras_df.empty:
-            metrics = compute_quality_metrics(controles_df, muestras_df)
-            st.subheader("Calidad de datos (post-imputación)")
-            mqa1, mqa2, mqa3, mqa4 = st.columns(4)
-            with mqa1:
-                st.metric("Genes (controles)", len(metrics.ctrl_targets))
-            with mqa2:
-                st.metric("Genes (muestras)", len(metrics.sample_targets))
-            with mqa3:
-                st.metric("Genes en común", len(metrics.common_targets))
-            with mqa4:
-                st.metric(
-                    "NaN ct (ctrl/mues)",
-                    f"{metrics.ctrl_nan_ratio:.0%} / {metrics.sample_nan_ratio:.0%}"
-                )
-
-            if not metrics.common_targets:
-                st.error("No hay intersección de genes entre controles y muestras. Ajusta tu clasificación.")
-                ok_for_fc = False
-            if metrics.ctrl_nan_ratio >= 1.0 or metrics.sample_nan_ratio >= 1.0:
-                st.error("Todos los valores Ct son NaN en algún grupo. Revisa la política de 'Undetermined' o tus datos.")
-                ok_for_fc = False
-
-            n_min = st.number_input(
-                "Mínimo de réplicas por gen y grupo",
-                min_value=1,
-                max_value=10,
-                value=1,
-                step=1,
-            )
-            eligible = metrics.eligible_genes(int(n_min)) if metrics else []
-            st.info(f"Genes que cumplen n≥{int(n_min)} en ambos grupos: {len(eligible)}")
-            if not eligible:
-                st.warning("Ningún gen cumple el mínimo de réplicas en ambos grupos. Considera reducir el umbral o revisar datos.")
-
-            if imputation_output and imputation_output.has_missing:
-                st.warning(
-                    "Persisten valores Ct faltantes. Ajusta la política en la barra lateral y vuelve a procesar el archivo."
-                )
-                ready_for_fc = False
-            else:
-                ready_for_fc = ok_for_fc and bool(metrics.common_targets)
-
-    ready_for_fc = ready_for_fc and not controles_df.empty and not muestras_df.empty
-
-    if not controles_df.empty and not muestras_df.empty and ok_for_fc:
-        controles_df = controles_df.copy()
-        muestras_df = muestras_df.copy()
-        controles_df.loc[:, 'ct'] = pd.to_numeric(controles_df['ct'], errors='coerce')
-        muestras_df.loc[:, 'ct'] = pd.to_numeric(muestras_df['ct'], errors='coerce')
-
-        st.subheader("Imputación de Ct (resumen)")
-        policy_applied = app_state.undetermined.policy
-        st.caption(f"Política seleccionada: {policy_applied}")
-
-        if not controles_df.empty and not muestras_df.empty:
-            extras['controles_limpios.csv'] = controles_df.to_csv(index=False)
-            extras['muestras_limpias.csv'] = muestras_df.to_csv(index=False)
-
-    if not ready_for_fc and not controles_df.empty and not muestras_df.empty:
-        st.stop()
-
-    df_expr_downstream_session = st.session_state.get('df_expr')
-    consolidated_downstream_session = st.session_state.get('fc_consolidated')
-    reference_label_session = st.session_state.get('reference_gene', "")
-
-    downstream_ready = bool(
-        isinstance(df_expr_downstream_session, pd.DataFrame)
-        and not df_expr_downstream_session.empty
-    )
-    df_expr_downstream: Optional[pd.DataFrame] = (
-        df_expr_downstream_session.copy() if downstream_ready else None
-    )
-    consolidated_downstream: Optional[pd.DataFrame] = (
-        consolidated_downstream_session.copy()
-        if isinstance(consolidated_downstream_session, pd.DataFrame)
-        and not consolidated_downstream_session.empty
-        else None
-    )
-    reference_label = reference_label_session
-
-    if ready_for_fc:
-        st.subheader("3) Selección del método de normalización")
-        method_order = list(NORMALIZATION_METHOD_DESCRIPTIONS)
-        default_method = st.session_state.get("norm_method_choice", "ref_gene")
-        if default_method not in method_order:
-            default_method = method_order[0]
-        method_choice = st.radio(
-            "Elige el método a aplicar",
-            options=method_order,
-            index=method_order.index(default_method),
-            format_func=lambda opt: NORMALIZATION_METHOD_DESCRIPTIONS[opt],
+        st.info(
+            f"Pozos detectados ({len(extraction.wells)}): {', '.join(extraction.wells)}"
         )
-        st.session_state["norm_method_choice"] = method_choice
-        st.markdown(
-            f"Has seleccionado **{NORMALIZATION_METHOD_DESCRIPTIONS[method_choice]}**. "
-            "Las secciones siguientes emplearán este enfoque para normalizar y resumir la expresión."
-        )
+    except Exception as exc:
+        st.warning(f"No se pudo generar el resumen: {exc}")
 
-        if method_choice in {"promedios", "ref_gene"}:
-            try:
-                fc_result_default = compute_fold_change_with_expression(controles_df, muestras_df)
-                fc = fc_result_default.computation
-                logger.info(f"FC consolidado shape: {fc.consolidated.shape}")
-            except Exception as exc:
-                st.error(f"Error calculando fold change básico: {exc}")
-                logger.exception("Fallo al calcular fold change", exc_info=exc)
-                st.stop()
+    long_df, controls_warning = build_long_table(df_loaded)
+    if controls_warning:
+        st.warning(f"No se filtraron los controles de máquina: {controls_warning}")
 
-            st.subheader("4) Cálculo de Fold Change")
-            st.caption(f"Método seleccionado: {NORMALIZATION_METHOD_DESCRIPTIONS[method_choice]}")
-            df_expr_default = fc_result_default.expression_table
+    st.markdown("**Configuración actual del estudio**")
+    col_conf1, col_conf2 = st.columns(2)
+    with col_conf1:
+        st.info(f"Tipo de cáncer: {app_state.cancer_type or app_config.menu.cancer_types[0]}")
+    with col_conf2:
+        st.info(f"Contexto biológico: {app_state.context_label or app_config.menu.contexts[0].label}")
 
-            m1, m2 = st.columns(2)
-            with m1:
-                st.metric("Gen de referencia (automático)", fc.reference_gene)
-            with m2:
-                st.caption("Elegido por menor desviación estándar promedio")
+    st.divider()
+    st.subheader("Clasificación de controles vs muestras")
+    file_key = f"assign::{df_loaded.source_name}:{df_loaded.sheet_name}"
+    controles_df, muestras_df = _render_classification_ui(long_df, file_key)
 
-            with st.expander("Tabla consolidada", expanded=False):
-                st.dataframe(fc.consolidated)
-            extras['fold_change_consolidado.csv'] = fc.consolidated.to_csv(index=False)
-            st.plotly_chart(fc_comparison_table(fc.consolidated), use_container_width=True)
+    st.write(f"Controles clasificados: {len(controles_df)} filas")
+    st.write(f"Muestras clasificadas: {len(muestras_df)} filas")
 
-            exclude_stable = bool(app_state.exclude_stable)
-            y2_scale = st.radio("Escala FC", ["log", "lineal"], horizontal=True, index=0)
-            fc_figure = build_fc_detail_figure(
-                fc.consolidated,
-                df_expr_default,
-                exclude_stable=exclude_stable,
-                reference_gene=fc.reference_gene,
-                scale=y2_scale,
-            )
-            st.plotly_chart(fc_figure, use_container_width=True)
-
-            st.subheader("5) Resumen de expresión diferencial")
-            default_idx = 0 if method_choice == "promedios" else 1
-            fc_source = st.radio(
-                "Fuente de Fold Change",
-                ["promedios", "gen de referencia"],
-                horizontal=True,
-                index=default_idx,
-            )
-            expr_result = compute_fold_change_with_expression(
-                controles_df,
-                muestras_df,
-                fold_source=fc_source,
-                precomputed=fc,
-            )
-            df_expr = expr_result.expression_table
-            extras['expresion_categorizada.csv'] = df_expr.to_csv(index=False)
-
-            cexp1, cexp2 = st.columns(2)
-            with cexp1:
-                st.dataframe(df_expr)
-            with cexp2:
-                dist_fig = build_expression_distribution(
-                    df_expr,
-                    exclude_stable=bool(app_state.exclude_stable),
-                )
-                st.plotly_chart(dist_fig, use_container_width=True)
-
-            counts = df_expr['nivel_expresion'].value_counts()
-            msg = (
-                "Resultados: "
-                f"{counts.get('subexpresado', 0)} genes subexpresados, "
-                f"{counts.get('sobreexpresado', 0)} sobreexpresados, "
-                f"{counts.get('estable', 0)} estables "
-                f"(según {'promedios' if fc_source == 'promedios' else 'gen de referencia'})."
-            )
-            st.info(msg)
-
-            st.markdown("### Genes por nivel de expresión")
-            df_expr_vis = df_expr[df_expr['nivel_expresion'] != 'estable'].copy() if bool(app_state.exclude_stable) else df_expr.copy()
-            levels_vis = ['subexpresado', 'estable', 'sobreexpresado']
-            levels_vis = [lvl for lvl in levels_vis if lvl in df_expr_vis['nivel_expresion'].astype(str).unique()]
-            view_mode = st.radio("Vista", ["Lista por nivel", "Treemap"], horizontal=True, index=0)
-            if view_mode == "Lista por nivel":
-                tabs = st.tabs([lvl.capitalize() for lvl in levels_vis]) if levels_vis else []
-                for lvl, tab in zip(levels_vis, tabs):
-                    with tab:
-                        sub = df_expr_vis[df_expr_vis['nivel_expresion'] == lvl].copy()
-                        if sub.empty:
-                            st.info("Sin genes para este nivel.")
-                            continue
-                        try:
-                            sub['log2fc'] = np.log2(sub['fold_change'].clip(lower=1e-12))
-                            sub = sub.sort_values(sub['log2fc'].abs(), ascending=False)
-                        except Exception:
-                            pass
-                        st.dataframe(sub[['target', 'fold_change', 'nivel_expresion']])
-                        st.download_button(
-                            label=f"Descargar genes ({lvl})",
-                            data=sub[['target', 'fold_change', 'nivel_expresion']].to_csv(index=False),
-                            file_name=f"genes_{lvl}.csv",
-                            mime="text/csv",
-                            use_container_width=True,
-                        )
-            else:
-                treemap_fig = build_expression_treemap(df_expr_vis)
-                if treemap_fig is None:
-                    st.info("Sin genes para graficar con los filtros actuales.")
-                else:
-                    st.plotly_chart(treemap_fig, use_container_width=True)
-
-            df_expr_downstream = df_expr.copy()
-            consolidated_downstream = fc.consolidated.copy()
-            reference_label = fc.reference_gene
-            downstream_ready = True
-
-        else:
-            st.subheader("4) Normalización avanzada y selección de referencias")
-            st.caption(
-                "Selecciona automáticamente conjuntos de genes de referencia por estabilidad, "
-                "normaliza las muestras y calcula métricas de significancia con bootstrap y permutaciones."
-            )
-
-            adv_key_base = f"adv_norm::{df_loaded.source_name}:{df_loaded.sheet_name}" if df_loaded is not None else "adv_norm::temp"
-            adv_state = st.session_state.setdefault(adv_key_base, {})
-
-            with st.expander("Parámetros del análisis avanzado", expanded=False):
-                alpha_q = st.number_input(
-                    "Umbral FDR (q)",
-                    min_value=0.001,
-                    max_value=0.5,
-                    value=0.05,
-                    step=0.005,
-                    format="%.3f",
-                    key=f"adv_alpha_{adv_key_base}",
-                )
-                col_adv1, col_adv2, col_adv3 = st.columns(3)
-                with col_adv1:
-                    n_candidates = st.slider(
-                        "Candidatos por desviación estándar",
-                        min_value=4,
-                        max_value=30,
-                        value=20,
-                        step=1,
-                        key=f"adv_ncand_{adv_key_base}",
-                        help="Número de genes candidatos ordenados por desviación estándar de Ct."
-                    )
-                with col_adv2:
-                    k_refs = st.selectbox(
-                        "Tamaño del set de referencia",
-                        options=[1, 2, 3],
-                        index=1,
-                        key=f"adv_krefs_{adv_key_base}",
-                        help="Cantidad de genes que se combinarán como referencia."
-                    )
-                with col_adv3:
-                    random_seed = st.number_input(
-                        "Semilla aleatoria",
-                        value=123,
-                        step=1,
-                        key=f"adv_seed_{adv_key_base}"
-                    )
-
-                col_boot, col_perm = st.columns(2)
-                with col_boot:
-                    bootstrap_iter = st.number_input(
-                        "Iteraciones bootstrap",
-                        min_value=0,
-                        max_value=1000,
-                        value=200,
-                        step=50,
-                        key=f"adv_boot_{adv_key_base}",
-                        help="Mayor número ofrece frecuencias más estables pero incrementa el tiempo de cómputo."
-                    )
-                with col_perm:
-                    permutation_iter = st.number_input(
-                        "Permutaciones etiqueta",
-                        min_value=0,
-                        max_value=600,
-                        value=100,
-                        step=20,
-                        key=f"adv_perm_{adv_key_base}",
-                        help="Cuántas permutaciones usar para estimar FPR empírica."
-                    )
-
-            if st.button("Ejecutar análisis avanzado", key=f"btn_adv_norm_{adv_key_base}", use_container_width=False):
-                try:
-                    params = AdvancedNormalizationParams(
-                        alpha=float(alpha_q),
-                        n_candidates=int(n_candidates),
-                        k_refs=int(k_refs),
-                        bootstrap_iter=int(bootstrap_iter),
-                        permutation_iter=int(permutation_iter),
-                        random_seed=int(random_seed),
-                    )
-                    with st.spinner("Calculando normalización avanzada…"):
-                        adv_result = execute_advanced_normalization(
-                            controles_df,
-                            muestras_df,
-                            params,
-                        )
-                    st.session_state[adv_key_base] = {
-                        "result": adv_result,
-                        "params": params,
-                    }
-                    st.success("Análisis avanzado completado.")
-                except AdvancedNormalizationError as exc:
-                    st.error(f"No se pudo ejecutar la normalización avanzada: {exc}")
-                except Exception as exc:  # noqa: BLE001
-                    st.error("Ocurrió un error inesperado al ejecutar la normalización avanzada.")
-                    logger.exception("Fallo en normalización avanzada", exc_info=exc)
-
-            adv_state = st.session_state.get(adv_key_base, {})
-            adv_result = adv_state.get("result")
-            if adv_result:
-                params_used = adv_state.get("params")
-                if params_used is not None:
-                    st.caption(
-                        "Parámetros utilizados: "
-                        f"alpha={params_used.alpha}, candidatos={params_used.n_candidates}, "
-                        f"K={params_used.k_refs}, bootstrap={params_used.bootstrap_iter}, "
-                        f"permutaciones={params_used.permutation_iter}, seed={params_used.random_seed}"
-                    )
-
-                ref_res = adv_result.reference_result
-                diff_res = adv_result.differential
-                sum_dict = adv_result.summary()
-                c_metrics = st.columns(len(sum_dict)) if sum_dict else []
-                for (label, value), col in zip(sum_dict.items(), c_metrics):
-                    with col:
-                        display_value: str | float | int
-                        if isinstance(value, (int, float)):
-                            display_value = value if pd.notna(value) else "-"
-                        elif isinstance(value, (list, tuple, set)):
-                            display_value = ", ".join(map(str, value)) if value else "-"
-                        else:
-                            display_value = str(value) if value not in (None, "") else "-"
-                        st.metric(label.replace('_', ' '), display_value)
-
-                if ref_res.coverage_warnings:
-                    for msg in ref_res.coverage_warnings:
-                        st.warning(msg)
-
-                candidates = ref_res.candidate_scores.copy()
-                if not candidates.empty:
-                    candidates['refs'] = candidates['refs'].apply(lambda r: ", ".join(map(str, r)))
-                    st.markdown("**Ranking de combinaciones candidateadas (menor score es mejor)**")
-                    st.dataframe(candidates[['refs', 'score']].head(30))
-                    extras['normalizacion_avanzada_candidatos.csv'] = candidates.to_csv(index=False)
-
-                with st.expander("Detalle normalizado (df_norm)", expanded=False):
-                    st.dataframe(adv_result.df_norm.head(100))
-                    extras['normalizacion_avanzada_df_norm.csv'] = adv_result.df_norm.to_csv(index=False)
-
-                stats_df = diff_res.stats.copy()
-                if not stats_df.empty:
-                    st.markdown("**Estadísticas diferenciales por gen**")
-                    st.dataframe(stats_df.head(50))
-                    extras['normalizacion_avanzada_df_stats.csv'] = stats_df.to_csv(index=False)
-                else:
-                    st.info("No se encontraron genes con estadísticas válidas para los criterios actuales.")
-
-                if isinstance(diff_res.bootstrap_freq, pd.Series) and not diff_res.bootstrap_freq.empty:
-                    st.markdown("**Frecuencias bootstrap**")
-                    st.dataframe(diff_res.bootstrap_freq.to_frame())
-
-                heat_df = adv_result.df_norm.pivot_table(
-                    index='target',
-                    columns='test',
-                    values='log2_rel_expr',
-                    aggfunc='mean',
-                ).sort_index()
-                if isinstance(heat_df, pd.DataFrame) and not heat_df.empty:
-                    try:
-                        import plotly.express as px
-
-                        fig_heat = px.imshow(
-                            heat_df,
-                            color_continuous_scale=[[0.0, '#2c7bb6'], [0.5, '#ffffb2'], [1.0, '#d7191c']],
-                            aspect='auto',
-                            origin='upper',
-                            color_continuous_midpoint=0,
-                            labels={"x": "Test", "y": "Gen", "color": "log2 Expr."},
-                        )
-                        fig_heat.update_layout(title="Matriz genes × muestras (log2 expresión relativa)")
-                        st.plotly_chart(fig_heat, use_container_width=True)
-                    except Exception:
-                        st.dataframe(heat_df)
-                else:
-                    st.info("No hay genes seleccionados para el heatmap.")
-
-                adv_expr_cols = ['target', 'fold_change', 'nivel_expresion', 'q', 'bootstrap_freq', 'log2_fc']
-                if not stats_df.empty:
-                    adv_expr = stats_df[['gene', 'mean_ctrl', 'mean_case', 'q']].copy()
-                    adv_expr.rename(columns={'gene': 'target'}, inplace=True)
-                    adv_expr['bootstrap_freq'] = diff_res.bootstrap_freq.reindex(adv_expr['target']).fillna(0.0).values
-                    adv_expr['log2_fc'] = adv_expr['mean_case'] - adv_expr['mean_ctrl']
-                    adv_expr['fold_change'] = np.power(2.0, adv_expr['log2_fc'])
-                    adv_expr['nivel_expresion'] = pd.cut(
-                        adv_expr['fold_change'],
-                        bins=[-float("inf"), 1.0, 2.0, float("inf")],
-                        labels=['subexpresado', 'estable', 'sobreexpresado'],
-                        right=False,
-                    )
-                    adv_expr_display = adv_expr[['target', 'fold_change', 'nivel_expresion', 'q', 'bootstrap_freq', 'log2_fc']]
-                else:
-                    adv_expr_display = pd.DataFrame(columns=adv_expr_cols)
-
-                st.subheader("5) Resumen de expresión diferencial")
-                if adv_expr_display.empty:
-                    st.info("No se generaron mediciones de expresión con los parámetros actuales.")
-                else:
-                    st.dataframe(adv_expr_display[['target', 'fold_change', 'nivel_expresion', 'q', 'bootstrap_freq']])
-                    df_expr_summary = adv_expr_display[['target', 'fold_change', 'nivel_expresion']].copy()
-                    dist_fig = build_expression_distribution(
-                        df_expr_summary,
-                        exclude_stable=bool(app_state.exclude_stable),
-                    )
-                    st.plotly_chart(dist_fig, use_container_width=True)
-
-                    counts = df_expr_summary['nivel_expresion'].value_counts()
-                    signif = int((adv_expr_display.get('q', pd.Series(dtype=float)) < float(alpha_q)).sum())
-                    msg = (
-                        "Resultados (normalización avanzada): "
-                        f"{counts.get('subexpresado', 0)} subexpresados, "
-                        f"{counts.get('sobreexpresado', 0)} sobreexpresados, "
-                        f"{counts.get('estable', 0)} estables. "
-                        f"Genes con q < {float(alpha_q):.2f}: {signif}."
-                    )
-                    st.info(msg)
-
-                    df_expr_vis = adv_expr_display.copy()
-                    if bool(app_state.exclude_stable):
-                        df_expr_vis = df_expr_vis[df_expr_vis['nivel_expresion'] != 'estable']
-                        df_expr_summary = df_expr_summary[df_expr_summary['nivel_expresion'] != 'estable']
-                    levels_vis = ['subexpresado', 'estable', 'sobreexpresado']
-                    levels_vis = [lvl for lvl in levels_vis if lvl in df_expr_vis['nivel_expresion'].astype(str).unique()]
-                    st.markdown("### Genes por nivel de expresión")
-                    view_mode = st.radio("Vista", ["Lista por nivel", "Treemap"], horizontal=True, index=0)
-                    if view_mode == "Lista por nivel":
-                        tabs = st.tabs([lvl.capitalize() for lvl in levels_vis]) if levels_vis else []
-                        for lvl, tab in zip(levels_vis, tabs):
-                            with tab:
-                                sub = df_expr_vis[df_expr_vis['nivel_expresion'] == lvl].copy()
-                                if sub.empty:
-                                    st.info("Sin genes para este nivel.")
-                                    continue
-                                st.dataframe(sub[['target', 'fold_change', 'nivel_expresion', 'q', 'bootstrap_freq']])
-                                st.download_button(
-                                    label=f"Descargar genes ({lvl})",
-                                    data=sub[['target', 'fold_change', 'nivel_expresion', 'q', 'bootstrap_freq']].to_csv(index=False),
-                                    file_name=f"genes_{lvl}.csv",
-                                    mime="text/csv",
-                                    use_container_width=True,
-                                )
-                    else:
-                        treemap_fig = build_expression_treemap(df_expr_summary)
-                        if treemap_fig is None:
-                            st.info("Sin genes para graficar con los filtros actuales.")
-                        else:
-                            st.plotly_chart(treemap_fig, use_container_width=True)
-
-                extras['fold_change_consolidado.csv'] = stats_df.to_csv(index=False)
-                extras['expresion_categorizada.csv'] = adv_expr_display[['target', 'fold_change', 'nivel_expresion', 'q', 'bootstrap_freq']].to_csv(index=False)
-                extras['normalizacion_avanzada_expr.csv'] = adv_expr_display.to_csv(index=False)
-
-                df_expr_downstream = adv_expr_display[['target', 'fold_change', 'nivel_expresion', 'q', 'bootstrap_freq']].copy()
-                consolidated_downstream = stats_df.copy()
-                reference_label = ", ".join(ref_res.references)
-                downstream_ready = True
-            else:
-                st.info("Ejecuta el análisis avanzado para avanzar al siguiente paso.")
-
-    if not downstream_ready:
-        st.stop()
-
-    if df_expr_downstream is None:
-        df_expr = pd.DataFrame()
-    else:
-        df_expr = df_expr_downstream.copy()
-    st.session_state['df_expr'] = df_expr.copy()
-    st.session_state['reference_gene'] = reference_label
-    if consolidated_downstream is not None:
-        st.session_state['fc_consolidated'] = consolidated_downstream.copy()
-    else:
-        st.session_state['fc_consolidated'] = pd.DataFrame()
-
-    st.subheader("6) Preparación de datos para módulos posteriores")
-    st.caption("Estos datos alimentan firmas, heatmaps, heurísticas y los módulos siguientes de la aplicación.")
-
-    norm_method_summary = st.session_state.get("norm_method_choice", "ref_gene")
-    method_label_summary = NORMALIZATION_METHOD_DESCRIPTIONS.get(norm_method_summary, norm_method_summary)
-
-    summary_rows: list[dict[str, Any]] = []
-    if isinstance(df_expr, pd.DataFrame) and not df_expr.empty:
-        summary_rows.append({
-            "Recurso": "Expresión categorizada",
-            "Filas": int(df_expr.shape[0]),
-            "Columnas": int(df_expr.shape[1]),
-            "Fuente de normalización": method_label_summary,
-            "Notas": "Incluye columnas: " + ", ".join(df_expr.columns.tolist()[:4]) + ("…" if df_expr.shape[1] > 4 else ""),
-        })
-    if isinstance(consolidated_downstream, pd.DataFrame) and not consolidated_downstream.empty:
-        notes = (
-            "Estadísticos diferenciales (Welch, q, bootstrap)"
-            if norm_method_summary == "advanced"
-            else "Tabla consolidada con ΔΔCt y fold change"
-        )
-        summary_rows.append({
-            "Recurso": "Tabla base",
-            "Filas": int(consolidated_downstream.shape[0]),
-            "Columnas": int(consolidated_downstream.shape[1]),
-            "Fuente de normalización": method_label_summary,
-            "Notas": notes,
-        })
-    refs_clean = [ref.strip() for ref in reference_label.split(",") if ref.strip()] if reference_label else []
-    summary_rows.append({
-        "Recurso": "Genes de referencia",
-        "Filas": len(refs_clean) or 0,
-        "Columnas": 1,
-        "Fuente de normalización": method_label_summary,
-        "Notas": ", ".join(refs_clean) if refs_clean else "No especificado",
-    })
-
-    st.markdown("**Resumen de recursos generados**")
-    if summary_rows:
-        summary_df = pd.DataFrame(summary_rows)
-        st.dataframe(summary_df)
-    else:
-        st.info("Aún no hay datos disponibles para los módulos posteriores.")
-
-    # Anotación Ensembl (IDs y descripciones) sobre los targets clasificados
-    st.subheader("Anotación Ensembl (IDs y descripciones)")
-    st.caption("Consulta Ensembl para cada gen (requiere conexión a internet). Incluye exploración interactiva.")
+    if controles_df.empty or muestras_df.empty:
+        st.info("Clasifica al menos una prueba como control y una como muestra para continuar.")
+        return
 
     try:
-        df_to_annot = df_expr[['target', 'nivel_expresion', 'fold_change']].drop_duplicates(subset=['target']).reset_index(drop=True)
-        # Clave estable por lista de genes
-        genes_key = ",".join(sorted(df_to_annot['target'].dropna().astype(str).unique().tolist()))
-        ensembl_state_key = st.session_state.get('ensembl_key')
-        ensembl_state_df = st.session_state.get('ensembl_df')
+        imputation = apply_undetermined_policy(
+            controles_df,
+            muestras_df,
+            policy=und_policy,
+            fixed_value=float(und_value),
+            group_columns=[c for c in ["plate_id", "target"] if c in controles_df.columns and c in muestras_df.columns] or None,
+        )
+    except FoldChangePreparationError as exc:
+        st.error(f"No se pudo aplicar la política 'Undetermined': {exc}")
+        return
 
-        cols = st.columns([1, 1, 2])
-        with cols[0]:
-            need_compute = not (
-                ensembl_state_key == genes_key
-                and isinstance(ensembl_state_df, pd.DataFrame)
-                and not ensembl_state_df.empty
+    controles_df = imputation.controles
+    muestras_df = imputation.muestras
+    if imputation.message:
+        st.caption(imputation.message)
+    if not imputation.summary.empty:
+        st.markdown("**Detalle de imputaciones**")
+        st.dataframe(imputation.summary.head(50))
+        st.download_button(
+            "Descargar imputaciones (CSV)",
+            imputation.summary.to_csv(index=False),
+            file_name="detalle_imputaciones.csv",
+            use_container_width=True,
+        )
+
+    st.divider()
+    st.subheader("Calidad de datos")
+    metrics = compute_quality_metrics(controles_df, muestras_df)
+    _quality_summary(metrics)
+    if not metrics.common_targets:
+        st.error("No hay genes en común entre controles y muestras. Revisa la clasificación.")
+        return
+
+    st.divider()
+    st.subheader("Normalización avanzada")
+    adv_key = f"adv::{file_key}"
+    adv_state = st.session_state.setdefault(adv_key, {})
+
+    with st.expander("Parámetros", expanded=False):
+        alpha = st.number_input(
+            "Umbral FDR (q)",
+            min_value=0.001,
+            max_value=0.5,
+            value=float(getattr(adv_state.get("params"), "alpha", 0.05)),
+            step=0.005,
+            format="%.3f",
+            key=f"adv_alpha_{adv_key}",
+        )
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            n_candidates = st.slider(
+                "Genes candidatos",
+                min_value=4,
+                max_value=30,
+                value=int(getattr(adv_state.get("params"), "n_candidates", 20)),
             )
-            ens_workers = st.number_input(
-                "Hilos Ensembl",
-                value=3,
-                min_value=1,
-                max_value=16,
+        with col_b:
+            k_refs = st.selectbox(
+                "Tamaño set referencia",
+                options=[1, 2, 3],
+                index=[1, 2, 3].index(int(getattr(adv_state.get("params"), "k_refs", 2))),
+            )
+        with col_c:
+            random_seed = st.number_input(
+                "Semilla aleatoria",
+                value=int(getattr(adv_state.get("params"), "random_seed", 123) or 123),
                 step=1,
-                help="Límite de concurrencia para llamadas a Ensembl",
             )
-            if need_compute:
-                if st.button("Anotar Ensembl", key="btn_annot_ens"):
-                    with st.spinner("Consultando Ensembl…"):
-                        ensembl_df = _annotate_ensembl_cached(
-                            df_to_annot[['target', 'nivel_expresion', 'fold_change']]
-                            .sort_values('target')
-                            .to_csv(index=False),
-                            max_workers=int(ens_workers),
-                        )
-                    st.session_state['ensembl_df'] = ensembl_df.copy()
-                    st.session_state['ensembl_key'] = genes_key
-            else:
-                st.success("Usando anotación en caché para esta lista de genes.")
-                if st.button("Recalcular", key="btn_recalc_ens"):
-                    with st.spinner("Consultando Ensembl…"):
-                        ensembl_df = _annotate_ensembl_cached(
-                            df_to_annot[['target', 'nivel_expresion', 'fold_change']]
-                            .sort_values('target')
-                            .to_csv(index=False),
-                            max_workers=int(ens_workers),
-                        )
-                    st.session_state['ensembl_df'] = ensembl_df.copy()
-                    st.session_state['ensembl_key'] = genes_key
+        col_boot, col_perm = st.columns(2)
+        with col_boot:
+            bootstrap_iter = st.number_input(
+                "Iteraciones bootstrap",
+                min_value=0,
+                max_value=1000,
+                value=int(getattr(adv_state.get("params"), "bootstrap_iter", 200)),
+                step=50,
+            )
+        with col_perm:
+            permutation_iter = st.number_input(
+                "Permutaciones",
+                min_value=0,
+                max_value=600,
+                value=int(getattr(adv_state.get("params"), "permutation_iter", 100)),
+                step=20,
+            )
 
-        # Obtener df desde sesión si existe
-        ensembl_df = st.session_state.get('ensembl_df')
-        if isinstance(ensembl_df, pd.DataFrame) and not ensembl_df.empty:
-            desc_series = ensembl_df['description'].fillna('').astype(str).str.strip()
-            ensembl_df['has_desc'] = desc_series.ne('') & desc_series.ne('No description')
-            extras['ensembl_anotado.csv'] = ensembl_df.to_csv(index=False)
-            try:
-                encontrados = int((ensembl_df['ensembl_id'] != 'Not found').sum())
-                logger.info(f"Ensembl: completado. IDs encontrados {encontrados}/{len(ensembl_df)}")
-            except Exception:
-                pass
-
-            tab_resumen, tab_explorar, tab_enlaces = st.tabs(["Resumen", "Explorar", "Enlaces"])
-
-            # Resumen: métricas y gráfico de calidad de anotación por nivel de expresión
-            with tab_resumen:
-                total = len(ensembl_df)
-                encontrados = int((ensembl_df['ensembl_id'] != 'Not found').sum())
-                con_desc = int((ensembl_df['has_desc']).sum())
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Genes anotados (totales)", total)
-                m2.metric("Con Ensembl ID", encontrados)
-                m3.metric("Con descripción", con_desc)
-
-                import plotly.express as px
-
-                counts = (
-                    ensembl_df.assign(desc=lambda d: d['has_desc'].map({True: 'con_descripción', False: 'sin_descripción'}))
-                    .groupby(['nivel_expresion', 'desc']).size().reset_index(name='n')
-                )
-                order_levels = ['estable', 'subexpresado', 'sobreexpresado']
-                counts['nivel_expresion'] = pd.Categorical(counts['nivel_expresion'], categories=order_levels, ordered=True)
-                bar = px.bar(
-                    counts.sort_values(['nivel_expresion', 'desc']),
-                    x='nivel_expresion', y='n', color='desc', barmode='stack',
-                    labels={'nivel_expresion': 'Nivel de expresión', 'n': 'Número de genes', 'desc': 'Descripción'},
-                    title='Cobertura de anotación por nivel de expresión'
-                )
-                st.plotly_chart(bar, use_container_width=True)
-
-            # Explorar: filtros por gen, descripción y nivel; descarga del subconjunto
-            with tab_explorar:
-                f1, f2 = st.columns(2)
-                with f1:
-                    q_gene = st.text_input("Filtrar por gen (contiene)", "").strip().lower()
-                with f2:
-                    q_desc = st.text_input("Filtrar por descripción (contiene)", "").strip().lower()
-                order_levels = ['estable', 'subexpresado', 'sobreexpresado']
-                sel_levels = st.multiselect("Niveles", order_levels, default=order_levels)
-
-                filt = ensembl_df.copy()
-                if q_gene:
-                    filt = filt[filt['target'].astype(str).str.lower().str.contains(q_gene, na=False)]
-                if q_desc:
-                    filt = filt[filt['description'].astype(str).str.lower().str.contains(q_desc, na=False)]
-                if sel_levels:
-                    filt = filt[filt['nivel_expresion'].isin(sel_levels)]
-
-                cols_show = ['target', 'nivel_expresion', 'fold_change', 'ensembl_id', 'description']
-                st.dataframe(filt[cols_show])
-
-                st.download_button(
-                    label="Descargar resultado filtrado (CSV)",
-                    data=filt[cols_show].to_csv(index=False),
-                    file_name="ensembl_filtrado.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
-
-            # Enlaces: listado con links a Ensembl y descripciones legibles
-            with tab_enlaces:
-                if isinstance(ensembl_df, pd.DataFrame) and not ensembl_df.empty:
-                    st.caption("Navega por enlaces directos a Ensembl (máx. 100 primeros)")
-                    subset = ensembl_df.copy().head(100)
-                    for _, row in subset.iterrows():
-                        gene = str(row['target'])
-                        eid = str(row['ensembl_id'])
-                        desc = str(row['description'])
-                        lvl = str(row['nivel_expresion'])
-                        url = f"https://www.ensembl.org/Homo_sapiens/Gene/Summary?g={eid}" if eid and eid != 'Not found' else None
-                        if url:
-                            st.markdown(f"- [{gene}]({url}) · {lvl} — {desc}")
-                        else:
-                            st.markdown(f"- {gene} · {lvl} — {desc}")
-                else:
-                    st.info("Genera la anotación para ver enlaces.")
-
-    except Exception as e:
-        st.warning(f"No se pudo anotar con Ensembl: {e}")
-
-    # Enriquecimiento funcional (STRING)
-    st.subheader("Enriquecimiento funcional (STRING)")
-    st.caption("Analiza términos GO/KEGG/Reactome enriquecidos por nivel de expresión. Requiere conexión a internet.")
-
-    # Selección de niveles a procesar por separado
-    order_levels = ['subexpresado', 'estable', 'sobreexpresado']
-    sel_levels = st.multiselect(
-        "Niveles a considerar",
-        options=order_levels,
-        default=['subexpresado', 'sobreexpresado']
-    )
-    # Respetar preferencia global de exclusión de 'estables'
-    exclude_stable_pref = bool(app_state.exclude_stable)
-    if exclude_stable_pref and 'estable' in sel_levels:
-        sel_levels = [lvl for lvl in sel_levels if lvl != 'estable']
-        st.caption("Preferencia activa: excluyendo 'estable' del enriquecimiento")
-
-    # Fuentes/categorías a consultar en STRING
-    cat_options = ["GO", "GO:BP", "GO:MF", "GO:CC", "KEGG", "Reactome"]
-    sel_cats = st.multiselect(
-        "Categorías (fuentes)",
-        options=cat_options,
-        default=["GO", "KEGG"]
+    params = AdvancedNormalizationParams(
+        alpha=float(alpha),
+        n_candidates=int(n_candidates),
+        k_refs=int(k_refs),
+        bootstrap_iter=int(bootstrap_iter),
+        permutation_iter=int(permutation_iter),
+        random_seed=int(random_seed),
     )
 
-    cconf1, cconf2, cconf3, cconf4 = st.columns(4)
-    with cconf1:
-        max_fdr = st.number_input("FDR máx.", value=0.05, min_value=0.0, max_value=1.0, step=0.01, format="%.2f")
-    with cconf2:
-        min_size = st.number_input("Mín. genes por término", value=3, min_value=1, max_value=100, step=1)
-    with cconf3:
-        top_n = st.number_input("Top N", value=25, min_value=1, max_value=200, step=1)
-    with cconf4:
-        species_default = int(getattr(SERVICES.string, "species", 9606) or 9606)
-        species = st.number_input(
-            "Especie (NCBI Taxon)",
-            value=species_default,
-            min_value=1,
-            max_value=1_000_000,
-            step=1,
-        )
-
-    run_enrich = st.button("Ejecutar enriquecimiento (STRING)", type="primary")
-
-    if run_enrich:
+    if st.button("Ejecutar normalización avanzada", key=f"btn_run_adv_{adv_key}"):
         try:
-            # Ejecutar enriquecimiento por nivel y concatenar (con caché)
-            levels_to_use = sel_levels or order_levels
-            if exclude_stable_pref:
-                levels_to_use = [lvl for lvl in levels_to_use if lvl != 'estable']
-            base = df_expr[df_expr['nivel_expresion'].isin(levels_to_use)].copy()
-            logger.info(f"STRING: niveles={levels_to_use}, fuentes={sel_cats}, genes_totales={base['target'].nunique()}")
-            with st.spinner("Consultando STRING por nivel…"):
-                res = _string_enrichment_cached(
-                    base.to_csv(index=False),
-                    levels=levels_to_use,
-                    species=int(species),
-                    sources=sel_cats,
-                    max_fdr=float(max_fdr),
-                    min_size=int(min_size),
-                    top_n=int(top_n),
-                )
-            combined = res.get('combined')
-            by_level = res.get('by_level', {})
-            try:
-                logger.info(f"STRING: filas combinadas={0 if combined is None else len(combined)}")
-            except Exception:
-                pass
+            result = execute_advanced_normalization(controles_df, muestras_df, params=params)
+        except AdvancedNormalizationError as exc:
+            st.error(f"La normalización avanzada falló: {exc}")
+        else:
+            adv_state["result"] = result
+            adv_state["params"] = params
+            st.success("Normalización avanzada completada.")
 
-            if combined is None or combined.empty:
-                st.info("Sin resultados de enriquecimiento para los parámetros actuales.")
-            else:
-                combined_f = combined
-                st.dataframe(combined_f)
+    result = adv_state.get("result")
+    if not isinstance(result, AdvancedNormalizationResult):
+        st.info("Configura los parámetros y ejecuta la normalización para ver resultados.")
+        return
 
-                # Pestañas por nivel + resumen
-                tab_res, *tabs_levels = st.tabs(["Resumen"] + [lvl.capitalize() for lvl in levels_to_use])
+    expr_summary = _render_advanced_results(result, adv_state.get("params", params))
+    st.session_state["_expression_summary"] = expr_summary
 
-                # Resumen: barras -log10(FDR) top N combinadas
-                with tab_res:
-                    try:
-                        import numpy as np
-                        import plotly.express as px
-                        plot_df = combined_f.copy()
-                        if not plot_df.empty and 'fdr' in plot_df.columns:
-                            plot_df["neglog10_fdr"] = -np.log10(plot_df["fdr"].clip(lower=1e-300))
-                            plot_df["label"] = plot_df.apply(lambda r: f"{r.get('term','')} ({r.get('category','')})", axis=1)
-                            fig = px.bar(
-                                plot_df.sort_values(["nivel_expresion", "neglog10_fdr"], ascending=[True, True]),
-                                x="neglog10_fdr",
-                                y="label",
-                                color="nivel_expresion",
-                                orientation="h",
-                                labels={"neglog10_fdr": "-log10(FDR)", "label": "Término"},
-                                title="Enriquecimiento combinado por nivel"
-                            )
-                            st.plotly_chart(fig, use_container_width=True)
-                    except Exception:
-                        pass
-
-                # Una pestaña por nivel con su propio gráfico y tabla
-                for lvl, tab in zip(levels_to_use, tabs_levels):
-                    with tab:
-                        lvl_df = by_level.get(lvl, pd.DataFrame())
-                        if lvl_df is None or lvl_df.empty:
-                            st.info("Sin términos enriquecidos para este nivel.")
-                            continue
-                        lvl_df_f = lvl_df
-                        st.dataframe(lvl_df_f)
-                        try:
-                            import numpy as np
-                            import plotly.express as px
-                            p = lvl_df_f.copy()
-                            if not p.empty and 'fdr' in p.columns:
-                                p["neglog10_fdr"] = -np.log10(p["fdr"].clip(lower=1e-300))
-                                p["label"] = p.apply(lambda r: f"{r.get('term','')} ({r.get('category','')})", axis=1)
-                                fig_l = px.bar(
-                                    p.sort_values("neglog10_fdr", ascending=True),
-                                    x="neglog10_fdr",
-                                    y="label",
-                                    orientation="h",
-                                    labels={"neglog10_fdr": "-log10(FDR)", "label": "Término"},
-                                    title=f"Enriquecimiento ({lvl})"
-                                )
-                                st.plotly_chart(fig_l, use_container_width=True)
-                        except Exception:
-                            pass
-
-                # Descargas: CSV combinado y Excel con hojas por nivel
-                st.download_button(
-                    label="Descargar enriquecimiento combinado (CSV)",
-                    data=combined_f.to_csv(index=False),
-                    file_name="string_enrichment_combined.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
-
-                try:
-                    sheets = [combined_f] + [by_level.get(lvl, pd.DataFrame()) for lvl in levels_to_use]
-                    names = ["combinado"] + [f"{lvl}" for lvl in levels_to_use]
-                    xlsx_bytes = dfs_to_excel_bytes(sheets, names)
-                    st.download_button(
-                        label="Descargar enriquecimiento (Excel, por nivel)",
-                        data=xlsx_bytes,
-                        file_name="string_enrichment_by_level.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                    )
-                except Exception:
-                    pass
-        except Exception as e:
-            st.warning(f"No se pudo ejecutar el enriquecimiento: {e}")
-
-        # Bibliografía (PubMed)
-        st.subheader("Bibliografía (PubMed)")
-        st.caption(
-            "Busca artículos por gen y contexto (TEM o micro RNAs) en PubMed. "
-            "Puedes ingresar tu email/API key aquí para la demo."
-        )
-        pubmed_cfg = SERVICES.pubmed
-        try:
-            sec_email = st.secrets["NCBI_EMAIL"]
-        except Exception:
-            sec_email = ""
-        try:
-            sec_key = st.secrets["NCBI_API_KEY"]
-        except Exception:
-            sec_key = ""
-        default_email = (sec_email or pubmed_cfg.default_email or "")
-        default_api_key = (sec_key or (pubmed_cfg.api_key or ""))
-        ccreds1, ccreds2 = st.columns([2, 2])
-        with ccreds1:
-            ncbi_email_input = st.text_input(
-                "NCBI Email (obligatorio)",
-                value=default_email,
-                placeholder="tu_email@dominio.com",
-            )
-        with ccreds2:
-            ncbi_api_key_input = st.text_input(
-                "NCBI API Key (opcional)",
-                value=default_api_key,
-                placeholder="api_key",
-            )
-
-        max_default = int(pubmed_cfg.max_per_gene or 100)
-        max_default = max(10, min(300, max_default))
-        max_per_gene = st.number_input(
-            "Máximo de artículos por gen",
-            value=max_default,
-            min_value=10,
-            max_value=300,
-            step=10,
-        )
-        run_pubmed = st.button("Buscar en PubMed", disabled=not bool(ncbi_email_input.strip()))
-        st.caption("Las consultas a PubMed se cachean (24h) por combinación de genes, contexto y credenciales.")
-
-        if run_pubmed:
-            try:
-                # Usar el DataFrame anotado si está disponible; si no, usar df_expr
-                if 'ensembl_df' in locals() and isinstance(ensembl_df, pd.DataFrame) and not ensembl_df.empty:
-                    genes_df = ensembl_df[['target', 'ensembl_id', 'nivel_expresion']].drop_duplicates('target')
-                else:
-                    tmp = df_expr[['target', 'nivel_expresion']].drop_duplicates('target')
-                    tmp['ensembl_id'] = ''
-                    genes_df = tmp[['target', 'ensembl_id', 'nivel_expresion']]
-                # Respetar preferencia global de exclusión de 'estables'
-                if bool(app_state.exclude_stable):
-                    n_before = len(genes_df)
-                    genes_df = genes_df[genes_df['nivel_expresion'] != 'estable']
-                    n_after = len(genes_df)
-                    if n_after < n_before:
-                        st.caption(f"Preferencia activa: excluyendo 'estable' en PubMed ({n_before-n_after} genes menos)")
-
-                # Usar credenciales explícitas (sin escribir en os.environ)
-                email = ncbi_email_input.strip()
-                api_key = ncbi_api_key_input.strip() or None
-                logger.info(f"PubMed: consultando {len(genes_df)} genes (contexto={context_sel_label}, max_per_gene={int(max_per_gene)})")
-                prog = st.progress(0)
-                status = st.empty()
-
-                def _on_progress(i: int, total: int, gene: str) -> None:
-                    pct = int((i / max(1, total)) * 100)
-                    prog.progress(pct)
-                    status.info(f"Procesando {i}/{total}: {gene}")
-
-                with st.spinner("Consultando PubMed por gen…"):
-                    # Cache por combinación de parámetros
-                    bib = _pubmed_cached(
-                        genes_df.to_csv(index=False),
-                        context_sel_label,
-                        int(max_per_gene),
-                        email,
-                        api_key,
-                    )
-                prog.progress(100)
-                status.success("Consulta PubMed finalizada")
-                if bib is None or bib.empty:
-                    st.info("No se encontraron artículos para los parámetros actuales.")
-                else:
-                    bib2 = merge_expression_levels(bib, genes_df[['target', 'nivel_expresion']])
-                    st.dataframe(bib2.head(50))
-                    st.download_button(
-                        label="Descargar bibliografía (CSV)",
-                        data=bib2.to_csv(index=False),
-                        file_name="bibliografia_pubmed.csv",
-                        mime="text/csv",
-                        use_container_width=True,
-                    )
-
-                    # Clasificación
-                    st.markdown("### Clasificación por tipo de cáncer y contexto")
-                    try:
-                        classified = classify_bibliography(bib2)
-                        # Enfocar al cáncer seleccionado en el panel
-                        focused = filter_bibliography_by_cancer(classified, cancer_type)
-                        try:
-                            st.session_state["bibliografia_clasificada"] = focused.copy()
-                        except Exception:
-                            pass
-                        st.dataframe(focused.head(50))
-                        st.download_button(
-                            label="Descargar bibliografía clasificada (CSV)",
-                            data=focused.to_csv(index=False),
-                            file_name="bibliografia_clasificada.csv",
-                            mime="text/csv",
-                            use_container_width=True,
-                        )
-
-                        # Gráfica de barras: número de estudios por tipo de cáncer y nivel
-                        agg = aggregate_counts_by_level_and_cancer(focused)
-                        if not agg.empty:
-                            import plotly.express as px
-                            order_levels = ['sobreexpresado', 'estable', 'subexpresado']
-                            agg['nivel_expresion'] = pd.Categorical(agg['nivel_expresion'], categories=order_levels, ordered=True)
-                            figb = px.bar(
-                                agg.sort_values(['cancer_type', 'nivel_expresion']),
-                                x='cancer_type', y='count', color='nivel_expresion',
-                                barmode='group',
-                                title=f"Número de estudios por tipo de cáncer y nivel de expresión ({context_sel_label})",
-                                labels={'cancer_type': 'Tipo de cáncer', 'count': 'Número de estudios', 'nivel_expresion': 'Nivel de expresión'},
-                            )
-                            figb.update_layout(xaxis_tickangle=45)
-                            st.plotly_chart(figb, use_container_width=True)
-
-                            # Dispersión (burbujas) alternativa
-                            figs = px.scatter(
-                                agg,
-                                x='count', y='cancer_type', size='count', color='nivel_expresion',
-                                title=f"Artículos por tipo de cáncer y nivel ({context_sel_label})",
-                                labels={'count': 'Número de artículos', 'cancer_type': 'Tipo de cáncer'},
-                            )
-                            st.plotly_chart(figs, use_container_width=True)
+    st.divider()
+    _render_ensembl_section(expr_summary)
 
 
-                    except Exception as e:
-                        st.warning(f"No se pudo clasificar la bibliografía: {e}")
-
-            except Exception as e:
-                st.warning(f"No se pudo ejecutar la búsqueda en PubMed: {e}")
-
-        # Botones de descarga de resultados (si hay datos)
-        if extras:
-            st.subheader("Descargas")
-            for fname, data in extras.items():
-                st.download_button(
-                    label=f"Descargar {fname}",
-                    data=data,
-                    file_name=fname,
-                    mime="text/csv",
-                    use_container_width=True,
-                )
-
-    # (Opcional) Puedes exportar manualmente desde cada tabla mostrada en pantalla.
-
-    # -------------------------------------------------------------------------
-    # Firmas genéticas (a partir de bibliografía clasificada)
-    # -------------------------------------------------------------------------
-st.markdown("---")
-st.header("Firmas genéticas")
-with st.container():
-    st.caption("Genera firmas por tipo de cáncer y nivel, con enriquecimiento de Hallmarks (MSigDB). Requiere gseapy y acceso a los GMT locales.")
-
-    # Intentar recuperar bibliografía clasificada de esta sesión
-    bib_class = st.session_state.get("bibliografia_clasificada")
-    if 'classified' in locals() and isinstance(classified, pd.DataFrame) and not classified.empty:
-        bib_class = classified.copy()
-        st.session_state["bibliografia_clasificada"] = bib_class
-
-    # Controles unificados (siempre visibles). El botón se desactiva si falta bibliografía.
-    ready_bib = isinstance(bib_class, pd.DataFrame) and not bib_class.empty
-    if not ready_bib:
-        st.info("Ejecuta primero 'Bibliografía (PubMed)' y clasificación, o sube un CSV clasificado.")
-    uploaded_bib = st.file_uploader("Opcional: subir bibliografía clasificada (CSV)", type=["csv"], key="upl_bib_class")
-    if uploaded_bib is not None:
-        try:
-            bib_class = pd.read_csv(uploaded_bib)
-            st.session_state["bibliografia_clasificada"] = bib_class
-            ready_bib = True
-            st.success("Bibliografía cargada correctamente.")
-        except Exception as e:
-            st.error(f"No se pudo leer el CSV: {e}")
-
-    import os as _os
-    def_hall = str(_PROJ_ROOT / "gen-sets_GSEA_MSigDB/gsea_hallmarks_formatted.gmt")
-    def_back = str(_PROJ_ROOT / "gen-sets_GSEA_MSigDB/C5- ontology gene sets.gmt")
-    hall_gmt = st.session_state.get("hall_gmt_path", def_hall)
-    back_gmt = st.session_state.get("back_gmt_path", def_back)
-
-    c1, c2, c3 = st.columns([2, 2, 2])
-    with c1:
-        hall_gmt = st.text_input("Ruta GMT Hallmarks", value=hall_gmt)
-        st.session_state["hall_gmt_path"] = hall_gmt
-        if not _os.path.exists(hall_gmt):
-            upl = st.file_uploader("Subir GMT de Hallmarks", type=["gmt"], key="upl_hallmark_gmt")
-            if upl is not None:
-                try:
-                    tmp_path = str(_PROJ_ROOT / "gen-sets_GSEA_MSigDB/_uploaded_hallmarks.gmt")
-                    with open(tmp_path, "wb") as fh:
-                        fh.write(upl.getbuffer())
-                    hall_gmt = tmp_path
-                    st.session_state["hall_gmt_path"] = hall_gmt
-                    st.success("Hallmarks GMT cargado.")
-                except Exception as e:
-                    st.error(f"No se pudo guardar el GMT de Hallmarks: {e}")
-    with c2:
-        back_gmt = st.text_input("Ruta GMT background (opcional)", value=back_gmt)
-        st.session_state["back_gmt_path"] = back_gmt
-        if back_gmt and not _os.path.exists(back_gmt):
-            upl_b = st.file_uploader("Subir GMT de background (opcional)", type=["gmt"], key="upl_back_gmt")
-            if upl_b is not None:
-                try:
-                    tmp_path_b = str(_PROJ_ROOT / "gen-sets_GSEA_MSigDB/_uploaded_background.gmt")
-                    with open(tmp_path_b, "wb") as fh:
-                        fh.write(upl_b.getbuffer())
-                    back_gmt = tmp_path_b
-                    st.session_state["back_gmt_path"] = back_gmt
-                    st.success("Background GMT cargado.")
-                except Exception as e:
-                    st.error(f"No se pudo guardar el GMT de background: {e}")
-    with c3:
-        ctx = st.selectbox("Contexto biológico", ["Cáncer y TEM", "Cáncer y micro RNAs"], index=0, key="sig_ctx")
-
-    # Selección de tipo de cáncer (previa a generación)
-    # Usar el tipo de cáncer definido en los parámetros del estudio
-    sel_tipo_gen = cancer_type
-    st.caption(f"Tipo de cáncer (parámetros del estudio): {sel_tipo_gen}")
-
-    run_sig = st.button("Generar firmas", disabled=not ready_bib, key="btn_run_signatures")
-
-    if run_sig:
-        try:
-            with st.spinner("Calculando firmas (incluye enriquecimiento de Hallmarks)…"):
-                bib_csv = bib_class.to_csv(index=False)
-                df_sigs = _compute_signatures_cached(bib_csv, ctx, hall_gmt, back_gmt, sel_tipo_gen or "")
-            if df_sigs is None or df_sigs.empty:
-                st.info("No se generaron firmas para los datos disponibles.")
-            else:
-                try:
-                    st.session_state["df_signatures"] = df_sigs.copy()
-                except Exception:
-                    pass
-                st.success(f"Firmas generadas: {len(df_sigs)} filas")
-                # Vista segura para Streamlit/Arrow: convertir columnas *_genes (listas) a string
-                df_sigs_display = df_sigs.copy()
-                try:
-                    list_cols = [c for c in df_sigs_display.columns if c.startswith('hallmark_') and c.endswith('_genes')]
-                    for c in list_cols:
-                        df_sigs_display[c] = df_sigs_display[c].apply(lambda v: ", ".join(v) if isinstance(v, list) else (str(v) if pd.notna(v) else ""))
-                except Exception:
-                    pass
-                st.dataframe(df_sigs_display)
-                # Descarga CSV
-                st.download_button(
-                    label="Descargar firmas (CSV)",
-                    data=df_sigs.to_csv(index=False),
-                    file_name="firmas_geneticas.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
-
-                # Visualización se realiza debajo usando datos en sesión
-        except Exception as e:
-            st.error(f"No se pudieron generar las firmas: {e}")
-
-        # Visualización: disponible siempre que existan firmas en sesión
-        df_sigs_viz = st.session_state.get("df_signatures")
-        if isinstance(df_sigs_viz, pd.DataFrame) and not df_sigs_viz.empty:
-            st.subheader("Visualización de firmas")
-            sel_tipo = sel_tipo_gen
-            st.caption(f"Visualizando tipo de cáncer (parámetros del estudio): {sel_tipo}")
-            if sel_tipo:
-                try:
-                    import plotly.express as px
-                    recs = []
-                    for _, row in df_sigs_viz[df_sigs_viz['cancer_type'] == sel_tipo].iterrows():
-                        nivel = row.get('nivel_expresion')
-                        genes_firma = row.get('genes', []) if isinstance(row.get('genes'), list) else []
-                        counts_firma = row.get('conteo_articulos_por_gene', []) if isinstance(row.get('conteo_articulos_por_gene'), list) else []
-                        gene_to_count = dict(zip(genes_firma, counts_firma))
-                        for col in row.index:
-                            if col.startswith('hallmark_') and col.endswith('_genes'):
-                                term = col[len('hallmark_'):-len('_genes')]
-                                genes_hm = row[col] if isinstance(row[col], list) else []
-                                pval_col = f"hallmark_{term}_pvalue"
-                                pval = row.get(pval_col, None)
-                                for g in genes_hm:
-                                    recs.append({
-                                        'nivel_expresion': nivel,
-                                        'gene': g,
-                                        'hallmark': term.replace('HALLMARK_', '').replace('_', ' '),
-                                        'articles': gene_to_count.get(g, 0),
-                                        'pvalue': pval if pd.notna(pval) else 1.0,
-                                    })
-                    if not recs:
-                        st.info("No hay hallmarks asociados para este tipo de cáncer. Mostrando conteo de artículos por gen como alternativa.")
-                        # Fallback: barras por nivel con conteo de artículos por gen
-                        base = df_sigs_viz[df_sigs_viz['cancer_type'] == sel_tipo].copy()
-                        # Expandir por nivel y pares (gen, conteo)
-                        rows = []
-                        for _, r in base.iterrows():
-                            lvl = r.get('nivel_expresion')
-                            genes = r.get('genes', []) if isinstance(r.get('genes'), list) else []
-                            counts = r.get('conteo_articulos_por_gene', []) if isinstance(r.get('conteo_articulos_por_gene'), list) else []
-                            for g, c in zip(genes, counts):
-                                rows.append({'nivel_expresion': lvl, 'gene': g, 'articles': c})
-                        if rows:
-                            import plotly.express as px
-                            flatc = pd.DataFrame(rows)
-                            levels_sorted = sorted(flatc['nivel_expresion'].dropna().unique().tolist())
-                            tabs = st.tabs([f"{lvl}" for lvl in levels_sorted])
-                            for lvl, tab in zip(levels_sorted, tabs):
-                                with tab:
-                                    d = flatc[flatc['nivel_expresion'] == lvl]
-                                    if d.empty:
-                                        st.info("Sin datos para este nivel.")
-                                        continue
-                                    d = d.sort_values('articles', ascending=False).head(50)
-                                    fig = px.bar(d, x='gene', y='articles', title=f"Artículos por gen — {sel_tipo} — {lvl}")
-                                    fig.update_layout(height=600, margin=dict(t=60, b=100, l=20, r=20), xaxis_tickangle=45)
-                                    st.plotly_chart(fig, use_container_width=True)
-                        else:
-                            st.info("No hay datos suficientes para este tipo de cáncer.")
-                    else:
-                        flat = pd.DataFrame(recs)
-                        flat['log_p'] = -np.log10(flat['pvalue'].replace(0, 1e-300))
-                        levels_sorted = sorted(flat['nivel_expresion'].dropna().unique().tolist())
-                        tabs = st.tabs([f"{lvl}" for lvl in levels_sorted])
-                        for lvl, tab in zip(levels_sorted, tabs):
-                            with tab:
-                                d = flat[flat['nivel_expresion'] == lvl]
-                                if d.empty:
-                                    st.info("Sin datos para este nivel.")
-                                    continue
-                                fig = px.sunburst(
-                                    d,
-                                    path=['gene', 'hallmark'],
-                                    values='articles',
-                                    color='log_p',
-                                    color_continuous_scale='RdBu_r',
-                                    title=f"Firmas - {sel_tipo} - {lvl}",
-                                )
-                                fig.update_layout(height=800, margin=dict(t=60, b=20, l=20, r=20))
-                                st.plotly_chart(fig, use_container_width=True)
-                except Exception as e:
-                    st.warning(f"No se pudo renderizar la visualización de firmas: {e}")
-
-            # Visualizaciones adicionales (polar, fingerprint, clustergrama)
-            try:
-                st.subheader("Visualizaciones adicionales")
-                # Niveles disponibles en firmas para el tipo seleccionado
-                niveles_disp = (
-                    df_sigs_viz[df_sigs_viz['cancer_type'] == sel_tipo]['nivel_expresion']
-                    .dropna().astype(str).unique().tolist()
-                )
-                niveles_disp = [n for n in ['Sobreexpresados', 'Subexpresados', 'estable'] if n in niveles_disp] or niveles_disp
-
-                c1, c2 = st.columns(2)
-                with c1:
-                    with st.expander("Gráfico polar de Hallmarks", expanded=False):
-                        if niveles_disp:
-                            lvl = st.selectbox("Nivel", niveles_disp, key="viz_polar_lvl")
-                            figp = hallmarks_polar_chart(df_sigs_viz, sel_tipo, lvl)
-                            st.plotly_chart(figp, use_container_width=True)
-                        else:
-                            st.info("No hay niveles disponibles para el tipo seleccionado.")
-                with c2:
-                    with st.expander("Fingerprint (Genes × Hallmarks)", expanded=False):
-                        if niveles_disp:
-                            lvl2 = st.selectbox("Nivel", niveles_disp, key="viz_fp_lvl")
-                            figf = fingerprint_heatmap(df_sigs_viz, sel_tipo, lvl2)
-                            st.plotly_chart(figf, use_container_width=True)
-                        else:
-                            st.info("No hay niveles disponibles para el tipo seleccionado.")
-
-                with st.expander("Clustergrama de expresión relativa", expanded=False):
-                    try:
-                        # Recuperar clasificación y datos de expresión si existen
-                        if df_loaded is None:
-                            st.info("Primero carga y clasifica un Excel de qPCR para ver el clustergrama.")
-                        else:
-                            file_key = f"assign_{df_loaded.source_name}:{df_loaded.sheet_name}"
-                            state_local = st.session_state.get(file_key, {})
-                            controles_df = state_local.get('controles_df', pd.DataFrame())
-                            muestras_df = state_local.get('muestras_df', pd.DataFrame())
-                            if (controles_df is None or controles_df.empty) or (muestras_df is None or muestras_df.empty):
-                                st.info("Clasifica controles y muestras en la sección inicial para habilitar el clustergrama.")
-                            else:
-                                # Listas de genes desde las firmas para el tipo y niveles clásicos
-                                lista_sobre, lista_sub = [], []
-                                base = df_sigs_viz[df_sigs_viz['cancer_type'] == sel_tipo]
-                                try:
-                                    lista_sobre = base.loc[base['nivel_expresion'] == 'Sobreexpresados', 'genes'].iloc[0]
-                                except Exception:
-                                    lista_sobre = []
-                                try:
-                                    lista_sub = base.loc[base['nivel_expresion'] == 'Subexpresados', 'genes'].iloc[0]
-                                except Exception:
-                                    lista_sub = []
-                                lista_sobre = lista_sobre if isinstance(lista_sobre, list) else ([] if pd.isna(lista_sobre) else [str(lista_sobre)])
-                                lista_sub = lista_sub if isinstance(lista_sub, list) else ([] if pd.isna(lista_sub) else [str(lista_sub)])
-
-                                metodo = st.radio("Método de normalización", ["gen de referencia", "promedios"], index=0, horizontal=True, key="viz_cluster_method")
-                                ref_default = st.session_state.get('reference_gene', '')
-                                gen_ref = st.text_input("Gen de referencia (si aplica)", value=str(ref_default) if ref_default else "", key="viz_cluster_ref")
-                                figs = {}
-                                try:
-                                    figs = clustered_expression_by_level(controles_df, muestras_df, lista_sobre, lista_sub, metodo_elegido=metodo, gen_referencia=(gen_ref or None))
-                                except Exception as ex:
-                                    st.warning(f"No se pudo generar el clustergrama: {ex}")
-                                    figs = {}
-                                # Mostrar
-                                if not figs:
-                                    st.info("Sin datos suficientes para construir el clustergrama con los parámetros actuales.")
-                                else:
-                                    for k in ("Sobreexpresados", "Subexpresados"):
-                                        if k in figs:
-                                            st.plotly_chart(figs[k], use_container_width=True)
-                    except Exception:
-                        st.info("Clustergrama no disponible (faltan dependencias opcionales o datos).")
-            except Exception:
-                pass
-
-
-# -------------------------------------------------------------------------
-# Heurística (PubMed) y relación con niveles/firmas
-# -------------------------------------------------------------------------
-st.markdown("---")
-render_heuristics_section(app_state, cancer_type)
-
-# -----------------------------------------------------------------------------
-# Insights (Google NLP) sobre bibliografía filtrada por el cáncer seleccionado
-# -----------------------------------------------------------------------------
-st.markdown("---")
-render_google_nlp_section(app_state, cancer_type, SERVICES.google_nlp)
-
-# -----------------------------------------------------------------------------
-# Guía rápida
-# -----------------------------------------------------------------------------
-st.markdown("---")
-st.markdown("""
-**Cómo usar la aplicación**
-1. Sube un archivo Excel (.xlsx/.xls) con formato qPCR y elige la hoja.
-2. Selecciona parámetros del estudio desde el menú (contexto, tipo de cáncer, método preferido).
-3. Ingresa manualmente los prefijos de controles y muestras y presiona "Clasificar y calcular".
-4. Revisa Fold Change (promedios vs gen de referencia), gráficas y la clasificación por nivel de expresión.
-5. Exporta desde los widgets (descarga en cada tabla/gráfico) según necesidad.
-""")
+if __name__ == "__main__":
+    main()

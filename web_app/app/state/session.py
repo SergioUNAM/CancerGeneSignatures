@@ -22,6 +22,7 @@ class AppSessionState:
 
     undetermined: UndeterminedSettings = field(default_factory=UndeterminedSettings)
     context_label: str = ""
+    cancer_type: str = ""
     exclude_stable: bool = False
     df_loaded: Optional[LoadResult] = None
 
@@ -40,5 +41,6 @@ class AppSessionState:
         st.session_state["_app_state"] = self
         st.session_state["und_policy"] = self.undetermined.policy
         st.session_state["und_value"] = self.undetermined.value
+        st.session_state["cancer_type"] = self.cancer_type
         st.session_state["exclude_stable"] = self.exclude_stable
         st.session_state["df_loaded"] = self.df_loaded

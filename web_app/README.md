@@ -7,7 +7,7 @@ Requisitos
 Instalación
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r web_app/requirements.txt
 ```
 
@@ -16,19 +16,17 @@ Ejecutar
 streamlit run web_app/streamlit_app.py
 ```
 
-Flujo
-- Sube Excel (.xlsx/.xls), selecciona hoja (si aplica).
-- (Opcional) Introduce prefijos de controles/muestras o usa los detectados de la plantilla.
-- Revisa clasificación, Fold Change (promedios y gen de referencia) y gráficas.
-- Anotación Ensembl (IDs/descripciones) y descarga de resultados.
-- Enriquecimiento STRING por nivel de expresión (GO/KEGG/Reactome), filtros y descargas.
-- Bibliografía (PubMed): ingresa tu NCBI Email (obligatorio) y API Key (opcional) directamente en la sección. La app mostrará progreso por gen, tablas y gráficos, y permitirá descargar CSV.
-- Insights (Google NLP): ingresa tu Google Cloud Natural Language API Key para analizar entidades, sentimiento y categorías en la bibliografía filtrada por el tipo de cáncer seleccionado. Puedes subir un CSV de bibliografía (Title, Abstract, Gene opcional), elegir un gen y generar un resumen corto.
-- Firmas genéticas: genera firmas por tipo de cáncer/nivel desde la bibliografía clasificada y enriquece Hallmarks (MSigDB). Incluye visualización Sunburst y descarga CSV. Requiere `gseapy` y archivos GMT locales (ruta por defecto en `gen-sets_GSEA_MSigDB/`).
-  - Si las rutas GMT no existen en el servidor, puedes cargarlas directamente desde la UI (inputs en la sección permiten subir los `.gmt`).
+Flujo principal
+- Sube un Excel (.xlsx/.xls) y selecciona la hoja qPCR si aplica.
+- Clasifica controles y muestras por prefijo, sufijo, regex o selección manual; revisa la previsualización y limpia colisiones si es necesario.
+- Aplica la política "Undetermined/ND" (nan, ctmax o valor fijo) y revisa la calidad de datos antes de continuar.
+- Calcula fold change (promedios o gen de referencia) y genera la tabla de expresión categorizada.
+- Ejecuta la normalización avanzada: ajusta parámetros (α, candidatos, K referencias, bootstrap, permutaciones) y obtén df_norm, ranking de referencias y estadísticas diferenciales.
+- Anota genes vía Ensembl (IDs y descripciones) y descarga los resultados.
 
 Notas
-- La app lee `web_app/config/menu.json` para los parámetros (contexto, tipo de cáncer, método preferido).
-- Para Excel se usa openpyxl; si hay formatos antiguos, conviértelos a .xlsx.
-- Logs: se puede ajustar el nivel con la variable de entorno `CGS_LOGLEVEL` (INFO por defecto).
-- Google NLP: configura `GOOGLE_NLP_API_KEY` como variable de entorno o en `st.secrets` para evitar exponer claves en código. También puedes pegarla temporalmente en la UI.
+- La app usa `web_app/config/menu.json` para poblar tipos de cáncer, contextos y otras listas.
+- Si trabajas con Excel heredados, conviértelos a `.xlsx` para una importación estable (se usa `openpyxl`).
+- `CGS_LOGLEVEL` permite ajustar el nivel de logging (INFO por defecto).
+- Dependencias opcionales como STRING, PubMed, Google NLP o firmas se reintroducirán en módulos separados cuando se reactiven.
+- Para mantener estado entre ejecuciones se persiste la sesión en `st.session_state`; usa "Limpiar clasificación" si necesitas empezar de cero.
