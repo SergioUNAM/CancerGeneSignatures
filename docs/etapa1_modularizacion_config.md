@@ -47,7 +47,7 @@ web_app/
 │   │       ├── bibliography.py
 │   │       └── signatures.py
 │   ├── adapters/
-│   │   ├── io_adapter.py     # Conecta servicios con `src.core.io`
+│   │   ├── io_adapter.py     # Conecta servicios con `app.core.io`
 │   │   ├── string_adapter.py # Configuración de cliente STRING
 │   │   └── pubmed_adapter.py # Solicitudes y cache PubMed
 │   └── app.py                # Punto de entrada Streamlit (mínimo)
@@ -57,7 +57,7 @@ web_app/
 └── streamlit_app.py          # Wrapper que invoca `app.app.main()`
 ```
 
-- `src/core/*` permanece como librería de dominio; sólo se crean adaptadores si hace falta transformar inputs/outputs.
+- `app/core/*` permanece como librería de dominio; sólo se crean adaptadores si hace falta transformar inputs/outputs.
 - Las páginas pueden registrarse mediante un router simple (`st.Page`, `multipage`) manteniendo estado centralizado.
 
 ---

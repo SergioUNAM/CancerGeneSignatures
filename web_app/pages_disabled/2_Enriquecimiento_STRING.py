@@ -6,14 +6,14 @@ import streamlit as st
 import pandas as pd
 from typing import Optional
 
-# Ensure project root is importable so `src.*` works when running from web_app/
+# Ensure project root is importable para acceder al paquete `app`
 import sys
 from pathlib import Path
 _PROJ_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJ_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJ_ROOT))
 
-from src.core.string_enrichment import enrich_by_levels, filter_enrichment, dfs_to_excel_bytes
+from app.core.string_enrichment import enrich_by_levels, filter_enrichment, dfs_to_excel_bytes
 
 st.set_page_config(page_title="CGS — Enriquecimiento STRING", page_icon="🧬", layout="wide")
 st.title("Enriquecimiento funcional (STRING)")

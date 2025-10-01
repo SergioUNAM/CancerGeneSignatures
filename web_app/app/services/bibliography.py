@@ -5,7 +5,7 @@ from typing import Optional
 
 import pandas as pd
 
-from src.core.bibliography import search_pubmed_by_genes
+from app.core.bibliography import search_pubmed_by_genes
 
 
 @dataclass(frozen=True)

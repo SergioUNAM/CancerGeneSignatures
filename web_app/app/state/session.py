@@ -5,7 +5,7 @@ from typing import Optional
 
 import streamlit as st
 
-from src.core.io import LoadResult
+from app.core.io import LoadResult
 
 
 @dataclass

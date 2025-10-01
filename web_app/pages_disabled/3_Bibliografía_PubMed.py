@@ -13,7 +13,7 @@ _PROJ_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJ_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJ_ROOT))
 
-from src.core.bibliography import search_pubmed_by_genes, classify_bibliography, aggregate_counts_by_level_and_cancer
+from app.core.bibliography import search_pubmed_by_genes, classify_bibliography, aggregate_counts_by_level_and_cancer
 
 st.set_page_config(page_title="CGS — Bibliografía PubMed", page_icon="📚", layout="wide")
 st.title("Bibliografía (PubMed)")

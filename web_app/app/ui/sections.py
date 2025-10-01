@@ -26,7 +26,7 @@ from app.services.nlp import (
 )
 
 try:
-    from src.core.bibliography import filter_bibliography_by_cancer  # type: ignore
+    from app.core.bibliography import filter_bibliography_by_cancer  # type: ignore
 except Exception:  # pragma: no cover - dependencia opcional
     filter_bibliography_by_cancer = None  # type: ignore
 

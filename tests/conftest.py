@@ -8,12 +8,12 @@ import pytest
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _ensure_src_on_path() -> Iterator[Path]:
-    """Guarantee that `src/` is importable during the test session."""
+def _ensure_app_on_path() -> Iterator[Path]:
+    """Guarantee that the `app` package (web_app/app) is importable during tests."""
     root = Path(__file__).resolve().parents[1]
-    src_path = root / "src"
-    if str(src_path) not in sys.path:
-        sys.path.insert(0, str(src_path))
+    app_pkg_path = root / "web_app"
+    if str(app_pkg_path) not in sys.path:
+        sys.path.insert(0, str(app_pkg_path))
     yield root
     # No cleanup required; pytest finalises the process afterwards.
 
@@ -47,7 +47,7 @@ def synthetic_qpcr_workbook() -> BytesIO:
 
 @pytest.fixture()
 def qpcr_load_result(synthetic_qpcr_workbook):  # type: ignore[override]
-    from src.core.io import parse_qpcr_wide
+    from app.core.io import parse_qpcr_wide
 
     workbook = BytesIO(synthetic_qpcr_workbook.getvalue())
     workbook.name = synthetic_qpcr_workbook.name
@@ -56,6 +56,6 @@ def qpcr_load_result(synthetic_qpcr_workbook):  # type: ignore[override]
 
 @pytest.fixture()
 def qpcr_long_df(qpcr_load_result):  # type: ignore[override]
-    from src.core.qpcr import melt_wide_to_long
+    from app.core.qpcr import melt_wide_to_long
 
     return melt_wide_to_long(qpcr_load_result.df)

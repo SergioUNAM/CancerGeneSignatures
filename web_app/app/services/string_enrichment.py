@@ -5,7 +5,7 @@ from typing import Dict, Iterable, List, Mapping, Optional
 
 import pandas as pd
 
-from src.core.string_enrichment import enrich_by_levels, filter_enrichment
+from app.core.string_enrichment import enrich_by_levels, filter_enrichment
 
 
 @dataclass(frozen=True)

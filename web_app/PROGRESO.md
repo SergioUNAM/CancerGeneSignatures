@@ -1,7 +1,7 @@
 # Seguimiento de Progreso — Web App CancerGeneSignatures
 
 Fecha: 2025-09-10
-Ámbito: `web_app/` (Streamlit) + `src/core/` (lógica qPCR/FC)
+Ámbito: `web_app/` (Streamlit) + `app/core/` (lógica qPCR/FC)
 
 **Resumen**
 - Objetivo: Analizar datos qPCR desde Excel, calcular ΔΔCt y Fold Change (promedios vs gen de referencia), y visualizar resultados.
@@ -10,11 +10,11 @@ Fecha: 2025-09-10
 **Arquitectura Breve**
 - UI: `web_app/streamlit_app.py`
 - Config: `web_app/config/menu.json`
-- IO/Parsing: `src/core/io.py`
-- qPCR utils: `src/core/qpcr.py`
-- Limpieza: `src/core/cleaning.py`
-- Fold Change: `src/core/fold_change.py`
-- Tablas/Gráficas: `src/core/tables.py`
+- IO/Parsing: `app/core/io.py`
+- qPCR utils: `app/core/qpcr.py`
+- Limpieza: `app/core/cleaning.py`
+- Fold Change: `app/core/fold_change.py`
+- Tablas/Gráficas: `app/core/tables.py`
 
 **Cómo Ejecutar**
 - Crear entorno: `pip install -r web_app/requirements.txt`
@@ -24,11 +24,11 @@ Fecha: 2025-09-10
 **Hitos y Estado**
 - [x] Carga Excel y selección de hoja (`web_app/streamlit_app.py:118`)
 - [x] Vista previa y metadatos extraídos (`web_app/streamlit_app.py:151`)
-- [x] Ancho→largo y filtro básicos de controles de máquina (`web_app/streamlit_app.py:166`, `src/core/cleaning.py:6`)
+- [x] Ancho→largo y filtro básicos de controles de máquina (`web_app/streamlit_app.py:166`, `app/core/cleaning.py:6`)
 - [x] Clasificación por prefijos y estado persistente (`web_app/streamlit_app.py:202`)
 - [x] Imputación NaN→máximo Ct global (`web_app/streamlit_app.py:254`)
-- [x] Cálculo FC (promedios y gen de referencia) (`src/core/fold_change.py:22`)
-- [x] Visualizaciones comparativas y tabla (`web_app/streamlit_app.py:283`, `src/core/tables.py:8`)
+- [x] Cálculo FC (promedios y gen de referencia) (`app/core/fold_change.py:22`)
+- [x] Visualizaciones comparativas y tabla (`web_app/streamlit_app.py:283`, `app/core/tables.py:8`)
 - [x] Menú configurable con cache y fallback (`web_app/streamlit_app.py:88`, `web_app/config/menu.json`)
 - [x] Botones de descarga para CSV generados
 - [x] Mejora clasificación (case-insensitive)
@@ -53,15 +53,15 @@ Fecha: 2025-09-10
   - Merge a `master` de la rama `feature/webapp-downloads-caseinsensitive` (descargas CSV, clasificación case-insensitive, fix import `src`).
 - 2025-09-10
   - Añadidos botones de descarga (`st.download_button`) para los CSV generados: controles/muestras limpios, consolidado FC, y expresión categorizada.
-  - Clasificación de controles/muestras ahora case-insensitive usando `classify_tests` de `src/core/qpcr.py`.
+  - Clasificación de controles/muestras ahora case-insensitive usando `classify_tests` de `app/core/qpcr.py`.
   - Documentación inicial de seguimiento en `web_app/PROGRESO.md`.
-  - Corrección de importaciones de `src`: se añadieron `src/__init__.py` y `src/core/__init__.py`, y se inyectó la raíz del proyecto en `sys.path` en `web_app/streamlit_app.py` para permitir `from src.core...` al ejecutar desde `web_app/`.
+  - Corrección de importaciones de `src`: se añadieron `src/__init__.py` y `app/core/__init__.py`, y se inyectó la raíz del proyecto en `sys.path` en `web_app/streamlit_app.py` para permitir `from app.core...` al ejecutar desde `web_app/`.
  - 2025-09-10
  - Enriquecimiento STRING integrado en la UI: selección por niveles de expresión, fuentes (GO/KEGG/Reactome), filtros por FDR/tamaño/top-N, tabla, barras (-log10 FDR) y descarga CSV.
- - Nuevo módulo `src/core/string_enrichment.py` con helpers `run_string_enrichment` y `filter_enrichment` (sin dependencias adicionales, usa `requests`).
+ - Nuevo módulo `app/core/string_enrichment.py` con helpers `run_string_enrichment` y `filter_enrichment` (sin dependencias adicionales, usa `requests`).
 - 2025-09-10
   - Bibliografía (PubMed) integrada en la web app:
-    - Nuevo módulo `src/core/bibliography.py` con `search_pubmed_by_genes`, `classify_bibliography`, `aggregate_counts_by_level_and_cancer`.
+    - Nuevo módulo `app/core/bibliography.py` con `search_pubmed_by_genes`, `classify_bibliography`, `aggregate_counts_by_level_and_cancer`.
     - UI con inputs para `NCBI Email` (obligatorio) y `NCBI API Key` (opcional) directamente en la app (demo-friendly, sin necesidad de exportar variables).
     - Progreso visible por gen (barra + estado) y logs de avance/errores.
     - Descargas CSV de resultados y de bibliografía clasificada; gráficos por tipo de cáncer y nivel.
@@ -70,7 +70,7 @@ Fecha: 2025-09-10
     - Logs informativos en puntos largos: anotación Ensembl, enriquecimiento STRING y búsqueda PubMed (inicio/fin, conteos). Se controla por `CGS_LOGLEVEL` (INFO por defecto).
  - 2025-09-11
   - Firmas genéticas (MVP) en la web app:
-    - Nuevo módulo `src/core/signatures.py` para construir firmas desde bibliografía clasificada y enriquecimiento Hallmarks.
+    - Nuevo módulo `app/core/signatures.py` para construir firmas desde bibliografía clasificada y enriquecimiento Hallmarks.
     - Sección "Firmas genéticas" en la app: selección de GMTs, generación de DataFrame y descarga CSV.
     - Visualización básica con sunburst por gen→hallmark y color por -log10(p), separado por nivel de expresión.
     - Requiere `gseapy` (añadido a requirements).
@@ -88,12 +88,12 @@ Fecha: 2025-09-10
     - Menú externo `menu.json` con tipos de cáncer/contextos/método preferido.
 
 **Decisiones Técnicas**
-- Gen de referencia: seleccionado por mínima media de desviaciones estándar entre grupos (`src/core/fold_change.py:44`).
+- Gen de referencia: seleccionado por mínima media de desviaciones estándar entre grupos (`app/core/fold_change.py:44`).
 - Imputación: valores no determinados/NaN se convierten a máximo Ct global antes de FC (`web_app/streamlit_app.py:254-263`).
-- Filtro controles de máquina: en UI se pasan PPC/RTC; función soporta lista por defecto más amplia (`src/core/cleaning.py:18`).
-- Parsing Excel robusto (cabeceras y fila de nombres de prueba) (`src/core/io.py:76`).
+- Filtro controles de máquina: en UI se pasan PPC/RTC; función soporta lista por defecto más amplia (`app/core/cleaning.py:18`).
+- Parsing Excel robusto (cabeceras y fila de nombres de prueba) (`app/core/io.py:76`).
 - Encabezados por coordenadas: `parse_qpcr_wide(..., header_mode="coords", header_row_idx=3, well_col_idx=0, target_col_idx=1)` con fallback a `header_mode="auto"`.
-- Hot-reload en UI para `src.core.io`: se recarga el módulo al iniciar la app para asegurar la firma más reciente del parser.
+- Hot-reload en UI para `app.core.io`: se recarga el módulo al iniciar la app para asegurar la firma más reciente del parser.
  - Heurística de fila de nombres de prueba: se prefieren filas con mayor número de códigos con guion (p.ej., `4GB-001`) y dígitos, para escoger la fila 2 cuando aplica (sobre etiquetas como `C1`, `DGC1`).
 
 **Novedades de Uso**
@@ -131,31 +131,31 @@ Plantilla para una nueva entrada:
 **Cobertura del notebook `notebooks/uimeo_data_analysis.py`**
 - Carga Excel y extracción básica: [x]
   - Notebook: `cargar_datos_excel`, `extraer_informacion_cg`
-  - App: `src/core/io.parse_qpcr_wide` + vista previa (`web_app/streamlit_app.py:151`), extracción de tests/genes/pozos (`web_app/streamlit_app.py:176`)
+  - App: `app/core/io.parse_qpcr_wide` + vista previa (`web_app/streamlit_app.py:151`), extracción de tests/genes/pozos (`web_app/streamlit_app.py:176`)
 - Clasificación por prefijos (controles/muestras): [x]
   - Notebook: `procesar_ct` (case-insensitive)
-  - App: `src/core/qpcr.classify_tests` (`web_app/streamlit_app.py:226`)
+  - App: `app/core/qpcr.classify_tests` (`web_app/streamlit_app.py:226`)
 - Filtrado de controles de máquina (PPC/RTC): [x]
   - Notebook: `filtrar_controles_maquina` (PPC/RTC)
-  - App: `src/core/cleaning.drop_machine_controls` (`web_app/streamlit_app.py:169`)
+  - App: `app/core/cleaning.drop_machine_controls` (`web_app/streamlit_app.py:169`)
 - Imputación de Ct (NaN → máximo Ct global): [x]
   - Notebook: `procesar_ct_column` (valor máximo)
   - App: bloque de imputación (`web_app/streamlit_app.py:254`)
 - Cálculo ΔΔCt y Fold Change (promedios y gen ref): [x]
   - Notebook: `calcular_fold_change`
-  - App: `src/core/fold_change.compute_fold_change` (`web_app/streamlit_app.py:268`)
+  - App: `app/core/fold_change.compute_fold_change` (`web_app/streamlit_app.py:268`)
 - Categorización de expresión (sub/estable/sobre): [x]
   - Notebook: `categorizar_expresion`
   - App: `pd.cut` sobre FC escogido (`web_app/streamlit_app.py:300`)
 - Visualización básica (tabla/plots comparación FC): [x]
   - Notebook: tablas y gráficos de resumen
-  - App: `src/core/tables.fc_comparison_table` + barras/series Plotly (`web_app/streamlit_app.py:279`, `:283`)
+  - App: `app/core/tables.fc_comparison_table` + barras/series Plotly (`web_app/streamlit_app.py:279`, `:283`)
 - Descarga de resultados: [x] (CSV en app; Excel en notebook)
   - Notebook: `export_dfs_to_excel`
   - App: `st.download_button` para CSV (`web_app/streamlit_app.py:329`)
 - Enriquecimiento Ensembl (IDs/descr.): [x]
   - Notebook: `add_ensembl_info_batch` (requests + fallback)
-  - App: Integrado con `src/core/ensembl.add_ensembl_info_batch` (tabla + descarga)
+  - App: Integrado con `app/core/ensembl.add_ensembl_info_batch` (tabla + descarga)
 - Enriquecimiento STRING y/o GSEA (gseapy): [ ]
   - Notebook: llamadas a STRING/gseapy, preparación y gráficos
   - App: no integrado aún (requiere endpoints/red y UI)

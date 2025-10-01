@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from src.core.fold_change import compute_fold_change
+from app.core.fold_change import compute_fold_change
 
 
 @pytest.fixture()

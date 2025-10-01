@@ -24,18 +24,18 @@ import streamlit as st
 
 from app.config.loader import load_app_config, ConfigError
 
-# Ensure project root is importable so `src.*` works when running from web_app/
+# Ensure web_app package is importable cuando se ejecuta desde distintos directorios
 _PROJ_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJ_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJ_ROOT))
 
 # Importamos funciones propias del proyecto
-from src.core.io import LoadResult, list_excel_sheets, parse_qpcr_wide
+from app.core.io import LoadResult, list_excel_sheets, parse_qpcr_wide
 
 # Hot-reload core IO to pick up signature changes during dev sessions
 try:
     import importlib
-    import src.core.io as _cgs_io
+    import app.core.io as _cgs_io
     _cgs_io = importlib.reload(_cgs_io)
     LoadResult = _cgs_io.LoadResult  # type: ignore
     list_excel_sheets = _cgs_io.list_excel_sheets  # type: ignore
@@ -62,16 +62,16 @@ except ConfigError as exc:
 
 MENU = APP_CONFIG.menu
 SERVICES = APP_CONFIG.services
-from src.core.qpcr import (
+from app.core.qpcr import (
     suggest_name_affixes,
 )
-from src.core.tables import fc_comparison_table
-from src.core.ensembl import add_ensembl_info_batch
-from src.core.string_enrichment import dfs_to_excel_bytes
+from app.core.tables import fc_comparison_table
+from app.core.ensembl import add_ensembl_info_batch
+from app.core.string_enrichment import dfs_to_excel_bytes
 # Hot-reload bibliography helpers during dev (ensure new functions are visible)
 try:
     import importlib as _importlib
-    import src.core.bibliography as _cgs_bib
+    import app.core.bibliography as _cgs_bib
     _cgs_bib = _importlib.reload(_cgs_bib)
     search_pubmed_by_genes = _cgs_bib.search_pubmed_by_genes  # type: ignore
     classify_bibliography = _cgs_bib.classify_bibliography  # type: ignore
@@ -81,15 +81,16 @@ try:
     summarize_relations_by_gene = getattr(_cgs_bib, 'summarize_relations_by_gene')  # type: ignore
 except Exception:
     # Fallbacks (should not be needed if module is available)
-    from src.core.bibliography import (
-        search_pubmed_by_genes,
-        classify_bibliography,
-        aggregate_counts_by_level_and_cancer,
-    )
-from src.core.signatures import (
+    from app.core import bibliography as _fallback_bib
+
+    search_pubmed_by_genes = _fallback_bib.search_pubmed_by_genes  # type: ignore
+    classify_bibliography = _fallback_bib.classify_bibliography  # type: ignore
+    aggregate_counts_by_level_and_cancer = _fallback_bib.aggregate_counts_by_level_and_cancer  # type: ignore
+    filter_bibliography_by_cancer = getattr(_fallback_bib, 'filter_bibliography_by_cancer', None)  # type: ignore
+from app.core.signatures import (
     create_signatures,
 )
-from src.core.visuals import (
+from app.core.visuals import (
     hallmarks_polar_chart,
     fingerprint_heatmap,
     clustered_expression_by_level,
@@ -112,6 +113,11 @@ from app.services.fold_change import (
     FoldChangePreparationError,
     QualityMetrics,
 )
+from app.services.normalization import (
+    AdvancedNormalizationParams,
+    AdvancedNormalizationError,
+    execute_advanced_normalization,
+)
 from app.services.visuals import (
     build_fc_detail_figure,
     build_expression_distribution,
@@ -128,6 +134,11 @@ from app.ui.sections import (
     render_google_nlp_section,
 )
 
+NORMALIZATION_METHOD_DESCRIPTIONS = {
+    "promedios": "Promedios globales (ΔΔCt con medias por grupo)",
+    "ref_gene": "Gen de referencia (mínima desviación estándar)",
+    "advanced": "Normalización avanzada (búsqueda de referencias estables)",
+}
 # Cache de firmas para evitar recomputar al cambiar solo la selección visual
 import hashlib
 @st.cache_data(show_spinner=False)
@@ -136,7 +147,7 @@ def _compute_signatures_cached(bib_csv: str, ctx: str, hall_gmt: str, back_gmt: 
         df_bib = pd.read_csv(io.StringIO(bib_csv))
     except Exception:
         return pd.DataFrame()
-    from src.core.signatures import HallmarkConfig
+    from app.core.signatures import HallmarkConfig
     cfg = HallmarkConfig(hallmark_gmt=hall_gmt, background_gmt=back_gmt)
     return create_signatures(df_bib, contexto_biologico=ctx, hallmark_cfg=cfg)
 
@@ -252,10 +263,6 @@ with st.sidebar:
     context_options = [ctx.label for ctx in MENU.contexts]
     context_default_idx = context_options.index(app_state.context_label) if app_state.context_label in context_options else 0
     context_sel_label = st.selectbox("Contexto", context_options, index=context_default_idx)
-    norm_options = [method.label for method in MENU.normalization_methods]
-    norm_default_idx = 1 if len(norm_options) > 1 else 0
-    norm_sel_label = st.selectbox("Método preferido", norm_options, index=norm_default_idx)
-
     st.header("3) Política 'Undetermined/ND'")
     und_options = ["nan", "ctmax", "value"]
     und_default_idx = und_options.index(app_state.undetermined.policy) if app_state.undetermined.policy in und_options else 0
@@ -349,7 +356,7 @@ if df_loaded is not None:
     with c1:
         st.info(f"Contexto: {context_sel_label}")
     with c2:
-        st.info(f"Método preferido: {norm_sel_label}")
+        st.info("Método de normalización: selecciona en el paso 3")
     with c3:
         st.info(f"Tipo cáncer: {cancer_type}")
 
@@ -674,13 +681,57 @@ if df_loaded is not None:
     if not ready_for_fc and not controles_df.empty and not muestras_df.empty:
         st.stop()
 
+    df_expr_downstream_session = st.session_state.get('df_expr')
+    consolidated_downstream_session = st.session_state.get('fc_consolidated')
+    reference_label_session = st.session_state.get('reference_gene', "")
+
+    downstream_ready = bool(
+        isinstance(df_expr_downstream_session, pd.DataFrame)
+        and not df_expr_downstream_session.empty
+    )
+    df_expr_downstream: Optional[pd.DataFrame] = (
+        df_expr_downstream_session.copy() if downstream_ready else None
+    )
+    consolidated_downstream: Optional[pd.DataFrame] = (
+        consolidated_downstream_session.copy()
+        if isinstance(consolidated_downstream_session, pd.DataFrame)
+        and not consolidated_downstream_session.empty
+        else None
+    )
+    reference_label = reference_label_session
+
     if ready_for_fc:
-        try:
-            fc_result = compute_fold_change_with_expression(controles_df, muestras_df)
-            fc = fc_result.computation
-            df_expr = fc_result.expression_table
-            logger.info(f"FC consolidado shape: {fc.consolidated.shape}")
-            st.subheader("Fold Change y ΔΔCt")
+        st.subheader("3) Selección del método de normalización")
+        method_order = list(NORMALIZATION_METHOD_DESCRIPTIONS)
+        default_method = st.session_state.get("norm_method_choice", "ref_gene")
+        if default_method not in method_order:
+            default_method = method_order[0]
+        method_choice = st.radio(
+            "Elige el método a aplicar",
+            options=method_order,
+            index=method_order.index(default_method),
+            format_func=lambda opt: NORMALIZATION_METHOD_DESCRIPTIONS[opt],
+        )
+        st.session_state["norm_method_choice"] = method_choice
+        st.markdown(
+            f"Has seleccionado **{NORMALIZATION_METHOD_DESCRIPTIONS[method_choice]}**. "
+            "Las secciones siguientes emplearán este enfoque para normalizar y resumir la expresión."
+        )
+
+        if method_choice in {"promedios", "ref_gene"}:
+            try:
+                fc_result_default = compute_fold_change_with_expression(controles_df, muestras_df)
+                fc = fc_result_default.computation
+                logger.info(f"FC consolidado shape: {fc.consolidated.shape}")
+            except Exception as exc:
+                st.error(f"Error calculando fold change básico: {exc}")
+                logger.exception("Fallo al calcular fold change", exc_info=exc)
+                st.stop()
+
+            st.subheader("4) Cálculo de Fold Change")
+            st.caption(f"Método seleccionado: {NORMALIZATION_METHOD_DESCRIPTIONS[method_choice]}")
+            df_expr_default = fc_result_default.expression_table
+
             m1, m2 = st.columns(2)
             with m1:
                 st.metric("Gen de referencia (automático)", fc.reference_gene)
@@ -689,23 +740,28 @@ if df_loaded is not None:
 
             with st.expander("Tabla consolidada", expanded=False):
                 st.dataframe(fc.consolidated)
+            extras['fold_change_consolidado.csv'] = fc.consolidated.to_csv(index=False)
             st.plotly_chart(fc_comparison_table(fc.consolidated), use_container_width=True)
 
             exclude_stable = bool(app_state.exclude_stable)
             y2_scale = st.radio("Escala FC", ["log", "lineal"], horizontal=True, index=0)
             fc_figure = build_fc_detail_figure(
                 fc.consolidated,
-                df_expr,
+                df_expr_default,
                 exclude_stable=exclude_stable,
                 reference_gene=fc.reference_gene,
                 scale=y2_scale,
             )
             st.plotly_chart(fc_figure, use_container_width=True)
 
-            # Clasificación por nivel de expresión (por método preferido del menú)
-            st.subheader("Clasificación por nivel de expresión")
-            default_idx = 1 if norm_sel_label == 'gen de referencia' else 0
-            fc_source = st.radio("Fuente de Fold Change", ["promedios", "gen de referencia"], horizontal=True, index=default_idx)
+            st.subheader("5) Resumen de expresión diferencial")
+            default_idx = 0 if method_choice == "promedios" else 1
+            fc_source = st.radio(
+                "Fuente de Fold Change",
+                ["promedios", "gen de referencia"],
+                horizontal=True,
+                index=default_idx,
+            )
             expr_result = compute_fold_change_with_expression(
                 controles_df,
                 muestras_df,
@@ -713,6 +769,8 @@ if df_loaded is not None:
                 precomputed=fc,
             )
             df_expr = expr_result.expression_table
+            extras['expresion_categorizada.csv'] = df_expr.to_csv(index=False)
+
             cexp1, cexp2 = st.columns(2)
             with cexp1:
                 st.dataframe(df_expr)
@@ -723,11 +781,18 @@ if df_loaded is not None:
                 )
                 st.plotly_chart(dist_fig, use_container_width=True)
 
-            # Genes por nivel de expresión: lista/tablas y treemap
+            counts = df_expr['nivel_expresion'].value_counts()
+            msg = (
+                "Resultados: "
+                f"{counts.get('subexpresado', 0)} genes subexpresados, "
+                f"{counts.get('sobreexpresado', 0)} sobreexpresados, "
+                f"{counts.get('estable', 0)} estables "
+                f"(según {'promedios' if fc_source == 'promedios' else 'gen de referencia'})."
+            )
+            st.info(msg)
+
             st.markdown("### Genes por nivel de expresión")
-            # Base para visualizaciones (respetar preferencia de exclusión de 'estables')
             df_expr_vis = df_expr[df_expr['nivel_expresion'] != 'estable'].copy() if bool(app_state.exclude_stable) else df_expr.copy()
-            # Orden sugerido
             levels_vis = ['subexpresado', 'estable', 'sobreexpresado']
             levels_vis = [lvl for lvl in levels_vis if lvl in df_expr_vis['nivel_expresion'].astype(str).unique()]
             view_mode = st.radio("Vista", ["Lista por nivel", "Treemap"], horizontal=True, index=0)
@@ -739,7 +804,6 @@ if df_loaded is not None:
                         if sub.empty:
                             st.info("Sin genes para este nivel.")
                             continue
-                        # Ordenar por |log2FC| descendente para resaltar extremos
                         try:
                             sub['log2fc'] = np.log2(sub['fold_change'].clip(lower=1e-12))
                             sub = sub.sort_values(sub['log2fc'].abs(), ascending=False)
@@ -760,285 +824,618 @@ if df_loaded is not None:
                 else:
                     st.plotly_chart(treemap_fig, use_container_width=True)
 
-            # Persistir para páginas
-            st.session_state['fc_consolidated'] = fc.consolidated.copy()
-            st.session_state['reference_gene'] = fc.reference_gene
-            st.session_state['df_expr'] = df_expr.copy()
-            extras['fold_change_consolidado.csv'] = fc.consolidated.to_csv(index=False)
-            extras['expresion_categorizada.csv'] = df_expr.to_csv(index=False)
+            df_expr_downstream = df_expr.copy()
+            consolidated_downstream = fc.consolidated.copy()
+            reference_label = fc.reference_gene
+            downstream_ready = True
 
-            # Anotación Ensembl (IDs y descripciones) sobre los targets clasificados
-            st.subheader("Anotación Ensembl (IDs y descripciones)")
-            st.caption("Consulta Ensembl para cada gen (requiere conexión a internet). Incluye exploración interactiva.")
+        else:
+            st.subheader("4) Normalización avanzada y selección de referencias")
+            st.caption(
+                "Selecciona automáticamente conjuntos de genes de referencia por estabilidad, "
+                "normaliza las muestras y calcula métricas de significancia con bootstrap y permutaciones."
+            )
 
-            try:
-                df_to_annot = df_expr[['target', 'nivel_expresion', 'fold_change']].drop_duplicates(subset=['target']).reset_index(drop=True)
-                # Clave estable por lista de genes
-                genes_key = ",".join(sorted(df_to_annot['target'].dropna().astype(str).unique().tolist()))
-                ensembl_state_key = st.session_state.get('ensembl_key')
-                ensembl_state_df = st.session_state.get('ensembl_df')
+            adv_key_base = f"adv_norm::{df_loaded.source_name}:{df_loaded.sheet_name}" if df_loaded is not None else "adv_norm::temp"
+            adv_state = st.session_state.setdefault(adv_key_base, {})
 
-                cols = st.columns([1,1,2])
-                with cols[0]:
-                    need_compute = not (ensembl_state_key == genes_key and isinstance(ensembl_state_df, pd.DataFrame) and not ensembl_state_df.empty)
-                    ens_workers = st.number_input("Hilos Ensembl", value=3, min_value=1, max_value=16, step=1, help="Límite de concurrencia para llamadas a Ensembl")
-                    if need_compute:
-                        if st.button("Anotar Ensembl", key="btn_annot_ens"):
-                            with st.spinner("Consultando Ensembl…"):
-                                ensembl_df = _annotate_ensembl_cached(df_to_annot[['target','nivel_expresion','fold_change']].sort_values('target').to_csv(index=False), max_workers=int(ens_workers))
-                            st.session_state['ensembl_df'] = ensembl_df.copy()
-                            st.session_state['ensembl_key'] = genes_key
-                    else:
-                        st.success("Usando anotación en caché para esta lista de genes.")
-                        if st.button("Recalcular", key="btn_recalc_ens"):
-                            with st.spinner("Consultando Ensembl…"):
-                                ensembl_df = _annotate_ensembl_cached(df_to_annot[['target','nivel_expresion','fold_change']].sort_values('target').to_csv(index=False), max_workers=int(ens_workers))
-                            st.session_state['ensembl_df'] = ensembl_df.copy()
-                            st.session_state['ensembl_key'] = genes_key
+            with st.expander("Parámetros del análisis avanzado", expanded=False):
+                alpha_q = st.number_input(
+                    "Umbral FDR (q)",
+                    min_value=0.001,
+                    max_value=0.5,
+                    value=0.05,
+                    step=0.005,
+                    format="%.3f",
+                    key=f"adv_alpha_{adv_key_base}",
+                )
+                col_adv1, col_adv2, col_adv3 = st.columns(3)
+                with col_adv1:
+                    n_candidates = st.slider(
+                        "Candidatos por desviación estándar",
+                        min_value=4,
+                        max_value=30,
+                        value=20,
+                        step=1,
+                        key=f"adv_ncand_{adv_key_base}",
+                        help="Número de genes candidatos ordenados por desviación estándar de Ct."
+                    )
+                with col_adv2:
+                    k_refs = st.selectbox(
+                        "Tamaño del set de referencia",
+                        options=[1, 2, 3],
+                        index=1,
+                        key=f"adv_krefs_{adv_key_base}",
+                        help="Cantidad de genes que se combinarán como referencia."
+                    )
+                with col_adv3:
+                    random_seed = st.number_input(
+                        "Semilla aleatoria",
+                        value=123,
+                        step=1,
+                        key=f"adv_seed_{adv_key_base}"
+                    )
 
-                # Obtener df desde sesión si existe
-                ensembl_df = st.session_state.get('ensembl_df')
-                if isinstance(ensembl_df, pd.DataFrame) and not ensembl_df.empty:
-                    desc_series = ensembl_df['description'].fillna('').astype(str).str.strip()
-                    ensembl_df['has_desc'] = desc_series.ne('') & desc_series.ne('No description')
-                    extras['ensembl_anotado.csv'] = ensembl_df.to_csv(index=False)
+                col_boot, col_perm = st.columns(2)
+                with col_boot:
+                    bootstrap_iter = st.number_input(
+                        "Iteraciones bootstrap",
+                        min_value=0,
+                        max_value=1000,
+                        value=200,
+                        step=50,
+                        key=f"adv_boot_{adv_key_base}",
+                        help="Mayor número ofrece frecuencias más estables pero incrementa el tiempo de cómputo."
+                    )
+                with col_perm:
+                    permutation_iter = st.number_input(
+                        "Permutaciones etiqueta",
+                        min_value=0,
+                        max_value=600,
+                        value=100,
+                        step=20,
+                        key=f"adv_perm_{adv_key_base}",
+                        help="Cuántas permutaciones usar para estimar FPR empírica."
+                    )
+
+            if st.button("Ejecutar análisis avanzado", key=f"btn_adv_norm_{adv_key_base}", use_container_width=False):
+                try:
+                    params = AdvancedNormalizationParams(
+                        alpha=float(alpha_q),
+                        n_candidates=int(n_candidates),
+                        k_refs=int(k_refs),
+                        bootstrap_iter=int(bootstrap_iter),
+                        permutation_iter=int(permutation_iter),
+                        random_seed=int(random_seed),
+                    )
+                    with st.spinner("Calculando normalización avanzada…"):
+                        adv_result = execute_advanced_normalization(
+                            controles_df,
+                            muestras_df,
+                            params,
+                        )
+                    st.session_state[adv_key_base] = {
+                        "result": adv_result,
+                        "params": params,
+                    }
+                    st.success("Análisis avanzado completado.")
+                except AdvancedNormalizationError as exc:
+                    st.error(f"No se pudo ejecutar la normalización avanzada: {exc}")
+                except Exception as exc:  # noqa: BLE001
+                    st.error("Ocurrió un error inesperado al ejecutar la normalización avanzada.")
+                    logger.exception("Fallo en normalización avanzada", exc_info=exc)
+
+            adv_state = st.session_state.get(adv_key_base, {})
+            adv_result = adv_state.get("result")
+            if adv_result:
+                params_used = adv_state.get("params")
+                if params_used is not None:
+                    st.caption(
+                        "Parámetros utilizados: "
+                        f"alpha={params_used.alpha}, candidatos={params_used.n_candidates}, "
+                        f"K={params_used.k_refs}, bootstrap={params_used.bootstrap_iter}, "
+                        f"permutaciones={params_used.permutation_iter}, seed={params_used.random_seed}"
+                    )
+
+                ref_res = adv_result.reference_result
+                diff_res = adv_result.differential
+                sum_dict = adv_result.summary()
+                c_metrics = st.columns(len(sum_dict)) if sum_dict else []
+                for (label, value), col in zip(sum_dict.items(), c_metrics):
+                    with col:
+                        display_value: str | float | int
+                        if isinstance(value, (int, float)):
+                            display_value = value if pd.notna(value) else "-"
+                        elif isinstance(value, (list, tuple, set)):
+                            display_value = ", ".join(map(str, value)) if value else "-"
+                        else:
+                            display_value = str(value) if value not in (None, "") else "-"
+                        st.metric(label.replace('_', ' '), display_value)
+
+                if ref_res.coverage_warnings:
+                    for msg in ref_res.coverage_warnings:
+                        st.warning(msg)
+
+                candidates = ref_res.candidate_scores.copy()
+                if not candidates.empty:
+                    candidates['refs'] = candidates['refs'].apply(lambda r: ", ".join(map(str, r)))
+                    st.markdown("**Ranking de combinaciones candidateadas (menor score es mejor)**")
+                    st.dataframe(candidates[['refs', 'score']].head(30))
+                    extras['normalizacion_avanzada_candidatos.csv'] = candidates.to_csv(index=False)
+
+                with st.expander("Detalle normalizado (df_norm)", expanded=False):
+                    st.dataframe(adv_result.df_norm.head(100))
+                    extras['normalizacion_avanzada_df_norm.csv'] = adv_result.df_norm.to_csv(index=False)
+
+                stats_df = diff_res.stats.copy()
+                if not stats_df.empty:
+                    st.markdown("**Estadísticas diferenciales por gen**")
+                    st.dataframe(stats_df.head(50))
+                    extras['normalizacion_avanzada_df_stats.csv'] = stats_df.to_csv(index=False)
+                else:
+                    st.info("No se encontraron genes con estadísticas válidas para los criterios actuales.")
+
+                if isinstance(diff_res.bootstrap_freq, pd.Series) and not diff_res.bootstrap_freq.empty:
+                    st.markdown("**Frecuencias bootstrap**")
+                    st.dataframe(diff_res.bootstrap_freq.to_frame())
+
+                heat_df = adv_result.df_norm.pivot_table(
+                    index='target',
+                    columns='test',
+                    values='log2_rel_expr',
+                    aggfunc='mean',
+                ).sort_index()
+                if isinstance(heat_df, pd.DataFrame) and not heat_df.empty:
                     try:
-                        encontrados = int((ensembl_df['ensembl_id'] != 'Not found').sum())
-                        logger.info(f"Ensembl: completado. IDs encontrados {encontrados}/{len(ensembl_df)}")
+                        import plotly.express as px
+
+                        fig_heat = px.imshow(
+                            heat_df,
+                            color_continuous_scale=[[0.0, '#2c7bb6'], [0.5, '#ffffb2'], [1.0, '#d7191c']],
+                            aspect='auto',
+                            origin='upper',
+                            color_continuous_midpoint=0,
+                            labels={"x": "Test", "y": "Gen", "color": "log2 Expr."},
+                        )
+                        fig_heat.update_layout(title="Matriz genes × muestras (log2 expresión relativa)")
+                        st.plotly_chart(fig_heat, use_container_width=True)
                     except Exception:
-                        pass
+                        st.dataframe(heat_df)
+                else:
+                    st.info("No hay genes seleccionados para el heatmap.")
 
-                    tab_resumen, tab_explorar, tab_enlaces = st.tabs(["Resumen", "Explorar", "Enlaces"])
-
-                # Resumen: métricas y gráfico de calidad de anotación por nivel de expresión
-                with tab_resumen:
-                    total = len(ensembl_df)
-                    encontrados = int((ensembl_df['ensembl_id'] != 'Not found').sum())
-                    con_desc = int((ensembl_df['has_desc']).sum())
-                    m1, m2, m3 = st.columns(3)
-                    m1.metric("Genes anotados (totales)", total)
-                    m2.metric("Con Ensembl ID", encontrados)
-                    m3.metric("Con descripción", con_desc)
-
-                    import plotly.express as px
-                    counts = (
-                        ensembl_df.assign(desc=lambda d: d['has_desc'].map({True: 'con_descripción', False: 'sin_descripción'}))
-                        .groupby(['nivel_expresion', 'desc']).size().reset_index(name='n')
+                adv_expr_cols = ['target', 'fold_change', 'nivel_expresion', 'q', 'bootstrap_freq', 'log2_fc']
+                if not stats_df.empty:
+                    adv_expr = stats_df[['gene', 'mean_ctrl', 'mean_case', 'q']].copy()
+                    adv_expr.rename(columns={'gene': 'target'}, inplace=True)
+                    adv_expr['bootstrap_freq'] = diff_res.bootstrap_freq.reindex(adv_expr['target']).fillna(0.0).values
+                    adv_expr['log2_fc'] = adv_expr['mean_case'] - adv_expr['mean_ctrl']
+                    adv_expr['fold_change'] = np.power(2.0, adv_expr['log2_fc'])
+                    adv_expr['nivel_expresion'] = pd.cut(
+                        adv_expr['fold_change'],
+                        bins=[-float("inf"), 1.0, 2.0, float("inf")],
+                        labels=['subexpresado', 'estable', 'sobreexpresado'],
+                        right=False,
                     )
-                    order_levels = ['estable', 'subexpresado', 'sobreexpresado']
-                    counts['nivel_expresion'] = pd.Categorical(counts['nivel_expresion'], categories=order_levels, ordered=True)
-                    bar = px.bar(
-                        counts.sort_values(['nivel_expresion','desc']),
-                        x='nivel_expresion', y='n', color='desc', barmode='stack',
-                        labels={'nivel_expresion': 'Nivel de expresión', 'n': 'Número de genes', 'desc': 'Descripción'},
-                        title='Cobertura de anotación por nivel de expresión'
+                    adv_expr_display = adv_expr[['target', 'fold_change', 'nivel_expresion', 'q', 'bootstrap_freq', 'log2_fc']]
+                else:
+                    adv_expr_display = pd.DataFrame(columns=adv_expr_cols)
+
+                st.subheader("5) Resumen de expresión diferencial")
+                if adv_expr_display.empty:
+                    st.info("No se generaron mediciones de expresión con los parámetros actuales.")
+                else:
+                    st.dataframe(adv_expr_display[['target', 'fold_change', 'nivel_expresion', 'q', 'bootstrap_freq']])
+                    df_expr_summary = adv_expr_display[['target', 'fold_change', 'nivel_expresion']].copy()
+                    dist_fig = build_expression_distribution(
+                        df_expr_summary,
+                        exclude_stable=bool(app_state.exclude_stable),
                     )
-                    st.plotly_chart(bar, use_container_width=True)
+                    st.plotly_chart(dist_fig, use_container_width=True)
 
-                # Explorar: filtros por gen, descripción y nivel; descarga del subconjunto
-                with tab_explorar:
-                    f1, f2 = st.columns(2)
-                    with f1:
-                        q_gene = st.text_input("Filtrar por gen (contiene)", "").strip().lower()
-                    with f2:
-                        q_desc = st.text_input("Filtrar por descripción (contiene)", "").strip().lower()
-                    order_levels = ['estable', 'subexpresado', 'sobreexpresado']
-                    sel_levels = st.multiselect("Niveles", order_levels, default=order_levels)
-
-                    filt = ensembl_df.copy()
-                    if q_gene:
-                        filt = filt[filt['target'].astype(str).str.lower().str.contains(q_gene, na=False)]
-                    if q_desc:
-                        filt = filt[filt['description'].astype(str).str.lower().str.contains(q_desc, na=False)]
-                    if sel_levels:
-                        filt = filt[filt['nivel_expresion'].isin(sel_levels)]
-
-                    cols_show = ['target', 'nivel_expresion', 'fold_change', 'ensembl_id', 'description']
-                    st.dataframe(filt[cols_show])
-
-                    st.download_button(
-                        label="Descargar resultado filtrado (CSV)",
-                        data=filt[cols_show].to_csv(index=False),
-                        file_name="ensembl_filtrado.csv",
-                        mime="text/csv",
-                        use_container_width=True,
+                    counts = df_expr_summary['nivel_expresion'].value_counts()
+                    signif = int((adv_expr_display.get('q', pd.Series(dtype=float)) < float(alpha_q)).sum())
+                    msg = (
+                        "Resultados (normalización avanzada): "
+                        f"{counts.get('subexpresado', 0)} subexpresados, "
+                        f"{counts.get('sobreexpresado', 0)} sobreexpresados, "
+                        f"{counts.get('estable', 0)} estables. "
+                        f"Genes con q < {float(alpha_q):.2f}: {signif}."
                     )
+                    st.info(msg)
 
-                # Enlaces: listado con links a Ensembl y descripciones legibles
-                with tab_enlaces:
-                    if isinstance(ensembl_df, pd.DataFrame) and not ensembl_df.empty:
-                        st.caption("Navega por enlaces directos a Ensembl (máx. 100 primeros)")
-                        subset = ensembl_df.copy().head(100)
-                        for _, row in subset.iterrows():
-                            gene = str(row['target'])
-                            eid = str(row['ensembl_id'])
-                            desc = str(row['description'])
-                            lvl = str(row['nivel_expresion'])
-                            url = f"https://www.ensembl.org/Homo_sapiens/Gene/Summary?g={eid}" if eid and eid != 'Not found' else None
-                            if url:
-                                st.markdown(f"- [{gene}]({url}) · {lvl} — {desc}")
-                            else:
-                                st.markdown(f"- {gene} · {lvl} — {desc}")
+                    df_expr_vis = adv_expr_display.copy()
+                    if bool(app_state.exclude_stable):
+                        df_expr_vis = df_expr_vis[df_expr_vis['nivel_expresion'] != 'estable']
+                        df_expr_summary = df_expr_summary[df_expr_summary['nivel_expresion'] != 'estable']
+                    levels_vis = ['subexpresado', 'estable', 'sobreexpresado']
+                    levels_vis = [lvl for lvl in levels_vis if lvl in df_expr_vis['nivel_expresion'].astype(str).unique()]
+                    st.markdown("### Genes por nivel de expresión")
+                    view_mode = st.radio("Vista", ["Lista por nivel", "Treemap"], horizontal=True, index=0)
+                    if view_mode == "Lista por nivel":
+                        tabs = st.tabs([lvl.capitalize() for lvl in levels_vis]) if levels_vis else []
+                        for lvl, tab in zip(levels_vis, tabs):
+                            with tab:
+                                sub = df_expr_vis[df_expr_vis['nivel_expresion'] == lvl].copy()
+                                if sub.empty:
+                                    st.info("Sin genes para este nivel.")
+                                    continue
+                                st.dataframe(sub[['target', 'fold_change', 'nivel_expresion', 'q', 'bootstrap_freq']])
+                                st.download_button(
+                                    label=f"Descargar genes ({lvl})",
+                                    data=sub[['target', 'fold_change', 'nivel_expresion', 'q', 'bootstrap_freq']].to_csv(index=False),
+                                    file_name=f"genes_{lvl}.csv",
+                                    mime="text/csv",
+                                    use_container_width=True,
+                                )
                     else:
-                        st.info("Genera la anotación para ver enlaces.")
+                        treemap_fig = build_expression_treemap(df_expr_summary)
+                        if treemap_fig is None:
+                            st.info("Sin genes para graficar con los filtros actuales.")
+                        else:
+                            st.plotly_chart(treemap_fig, use_container_width=True)
 
-            except Exception as e:
-                st.warning(f"No se pudo anotar con Ensembl: {e}")
-            
-            # Enriquecimiento funcional (STRING)
-            st.subheader("Enriquecimiento funcional (STRING)")
-            st.caption("Analiza términos GO/KEGG/Reactome enriquecidos por nivel de expresión. Requiere conexión a internet.")
+                extras['fold_change_consolidado.csv'] = stats_df.to_csv(index=False)
+                extras['expresion_categorizada.csv'] = adv_expr_display[['target', 'fold_change', 'nivel_expresion', 'q', 'bootstrap_freq']].to_csv(index=False)
+                extras['normalizacion_avanzada_expr.csv'] = adv_expr_display.to_csv(index=False)
 
-            # Selección de niveles a procesar por separado
-            order_levels = ['subexpresado', 'estable', 'sobreexpresado']
-            sel_levels = st.multiselect(
-                "Niveles a considerar",
-                options=order_levels,
-                default=['subexpresado', 'sobreexpresado']
+                df_expr_downstream = adv_expr_display[['target', 'fold_change', 'nivel_expresion', 'q', 'bootstrap_freq']].copy()
+                consolidated_downstream = stats_df.copy()
+                reference_label = ", ".join(ref_res.references)
+                downstream_ready = True
+            else:
+                st.info("Ejecuta el análisis avanzado para avanzar al siguiente paso.")
+
+    if not downstream_ready:
+        st.stop()
+
+    if df_expr_downstream is None:
+        df_expr = pd.DataFrame()
+    else:
+        df_expr = df_expr_downstream.copy()
+    st.session_state['df_expr'] = df_expr.copy()
+    st.session_state['reference_gene'] = reference_label
+    if consolidated_downstream is not None:
+        st.session_state['fc_consolidated'] = consolidated_downstream.copy()
+    else:
+        st.session_state['fc_consolidated'] = pd.DataFrame()
+
+    st.subheader("6) Preparación de datos para módulos posteriores")
+    st.caption("Estos datos alimentan firmas, heatmaps, heurísticas y los módulos siguientes de la aplicación.")
+
+    norm_method_summary = st.session_state.get("norm_method_choice", "ref_gene")
+    method_label_summary = NORMALIZATION_METHOD_DESCRIPTIONS.get(norm_method_summary, norm_method_summary)
+
+    summary_rows: list[dict[str, Any]] = []
+    if isinstance(df_expr, pd.DataFrame) and not df_expr.empty:
+        summary_rows.append({
+            "Recurso": "Expresión categorizada",
+            "Filas": int(df_expr.shape[0]),
+            "Columnas": int(df_expr.shape[1]),
+            "Fuente de normalización": method_label_summary,
+            "Notas": "Incluye columnas: " + ", ".join(df_expr.columns.tolist()[:4]) + ("…" if df_expr.shape[1] > 4 else ""),
+        })
+    if isinstance(consolidated_downstream, pd.DataFrame) and not consolidated_downstream.empty:
+        notes = (
+            "Estadísticos diferenciales (Welch, q, bootstrap)"
+            if norm_method_summary == "advanced"
+            else "Tabla consolidada con ΔΔCt y fold change"
+        )
+        summary_rows.append({
+            "Recurso": "Tabla base",
+            "Filas": int(consolidated_downstream.shape[0]),
+            "Columnas": int(consolidated_downstream.shape[1]),
+            "Fuente de normalización": method_label_summary,
+            "Notas": notes,
+        })
+    refs_clean = [ref.strip() for ref in reference_label.split(",") if ref.strip()] if reference_label else []
+    summary_rows.append({
+        "Recurso": "Genes de referencia",
+        "Filas": len(refs_clean) or 0,
+        "Columnas": 1,
+        "Fuente de normalización": method_label_summary,
+        "Notas": ", ".join(refs_clean) if refs_clean else "No especificado",
+    })
+
+    st.markdown("**Resumen de recursos generados**")
+    if summary_rows:
+        summary_df = pd.DataFrame(summary_rows)
+        st.dataframe(summary_df)
+    else:
+        st.info("Aún no hay datos disponibles para los módulos posteriores.")
+
+    # Anotación Ensembl (IDs y descripciones) sobre los targets clasificados
+    st.subheader("Anotación Ensembl (IDs y descripciones)")
+    st.caption("Consulta Ensembl para cada gen (requiere conexión a internet). Incluye exploración interactiva.")
+
+    try:
+        df_to_annot = df_expr[['target', 'nivel_expresion', 'fold_change']].drop_duplicates(subset=['target']).reset_index(drop=True)
+        # Clave estable por lista de genes
+        genes_key = ",".join(sorted(df_to_annot['target'].dropna().astype(str).unique().tolist()))
+        ensembl_state_key = st.session_state.get('ensembl_key')
+        ensembl_state_df = st.session_state.get('ensembl_df')
+
+        cols = st.columns([1, 1, 2])
+        with cols[0]:
+            need_compute = not (
+                ensembl_state_key == genes_key
+                and isinstance(ensembl_state_df, pd.DataFrame)
+                and not ensembl_state_df.empty
             )
-            # Respetar preferencia global de exclusión de 'estables'
-            exclude_stable_pref = bool(app_state.exclude_stable)
-            if exclude_stable_pref and 'estable' in sel_levels:
-                sel_levels = [lvl for lvl in sel_levels if lvl != 'estable']
-                st.caption("Preferencia activa: excluyendo 'estable' del enriquecimiento")
-
-            # Fuentes/categorías a consultar en STRING
-            cat_options = ["GO", "GO:BP", "GO:MF", "GO:CC", "KEGG", "Reactome"]
-            sel_cats = st.multiselect(
-                "Categorías (fuentes)",
-                options=cat_options,
-                default=["GO", "KEGG"]
+            ens_workers = st.number_input(
+                "Hilos Ensembl",
+                value=3,
+                min_value=1,
+                max_value=16,
+                step=1,
+                help="Límite de concurrencia para llamadas a Ensembl",
             )
+            if need_compute:
+                if st.button("Anotar Ensembl", key="btn_annot_ens"):
+                    with st.spinner("Consultando Ensembl…"):
+                        ensembl_df = _annotate_ensembl_cached(
+                            df_to_annot[['target', 'nivel_expresion', 'fold_change']]
+                            .sort_values('target')
+                            .to_csv(index=False),
+                            max_workers=int(ens_workers),
+                        )
+                    st.session_state['ensembl_df'] = ensembl_df.copy()
+                    st.session_state['ensembl_key'] = genes_key
+            else:
+                st.success("Usando anotación en caché para esta lista de genes.")
+                if st.button("Recalcular", key="btn_recalc_ens"):
+                    with st.spinner("Consultando Ensembl…"):
+                        ensembl_df = _annotate_ensembl_cached(
+                            df_to_annot[['target', 'nivel_expresion', 'fold_change']]
+                            .sort_values('target')
+                            .to_csv(index=False),
+                            max_workers=int(ens_workers),
+                        )
+                    st.session_state['ensembl_df'] = ensembl_df.copy()
+                    st.session_state['ensembl_key'] = genes_key
 
-            cconf1, cconf2, cconf3, cconf4 = st.columns(4)
-            with cconf1:
-                max_fdr = st.number_input("FDR máx.", value=0.05, min_value=0.0, max_value=1.0, step=0.01, format="%.2f")
-            with cconf2:
-                min_size = st.number_input("Mín. genes por término", value=3, min_value=1, max_value=100, step=1)
-            with cconf3:
-                top_n = st.number_input("Top N", value=25, min_value=1, max_value=200, step=1)
-            with cconf4:
-                species_default = int(getattr(SERVICES.string, "species", 9606) or 9606)
-                species = st.number_input(
-                    "Especie (NCBI Taxon)",
-                    value=species_default,
-                    min_value=1,
-                    max_value=1_000_000,
-                    step=1,
+        # Obtener df desde sesión si existe
+        ensembl_df = st.session_state.get('ensembl_df')
+        if isinstance(ensembl_df, pd.DataFrame) and not ensembl_df.empty:
+            desc_series = ensembl_df['description'].fillna('').astype(str).str.strip()
+            ensembl_df['has_desc'] = desc_series.ne('') & desc_series.ne('No description')
+            extras['ensembl_anotado.csv'] = ensembl_df.to_csv(index=False)
+            try:
+                encontrados = int((ensembl_df['ensembl_id'] != 'Not found').sum())
+                logger.info(f"Ensembl: completado. IDs encontrados {encontrados}/{len(ensembl_df)}")
+            except Exception:
+                pass
+
+            tab_resumen, tab_explorar, tab_enlaces = st.tabs(["Resumen", "Explorar", "Enlaces"])
+
+            # Resumen: métricas y gráfico de calidad de anotación por nivel de expresión
+            with tab_resumen:
+                total = len(ensembl_df)
+                encontrados = int((ensembl_df['ensembl_id'] != 'Not found').sum())
+                con_desc = int((ensembl_df['has_desc']).sum())
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Genes anotados (totales)", total)
+                m2.metric("Con Ensembl ID", encontrados)
+                m3.metric("Con descripción", con_desc)
+
+                import plotly.express as px
+
+                counts = (
+                    ensembl_df.assign(desc=lambda d: d['has_desc'].map({True: 'con_descripción', False: 'sin_descripción'}))
+                    .groupby(['nivel_expresion', 'desc']).size().reset_index(name='n')
+                )
+                order_levels = ['estable', 'subexpresado', 'sobreexpresado']
+                counts['nivel_expresion'] = pd.Categorical(counts['nivel_expresion'], categories=order_levels, ordered=True)
+                bar = px.bar(
+                    counts.sort_values(['nivel_expresion', 'desc']),
+                    x='nivel_expresion', y='n', color='desc', barmode='stack',
+                    labels={'nivel_expresion': 'Nivel de expresión', 'n': 'Número de genes', 'desc': 'Descripción'},
+                    title='Cobertura de anotación por nivel de expresión'
+                )
+                st.plotly_chart(bar, use_container_width=True)
+
+            # Explorar: filtros por gen, descripción y nivel; descarga del subconjunto
+            with tab_explorar:
+                f1, f2 = st.columns(2)
+                with f1:
+                    q_gene = st.text_input("Filtrar por gen (contiene)", "").strip().lower()
+                with f2:
+                    q_desc = st.text_input("Filtrar por descripción (contiene)", "").strip().lower()
+                order_levels = ['estable', 'subexpresado', 'sobreexpresado']
+                sel_levels = st.multiselect("Niveles", order_levels, default=order_levels)
+
+                filt = ensembl_df.copy()
+                if q_gene:
+                    filt = filt[filt['target'].astype(str).str.lower().str.contains(q_gene, na=False)]
+                if q_desc:
+                    filt = filt[filt['description'].astype(str).str.lower().str.contains(q_desc, na=False)]
+                if sel_levels:
+                    filt = filt[filt['nivel_expresion'].isin(sel_levels)]
+
+                cols_show = ['target', 'nivel_expresion', 'fold_change', 'ensembl_id', 'description']
+                st.dataframe(filt[cols_show])
+
+                st.download_button(
+                    label="Descargar resultado filtrado (CSV)",
+                    data=filt[cols_show].to_csv(index=False),
+                    file_name="ensembl_filtrado.csv",
+                    mime="text/csv",
+                    use_container_width=True,
                 )
 
-            run_enrich = st.button("Ejecutar enriquecimiento (STRING)", type="primary")
+            # Enlaces: listado con links a Ensembl y descripciones legibles
+            with tab_enlaces:
+                if isinstance(ensembl_df, pd.DataFrame) and not ensembl_df.empty:
+                    st.caption("Navega por enlaces directos a Ensembl (máx. 100 primeros)")
+                    subset = ensembl_df.copy().head(100)
+                    for _, row in subset.iterrows():
+                        gene = str(row['target'])
+                        eid = str(row['ensembl_id'])
+                        desc = str(row['description'])
+                        lvl = str(row['nivel_expresion'])
+                        url = f"https://www.ensembl.org/Homo_sapiens/Gene/Summary?g={eid}" if eid and eid != 'Not found' else None
+                        if url:
+                            st.markdown(f"- [{gene}]({url}) · {lvl} — {desc}")
+                        else:
+                            st.markdown(f"- {gene} · {lvl} — {desc}")
+                else:
+                    st.info("Genera la anotación para ver enlaces.")
 
-            if run_enrich:
-                try:
-                    # Ejecutar enriquecimiento por nivel y concatenar (con caché)
-                    levels_to_use = sel_levels or order_levels
-                    if exclude_stable_pref:
-                        levels_to_use = [lvl for lvl in levels_to_use if lvl != 'estable']
-                    base = df_expr[df_expr['nivel_expresion'].isin(levels_to_use)].copy()
-                    logger.info(f"STRING: niveles={levels_to_use}, fuentes={sel_cats}, genes_totales={base['target'].nunique()}")
-                    with st.spinner("Consultando STRING por nivel…"):
-                        res = _string_enrichment_cached(
-                            base.to_csv(index=False),
-                            levels=levels_to_use,
-                            species=int(species),
-                            sources=sel_cats,
-                            max_fdr=float(max_fdr),
-                            min_size=int(min_size),
-                            top_n=int(top_n),
-                        )
-                    combined = res.get('combined')
-                    by_level = res.get('by_level', {})
+    except Exception as e:
+        st.warning(f"No se pudo anotar con Ensembl: {e}")
+
+    # Enriquecimiento funcional (STRING)
+    st.subheader("Enriquecimiento funcional (STRING)")
+    st.caption("Analiza términos GO/KEGG/Reactome enriquecidos por nivel de expresión. Requiere conexión a internet.")
+
+    # Selección de niveles a procesar por separado
+    order_levels = ['subexpresado', 'estable', 'sobreexpresado']
+    sel_levels = st.multiselect(
+        "Niveles a considerar",
+        options=order_levels,
+        default=['subexpresado', 'sobreexpresado']
+    )
+    # Respetar preferencia global de exclusión de 'estables'
+    exclude_stable_pref = bool(app_state.exclude_stable)
+    if exclude_stable_pref and 'estable' in sel_levels:
+        sel_levels = [lvl for lvl in sel_levels if lvl != 'estable']
+        st.caption("Preferencia activa: excluyendo 'estable' del enriquecimiento")
+
+    # Fuentes/categorías a consultar en STRING
+    cat_options = ["GO", "GO:BP", "GO:MF", "GO:CC", "KEGG", "Reactome"]
+    sel_cats = st.multiselect(
+        "Categorías (fuentes)",
+        options=cat_options,
+        default=["GO", "KEGG"]
+    )
+
+    cconf1, cconf2, cconf3, cconf4 = st.columns(4)
+    with cconf1:
+        max_fdr = st.number_input("FDR máx.", value=0.05, min_value=0.0, max_value=1.0, step=0.01, format="%.2f")
+    with cconf2:
+        min_size = st.number_input("Mín. genes por término", value=3, min_value=1, max_value=100, step=1)
+    with cconf3:
+        top_n = st.number_input("Top N", value=25, min_value=1, max_value=200, step=1)
+    with cconf4:
+        species_default = int(getattr(SERVICES.string, "species", 9606) or 9606)
+        species = st.number_input(
+            "Especie (NCBI Taxon)",
+            value=species_default,
+            min_value=1,
+            max_value=1_000_000,
+            step=1,
+        )
+
+    run_enrich = st.button("Ejecutar enriquecimiento (STRING)", type="primary")
+
+    if run_enrich:
+        try:
+            # Ejecutar enriquecimiento por nivel y concatenar (con caché)
+            levels_to_use = sel_levels or order_levels
+            if exclude_stable_pref:
+                levels_to_use = [lvl for lvl in levels_to_use if lvl != 'estable']
+            base = df_expr[df_expr['nivel_expresion'].isin(levels_to_use)].copy()
+            logger.info(f"STRING: niveles={levels_to_use}, fuentes={sel_cats}, genes_totales={base['target'].nunique()}")
+            with st.spinner("Consultando STRING por nivel…"):
+                res = _string_enrichment_cached(
+                    base.to_csv(index=False),
+                    levels=levels_to_use,
+                    species=int(species),
+                    sources=sel_cats,
+                    max_fdr=float(max_fdr),
+                    min_size=int(min_size),
+                    top_n=int(top_n),
+                )
+            combined = res.get('combined')
+            by_level = res.get('by_level', {})
+            try:
+                logger.info(f"STRING: filas combinadas={0 if combined is None else len(combined)}")
+            except Exception:
+                pass
+
+            if combined is None or combined.empty:
+                st.info("Sin resultados de enriquecimiento para los parámetros actuales.")
+            else:
+                combined_f = combined
+                st.dataframe(combined_f)
+
+                # Pestañas por nivel + resumen
+                tab_res, *tabs_levels = st.tabs(["Resumen"] + [lvl.capitalize() for lvl in levels_to_use])
+
+                # Resumen: barras -log10(FDR) top N combinadas
+                with tab_res:
                     try:
-                        logger.info(f"STRING: filas combinadas={0 if combined is None else len(combined)}")
+                        import numpy as np
+                        import plotly.express as px
+                        plot_df = combined_f.copy()
+                        if not plot_df.empty and 'fdr' in plot_df.columns:
+                            plot_df["neglog10_fdr"] = -np.log10(plot_df["fdr"].clip(lower=1e-300))
+                            plot_df["label"] = plot_df.apply(lambda r: f"{r.get('term','')} ({r.get('category','')})", axis=1)
+                            fig = px.bar(
+                                plot_df.sort_values(["nivel_expresion", "neglog10_fdr"], ascending=[True, True]),
+                                x="neglog10_fdr",
+                                y="label",
+                                color="nivel_expresion",
+                                orientation="h",
+                                labels={"neglog10_fdr": "-log10(FDR)", "label": "Término"},
+                                title="Enriquecimiento combinado por nivel"
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
                     except Exception:
                         pass
 
-                    if combined is None or combined.empty:
-                        st.info("Sin resultados de enriquecimiento para los parámetros actuales.")
-                    else:
-                        combined_f = combined
-                        st.dataframe(combined_f)
-
-                        # Pestañas por nivel + resumen
-                        tab_res, *tabs_levels = st.tabs(["Resumen"] + [lvl.capitalize() for lvl in levels_to_use])
-
-                        # Resumen: barras -log10(FDR) top N combinadas
-                        with tab_res:
-                            try:
-                                import numpy as np
-                                import plotly.express as px
-                                plot_df = combined_f.copy()
-                                if not plot_df.empty and 'fdr' in plot_df.columns:
-                                    plot_df["neglog10_fdr"] = -np.log10(plot_df["fdr"].clip(lower=1e-300))
-                                    plot_df["label"] = plot_df.apply(lambda r: f"{r.get('term','')} ({r.get('category','')})", axis=1)
-                                    fig = px.bar(
-                                        plot_df.sort_values(["nivel_expresion", "neglog10_fdr"], ascending=[True, True]),
-                                        x="neglog10_fdr",
-                                        y="label",
-                                        color="nivel_expresion",
-                                        orientation="h",
-                                        labels={"neglog10_fdr": "-log10(FDR)", "label": "Término"},
-                                        title="Enriquecimiento combinado por nivel"
-                                    )
-                                    st.plotly_chart(fig, use_container_width=True)
-                            except Exception:
-                                pass
-
-                        # Una pestaña por nivel con su propio gráfico y tabla
-                        for lvl, tab in zip(levels_to_use, tabs_levels):
-                            with tab:
-                                lvl_df = by_level.get(lvl, pd.DataFrame())
-                                if lvl_df is None or lvl_df.empty:
-                                    st.info("Sin términos enriquecidos para este nivel.")
-                                    continue
-                                lvl_df_f = lvl_df
-                                st.dataframe(lvl_df_f)
-                                try:
-                                    import numpy as np
-                                    import plotly.express as px
-                                    p = lvl_df_f.copy()
-                                    if not p.empty and 'fdr' in p.columns:
-                                        p["neglog10_fdr"] = -np.log10(p["fdr"].clip(lower=1e-300))
-                                        p["label"] = p.apply(lambda r: f"{r.get('term','')} ({r.get('category','')})", axis=1)
-                                        fig_l = px.bar(
-                                            p.sort_values("neglog10_fdr", ascending=True),
-                                            x="neglog10_fdr",
-                                            y="label",
-                                            orientation="h",
-                                            labels={"neglog10_fdr": "-log10(FDR)", "label": "Término"},
-                                            title=f"Enriquecimiento ({lvl})"
-                                        )
-                                        st.plotly_chart(fig_l, use_container_width=True)
-                                except Exception:
-                                    pass
-
-                        # Descargas: CSV combinado y Excel con hojas por nivel
-                        st.download_button(
-                            label="Descargar enriquecimiento combinado (CSV)",
-                            data=combined_f.to_csv(index=False),
-                            file_name="string_enrichment_combined.csv",
-                            mime="text/csv",
-                            use_container_width=True,
-                        )
-
+                # Una pestaña por nivel con su propio gráfico y tabla
+                for lvl, tab in zip(levels_to_use, tabs_levels):
+                    with tab:
+                        lvl_df = by_level.get(lvl, pd.DataFrame())
+                        if lvl_df is None or lvl_df.empty:
+                            st.info("Sin términos enriquecidos para este nivel.")
+                            continue
+                        lvl_df_f = lvl_df
+                        st.dataframe(lvl_df_f)
                         try:
-                            sheets = [combined_f] + [by_level.get(lvl, pd.DataFrame()) for lvl in levels_to_use]
-                            names = ["combinado"] + [f"{lvl}" for lvl in levels_to_use]
-                            xlsx_bytes = dfs_to_excel_bytes(sheets, names)
-                            st.download_button(
-                                label="Descargar enriquecimiento (Excel, por nivel)",
-                                data=xlsx_bytes,
-                                file_name="string_enrichment_by_level.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                use_container_width=True,
-                            )
+                            import numpy as np
+                            import plotly.express as px
+                            p = lvl_df_f.copy()
+                            if not p.empty and 'fdr' in p.columns:
+                                p["neglog10_fdr"] = -np.log10(p["fdr"].clip(lower=1e-300))
+                                p["label"] = p.apply(lambda r: f"{r.get('term','')} ({r.get('category','')})", axis=1)
+                                fig_l = px.bar(
+                                    p.sort_values("neglog10_fdr", ascending=True),
+                                    x="neglog10_fdr",
+                                    y="label",
+                                    orientation="h",
+                                    labels={"neglog10_fdr": "-log10(FDR)", "label": "Término"},
+                                    title=f"Enriquecimiento ({lvl})"
+                                )
+                                st.plotly_chart(fig_l, use_container_width=True)
                         except Exception:
                             pass
-                except Exception as e:
-                    st.warning(f"No se pudo ejecutar el enriquecimiento: {e}")
+
+                # Descargas: CSV combinado y Excel con hojas por nivel
+                st.download_button(
+                    label="Descargar enriquecimiento combinado (CSV)",
+                    data=combined_f.to_csv(index=False),
+                    file_name="string_enrichment_combined.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+
+                try:
+                    sheets = [combined_f] + [by_level.get(lvl, pd.DataFrame()) for lvl in levels_to_use]
+                    names = ["combinado"] + [f"{lvl}" for lvl in levels_to_use]
+                    xlsx_bytes = dfs_to_excel_bytes(sheets, names)
+                    st.download_button(
+                        label="Descargar enriquecimiento (Excel, por nivel)",
+                        data=xlsx_bytes,
+                        file_name="string_enrichment_by_level.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                    )
+                except Exception:
+                    pass
         except Exception as e:
-            st.error(f"Error calculando Fold Change: {e}")
+            st.warning(f"No se pudo ejecutar el enriquecimiento: {e}")
 
         # Bibliografía (PubMed)
         st.subheader("Bibliografía (PubMed)")

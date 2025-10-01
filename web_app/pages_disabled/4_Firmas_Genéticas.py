@@ -12,7 +12,7 @@ _PROJ_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJ_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJ_ROOT))
 
-from src.core.signatures import create_signatures, HallmarkConfig
+from app.core.signatures import create_signatures, HallmarkConfig
 
 st.set_page_config(page_title="CGS — Firmas Genéticas", page_icon="🧬", layout="wide")
 st.title("Firmas Genéticas y Hallmarks")

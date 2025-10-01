@@ -5,8 +5,8 @@ from typing import Iterable, List, Optional, Sequence
 
 import pandas as pd
 
-from src.core.imputation import procesar_ct_column
-from src.core.fold_change import compute_fold_change
+from app.core.imputation import procesar_ct_column
+from app.core.fold_change import compute_fold_change
 
 
 class FoldChangePreparationError(Exception):

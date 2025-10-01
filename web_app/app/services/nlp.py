@@ -6,11 +6,11 @@ from typing import List, Optional
 import pandas as pd
 
 try:
-    from src.core.bibliography import filter_bibliography_by_cancer  # type: ignore
+    from app.core.bibliography import filter_bibliography_by_cancer  # type: ignore
 except Exception:  # pragma: no cover - dependencia opcional
     filter_bibliography_by_cancer = None  # type: ignore
 
-from src.integrations.google_nlp import GoogleNLPClient, aggregate_insights
+from app.integrations.google_nlp import GoogleNLPClient, aggregate_insights
 
 
 @dataclass(frozen=True)

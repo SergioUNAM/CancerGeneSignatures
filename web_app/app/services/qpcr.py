@@ -5,16 +5,16 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
-from src.core.io import LoadResult
-from src.core.qpcr import (
+from app.core.io import LoadResult
+from app.core.qpcr import (
     classify_by_prefixes as _classify_by_prefixes,
     classify_by_suffixes as _classify_by_suffixes,
     melt_wide_to_long,
 )
-from src.core.cleaning import drop_machine_controls
+from app.core.cleaning import drop_machine_controls
 
 try:
-    from src.core.qpcr import classify_by_regex as _classify_by_regex  # type: ignore
+    from app.core.qpcr import classify_by_regex as _classify_by_regex  # type: ignore
 except Exception:  # pragma: no cover - fallback para instalaciones antiguas
     def _classify_by_regex(df_long, ctrl_pattern: str, sample_pattern: str):
         t = df_long.copy()

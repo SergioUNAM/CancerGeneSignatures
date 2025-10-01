@@ -8,4 +8,6 @@ __all__ = [
     "services",
     "ui",
     "adapters",
+    "core",
+    "integrations",
 ]

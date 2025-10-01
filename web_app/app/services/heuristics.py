@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from src.core.bibliography import (
+from app.core.bibliography import (
     interpret_gene_relations,
     summarize_relations_by_gene,
 )
