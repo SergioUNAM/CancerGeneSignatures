@@ -1,167 +1,58 @@
 # CancerGeneSignatures
 Generador de firmas genéticas asociadas a tipos de cáncer mediante análisis de expresión génica, integración bibliográfica y construcción de redes de interacción. Facilita la identificación de genes clave y su aplicación en investigación oncológica, diagnóstico o pronóstico.
 
-## 🚀 Características Principales
+## 🚀 Flujo General
 
-- **Análisis de Genes Normalizadores**: Identificación robusta de genes de referencia para qPCR
-- **Validación Estadística Completa**: Múltiples estrategias de validación de genes normalizadores
-- **Análisis de Expresión Diferencial**: Detección de genes con expresión alterada
-- **Integración Bibliográfica**: Análisis de literatura científica
-- **Construcción de Redes**: Análisis de interacciones génicas
+1. **Carga y análisis qPCR** (`web_app/app/services/qpcr.py`): clasificación de controles/muestras, imputación de Ct y cálculo de Fold Change.
+2. **Anotación y enriquecimiento** (`app/services/string_enrichment.py`, `app/services/signatures.py`): integración con Ensembl, STRING y Hallmarks/MSigDB.
+3. **Bibliografía y heurística** (`app/services/bibliography.py`, `app/services/heuristics.py`): búsqueda PubMed, síntesis heurística por gen y visualizaciones.
+4. **Insights NLP** (`app/services/nlp.py`): preparación de corpus y análisis con Google Natural Language API.
+5. **UI modular** (`app/ui/sections.py`, próximamente `app/ui/pages/*`): cada sección se renderiza a partir de los servicios anteriores.
 
-## 📋 Módulos Principales
-
-### 🔬 Validación de Genes Normalizadores (`src/validation.py`)
-Módulo completo para validar la robustez de genes normalizadores seleccionados:
-
-- **Validación Cruzada K-fold**: Evalúa estabilidad en diferentes subconjuntos
-- **Análisis de Bootstrap**: Determina robustez mediante remuestreo
-- **Validación de Estabilidad Temporal**: Analiza consistencia a lo largo del tiempo
-- **Análisis de Sensibilidad**: Evalúa robustez ante perturbaciones
-- **Validación de Correlación Técnica**: Verifica independencia de variables técnicas
-- **Análisis de Reproducibilidad**: Valida consistencia inter-experimental
-
-### 📊 Análisis de Datos (`src/data_processing.py`)
-Procesamiento y análisis de datos de expresión génica.
-
-### 💬 Mensajería (`src/messaging.py`)
-Sistema de notificaciones y reportes.
-
-### 💾 Guardado de Resultados (`src/save_results.py`)
-Gestión de resultados y exportación de datos.
-
-## 🛠️ Instalación
-
-1. Crea un entorno virtual (opcional pero recomendado):
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   ```
-
-2. Instala las dependencias necesarias:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-## 📖 Uso
-
-### Validación de Genes Normalizadores
-
-```python
-from src.validation import validacion_completa_genes_normalizadores
-import pandas as pd
-
-# Cargar datos
-controles_df = pd.read_csv('datos_controles.csv')
-muestras_df = pd.read_csv('datos_muestras.csv')
-
-# Genes de referencia a validar
-genes_referencia = ['GAPDH', 'ACTB', '18S']
-
-# Ejecutar validación completa
-validador = validacion_completa_genes_normalizadores(
-    df_controles=controles_df,
-    df_muestras=muestras_df,
-    genes_referencia=genes_referencia,
-    generar_graficos=True,
-    guardar_reporte=True
-)
+## 📁 Estructura Principal
+```
+web_app/
+├── streamlit_app.py        # Bootstrap, navegación y composición de secciones
+├── app/
+│   ├── config/             # Modelos y loader de configuración (AppConfig, ServicesConfig)
+│   ├── services/           # Lógica de negocio (qpcr, fold_change, string_enrichment, bibliography, heuristics, nlp, visuals)
+│   ├── ui/                 # Secciones reutilizables y (próximamente) páginas multipage
+│   └── state/              # Estado persistente de sesión Streamlit
+└── config/menu.json        # Menú por defecto (tipos de cáncer, contextos, normalización)
 ```
 
-### Script de Ejemplo
-
+## 🛠️ Instalación Rápida
 ```bash
-# Ejecutar ejemplo de validación
-python src/ejemplo_validacion.py
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r web_app/requirements.txt
+streamlit run web_app/streamlit_app.py
 ```
 
-### Notebook de Validación
+### Variables útiles
+- `CGS_MENU_PATH`: ruta alternativa al menú JSON.
+- `CGS_LOGLEVEL`: nivel de logging (`INFO`, `DEBUG`, etc.).
+- `CGS_PUBMED_EMAIL`, `CGS_PUBMED_API_KEY`: credenciales por defecto para PubMed.
+- `CGS_GOOGLE_NLP_API_KEY`: clave de Google NLP.
 
-```bash
-# Abrir notebook de validación
-jupyter notebook notebooks/validacion_genes_normalizadores.ipynb
-```
+## 📊 Servicios Destacados
+- `app/services/qpcr.py`: orquestación del flujo qPCR (clasificación, imputación, resumen).
+- `app/services/fold_change.py`: políticas de “Undetermined”, métricas de calidad y cálculo de FC.
+- `app/services/string_enrichment.py`: llamadas a STRING y filtrado final.
+- `app/services/bibliography.py`: consulta a PubMed y fusión con niveles de expresión.
+- `app/services/heuristics.py`: síntesis heurística de la bibliografía clasificada.
+- `app/services/nlp.py`: preparación de corpus y agregación de resultados de Google NLP.
 
-## 📊 Estrategias de Validación Implementadas
-
-### 1. Validación Cruzada K-fold
-- **Objetivo**: Evaluar estabilidad de genes de referencia
-- **Métrica**: Correlación entre estabilidades en train/test
-- **Criterio**: Score > 0.7 indica buena estabilidad
-
-### 2. Análisis de Bootstrap
-- **Objetivo**: Determinar robustez mediante remuestreo
-- **Métrica**: Frecuencia de aparición como gen más estable
-- **Criterio**: Frecuencia > 50% indica alta robustez
-
-### 3. Análisis de Sensibilidad
-- **Objetivo**: Evaluar robustez ante perturbaciones
-- **Métrica**: Cambio porcentual en score de separación
-- **Criterio**: Cambio < 10% indica alta robustez
-
-### 4. Validación de Estabilidad Temporal
-- **Objetivo**: Analizar consistencia a lo largo del tiempo
-- **Métrica**: Correlación con tiempo
-- **Criterio**: |Correlación| < 0.3 indica estabilidad temporal
-
-### 5. Validación de Correlación Técnica
-- **Objetivo**: Verificar independencia de variables técnicas
-- **Métrica**: Correlación con variables técnicas
-- **Criterio**: |Correlación| < 0.5 indica independencia
-
-### 6. Análisis de Reproducibilidad
-- **Objetivo**: Validad consistencia inter-experimental
-- **Métrica**: ICC (Intraclass Correlation Coefficient)
-- **Criterio**: ICC > 0.75 indica excelente reproducibilidad
-
-## 📈 Interpretación de Resultados
-
-- **Score Global > 0.8**: Excelente confiabilidad
-- **Score Global 0.6-0.8**: Buena confiabilidad  
-- **Score Global 0.4-0.6**: Aceptable, requiere monitoreo
-- **Score Global < 0.4**: Problemático, reevaluar genes
-
-## 📁 Estructura del Proyecto
-
-```
-CancerGeneSignatures/
-├── src/
-│   ├── validation.py              # Módulo de validación
-│   ├── data_processing.py         # Procesamiento de datos
-│   ├── messaging.py               # Sistema de mensajería
-│   ├── save_results.py            # Guardado de resultados
-│   └── ejemplo_validacion.py      # Script de ejemplo
-├── notebooks/
-│   ├── genes_normalizadores.ipynb # Análisis de genes normalizadores
-│   └── validacion_genes_normalizadores.ipynb # Validación completa
-├── raw_data/                      # Datos crudos
-├── gen-sets_GSEA_MSigDB/          # Conjuntos de genes
-└── requirements.txt               # Dependencias
-```
-
-## 🔧 Dependencias
-
-- pandas >= 1.3.0
-- numpy >= 1.21.0
-- matplotlib >= 3.4.0
-- seaborn >= 0.11.0
-- scipy >= 1.7.0
-- scikit-learn >= 1.0.0
-- plotly >= 5.0.0
-- jupyter >= 1.0.0
-
-## 📚 Referencias
-
-- Vandesompele et al. (2002) - geNorm
-- Andersen et al. (2004) - NormFinder  
-- Pfaffl et al. (2004) - BestKeeper
-- Livak & Schmittgen (2001) - Método ΔΔCt
-- Bustin et al. (2009) - Guidelines MIQE
+## 🧭 Roadmap (resumen)
+- **Etapa actual (1)**: modularización + UI distribuida. Pendiente mover cada sección a `app/ui/pages`, documentar estructura y publicar plantillas de configuración.
+- **Próxima sub-etapa (1.5)**: preparar fixtures/datasets sintéticos y base `tests/` para abordar Calidad (Etapa 2) y Pruebas (Etapa 3).
+- **Etapas posteriores**: ver `README_PLAN_ETAPAS.md` para el detalle de CI/CD, observabilidad y gobernanza.
 
 ## 🤝 Contribuciones
-
-Las contribuciones son bienvenidas. Por favor, abre un issue o pull request para sugerir mejoras.
+Las contribuciones son bienvenidas. Recomendaciones actuales:
+- Mantener servicios libres de dependencias Streamlit.
+- Crear pruebas para cada módulo nuevo.
+- Documentar decisiones clave (ADR) en `docs/`.
 
 ## 📄 Licencia
-
-Este proyecto está bajo la Licencia MIT. Ver el archivo `LICENSE` para más detalles.
+Proyecto bajo Licencia MIT (`LICENSE`).
