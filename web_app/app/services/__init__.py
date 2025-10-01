@@ -45,6 +45,12 @@ from .heuristics import (  # noqa: F401
     compute_function_counts,
     map_functions_to_hallmarks,
 )
+from .nlp import (  # noqa: F401
+    NLPCorpusInfo,
+    prepare_corpus,
+    extract_texts,
+    analyze_texts,
+)
 
 __all__ = [
     "ExtractionSummary",
@@ -80,4 +86,8 @@ __all__ = [
     "build_function_long",
     "compute_function_counts",
     "map_functions_to_hallmarks",
+    "NLPCorpusInfo",
+    "prepare_corpus",
+    "extract_texts",
+    "analyze_texts",
 ]

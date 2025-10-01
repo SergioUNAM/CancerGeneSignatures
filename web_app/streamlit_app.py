@@ -94,7 +94,6 @@ from src.core.visuals import (
     fingerprint_heatmap,
     clustered_expression_by_level,
 )
-from src.integrations.google_nlp import GoogleNLPClient, aggregate_insights
 from app.state import AppSessionState
 from app.services.qpcr import (
     build_long_table,
@@ -133,6 +132,11 @@ from app.services.heuristics import (
     build_function_long,
     compute_function_counts,
     map_functions_to_hallmarks,
+)
+from app.services.nlp import (
+    prepare_corpus,
+    extract_texts,
+    analyze_texts,
 )
 
 # Cache de firmas para evitar recomputar al cambiar solo la selección visual
@@ -1683,35 +1687,34 @@ else:
     gene_selected = st.text_input("Gen a analizar", value="", placeholder="Ej.: TP53")
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def _prep_nlp_texts_cached(df_csv: str, cancer_label: str, gene: Optional[str], limit: int, apply_filter: bool) -> list[str]:
+def _prepare_corpus_cached(
+    df_csv: str,
+    cancer_label: str,
+    gene: Optional[str],
+    apply_filter: bool,
+) -> dict:
     try:
         df = pd.read_csv(io.StringIO(df_csv))
     except Exception:
-        return []
-    t = df.copy()
-    if apply_filter:
-        try:
-            from src.core.bibliography import filter_bibliography_by_cancer
-            t = filter_bibliography_by_cancer(t, cancer_label)
-        except Exception:
-            pass
-    # Filtrar por gen si aplica
-    if gene:
-        gcand = None
-        for c in ["Gene", "gene", "Symbol", "symbol", "target"]:
-            if c in t.columns:
-                gcand = c
-                break
-        if gcand:
-            t = t[t[gcand].astype(str).str.strip().str.lower() == str(gene).strip().lower()]
-    # Tomar columnas de texto disponibles
-    title_col = "Title" if "Title" in t.columns else ("article_title" if "article_title" in t.columns else None)
-    abs_col = "Abstract" if "Abstract" in t.columns else None
-    if not title_col:
-        return []
-    texts = (t[title_col].astype(str) + " " + (t[abs_col].astype(str) if abs_col else "")).tolist()
-    texts = [s.strip() for s in texts if isinstance(s, str) and s.strip()]
-    return texts[: max(1, int(limit))]
+        return {}
+    try:
+        info = prepare_corpus(
+            df,
+            cancer_label=cancer_label,
+            gene=gene,
+            apply_filter=apply_filter,
+        )
+    except ValueError as exc:
+        return {"error": str(exc)}
+    return {
+        "filtered_csv": info.filtered.to_csv(index=False),
+        "gene_csv": info.gene_filtered.to_csv(index=False),
+        "title_col": info.title_column,
+        "abstract_col": info.abstract_column or "",
+        "total_all": info.total_all,
+        "total_gene": info.total_gene,
+        "total_filtered": info.total_filtered,
+    }
 
 if run_insights:
     # Priorizar archivo subido; si no, usar bibliografía de sesión
@@ -1734,71 +1737,56 @@ if run_insights:
     elif not (g_api_key or google_cfg.api_key):
         st.warning("Falta la API Key de Google NLP. Ingresa una o configúrala en el entorno/secrets.")
     else:
+        filtered_df = pd.DataFrame()
+        gene_df = pd.DataFrame()
+        res: dict = {}
         with st.spinner("Analizando textos con Google NLP…"):
-            # Conteos informativos antes del análisis
-            try:
-                df_all = bib_df.copy()
-                # Arma columna de texto combinada
-                title_col = "Title" if "Title" in df_all.columns else ("article_title" if "article_title" in df_all.columns else None)
-                abs_col = "Abstract" if "Abstract" in df_all.columns else None
-                if title_col is None:
-                    raise RuntimeError("El CSV debe incluir una columna 'Title' o 'article_title'.")
-                df_all['_text'] = df_all[title_col].astype(str) + ' ' + (df_all[abs_col].astype(str) if abs_col else '')
-                total_docs_all = int((df_all['_text'].astype(str).str.strip() != '').sum())
-                # Filtrar por gen
-                df_gene = df_all.copy()
-                if gene_selected:
-                    gcand = None
-                    for c in ["Gene", "gene", "Symbol", "symbol", "target"]:
-                        if c in df_gene.columns:
-                            gcand = c
-                            break
-                    if gcand:
-                        df_gene = df_gene[df_gene[gcand].astype(str).str.strip().str.lower() == str(gene_selected).strip().lower()]
-                total_docs_gene = int((df_gene['_text'].astype(str).str.strip() != '').sum())
-                # Filtrar por cáncer (si aplica)
-                df_cancer_gene = df_gene.copy()
-                if apply_cancer_filter:
-                    try:
-                        from src.core.bibliography import filter_bibliography_by_cancer
-                        df_cancer_gene = filter_bibliography_by_cancer(df_cancer_gene, cancer_type)
-                    except Exception:
-                        pass
-                total_docs_final = int(len(df_cancer_gene))
+            corpus_cache = _prepare_corpus_cached(
+                bib_df.to_csv(index=False),
+                cancer_type,
+                gene_selected or None,
+                bool(apply_cancer_filter),
+            )
+            if not corpus_cache:
+                st.info("No hay textos válidos en el CSV (requiere columnas Title/Abstract con contenido).")
+            elif corpus_cache.get("error"):
+                st.error(corpus_cache["error"])
+            else:
+                filtered_df = pd.read_csv(io.StringIO(corpus_cache["filtered_csv"])) if corpus_cache.get("filtered_csv") else pd.DataFrame()
+                gene_df = pd.read_csv(io.StringIO(corpus_cache["gene_csv"])) if corpus_cache.get("gene_csv") else pd.DataFrame()
+                total_docs_all = int(corpus_cache.get("total_all", 0))
+                total_docs_gene = int(corpus_cache.get("total_gene", 0))
+                total_docs_final = int(corpus_cache.get("total_filtered", 0))
                 st.caption(
                     f"Artículos: {total_docs_all} en total → {total_docs_gene} para el gen seleccionado"
                     + (f" → {total_docs_final} tras filtrar por '{cancer_type}'" if apply_cancer_filter else "")
                 )
-            except Exception:
-                total_docs_final = None
 
-            texts = _prep_nlp_texts_cached(
-                bib_df.to_csv(index=False), cancer_type, gene_selected or None, int(n_docs), bool(apply_cancer_filter)
-            )
-            if not texts:
-                if apply_cancer_filter:
-                    st.info("No hay textos para analizar con el filtro de cáncer activo. Desactívalo para analizar todo tu CSV.")
+                texts = extract_texts(
+                    filtered_df,
+                    title_column=corpus_cache.get("title_col", "Title"),
+                    abstract_column=corpus_cache.get("abstract_col") or None,
+                    limit=int(n_docs),
+                )
+
+                if not texts:
+                    if apply_cancer_filter:
+                        st.info("No hay textos para analizar con el filtro de cáncer activo. Desactívalo para analizar todo tu CSV.")
+                    else:
+                        st.info("No hay textos válidos en el CSV (requiere columnas Title/Abstract con contenido).")
                 else:
-                    st.info("No hay textos válidos en el CSV (requiere columnas Title/Abstract con contenido).")
-            else:
-                try:
-                    glang = None if lang_sel == "auto" else lang_sel
-                    client = GoogleNLPClient(api_key=(g_api_key or None), default_language=glang, sleep_between=0.0)
-                    res = aggregate_insights(
-                        texts,
-                        client,
-                        do_entities=True,
-                        do_entity_sentiment=True,
-                        do_sentiment=True,
-                        do_categories=True,
-                        language=glang,
-                        max_chars_per_doc=8000,
-                    )
-                except Exception as e:
-                    st.error(f"Error llamando Google NLP: {e}")
-                    res = None
+                    try:
+                        glang = None if lang_sel == "auto" else lang_sel
+                        res = analyze_texts(
+                            texts,
+                            api_key=g_api_key or google_cfg.api_key,
+                            language=glang,
+                        ) or {}
+                    except Exception as e:
+                        st.error(f"Error llamando Google NLP: {e}")
+                        res = {}
 
-                if res:
+        if res:
                     # Breve párrafo resumen para el gen seleccionado (conclusiones)
                     try:
                         gname = (gene_selected or '').strip()
@@ -1841,7 +1829,6 @@ if run_insights:
                     # Complemento con heurística propia si hay bibliografía disponible (refuerza conclusiones)
                     try:
                         df_sub = bib_df.copy()
-                        # Filtrar por gen
                         gcand = None
                         for c in ["Gene", "gene", "Symbol", "symbol", "target"]:
                             if c in df_sub.columns:
@@ -1849,18 +1836,14 @@ if run_insights:
                                 break
                         if gcand and gname:
                             df_sub = df_sub[df_sub[gcand].astype(str).str.strip().str.lower() == gname.lower()]
-                        # Filtrar por cáncer si aplica
                         if apply_cancer_filter:
                             try:
                                 from src.core.bibliography import filter_bibliography_by_cancer
                                 df_sub = filter_bibliography_by_cancer(df_sub, cancer_type)
                             except Exception:
                                 pass
-                        # Aplicar interpretación heurística
-                        ih = interpret_gene_relations(df_sub)
-                        summ = summarize_relations_by_gene(ih)
-                        if isinstance(summ, pd.DataFrame) and not summ.empty:
-                            # Toma fila del gen
+                        summ = compute_heuristic_summary(df_sub)
+                        if not summ.empty:
                             row = summ.iloc[0]
                             effects = []
                             if float(row.get('upregulated_score', 0)) > float(row.get('downregulated_score', 0)):
