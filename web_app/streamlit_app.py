@@ -64,12 +64,7 @@ from src.core.qpcr import (
 )
 from src.core.tables import fc_comparison_table
 from src.core.ensembl import add_ensembl_info_batch
-from src.core.string_enrichment import (
-    run_string_enrichment,
-    filter_enrichment,
-    enrich_by_levels,
-    dfs_to_excel_bytes,
-)
+from src.core.string_enrichment import dfs_to_excel_bytes
 # Hot-reload bibliography helpers during dev (ensure new functions are visible)
 try:
     import importlib as _importlib
@@ -120,6 +115,11 @@ from app.services.visuals import (
     build_expression_distribution,
     build_expression_treemap,
 )
+from app.services.bibliography import (
+    PubMedRequest,
+    fetch_pubmed_articles,
+    merge_expression_levels,
+)
 
 # Cache de firmas para evitar recomputar al cambiar solo la selección visual
 import hashlib
@@ -143,22 +143,32 @@ def _annotate_ensembl_cached(df_csv: str, max_workers: int = 3) -> pd.DataFrame:
     return add_ensembl_info_batch(df_in, symbol_col='target', max_workers=max_workers)
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def _string_enrichment_cached(df_expr_csv: str, levels: list[str], species: int, sources: list[str], max_fdr: float, min_size: int, top_n: int) -> dict:
+def _string_enrichment_cached(
+    df_expr_csv: str,
+    levels: list[str],
+    species: int,
+    sources: list[str],
+    max_fdr: float,
+    min_size: int,
+    top_n: int,
+) -> dict:
     try:
         df_expr = pd.read_csv(io.StringIO(df_expr_csv))
     except Exception:
         return {"combined": pd.DataFrame(), "by_level": {}}
-    from src.core.string_enrichment import enrich_by_levels, filter_enrichment
-    res = enrich_by_levels(df_expr, symbol_col='target', level_col='nivel_expresion', levels=levels, species=species, sources=sources)
-    combined = res.get('combined')
-    by_level = res.get('by_level') or {}
-    # Aplicar filtros aquí para cachear resultado final
-    out_by_level = {}
-    if isinstance(by_level, dict):
-        for lvl, d in by_level.items():
-            out_by_level[lvl] = filter_enrichment(d, include_categories=sources, max_fdr=max_fdr, min_term_genes=min_size, top_n=top_n)
-    out_combined = filter_enrichment(combined, include_categories=sources, max_fdr=max_fdr, min_term_genes=min_size, top_n=top_n)
-    return {"combined": out_combined, "by_level": out_by_level}
+    result = perform_string_enrichment(
+        df_expr,
+        levels=levels,
+        species=species,
+        sources=sources,
+        max_fdr=max_fdr,
+        min_term_genes=min_size,
+        top_n=top_n,
+    )
+    return {
+        "combined": result.combined,
+        "by_level": result.by_level,
+    }
 
 @st.cache_data(show_spinner=False, ttl=86400)
 def _pubmed_cached(genes_df_csv: str, context: str, max_per_gene: int, email: str, api_key: str|None) -> pd.DataFrame:
@@ -166,29 +176,13 @@ def _pubmed_cached(genes_df_csv: str, context: str, max_per_gene: int, email: st
         genes_df = pd.read_csv(io.StringIO(genes_df_csv))
     except Exception:
         return pd.DataFrame()
-    return search_pubmed_by_genes(
-        genes_df.rename(columns={'target': 'target'}),
-        symbol_col='target',
-        ensembl_col='ensembl_id',
-        selected_context=context,
+    request = PubMedRequest(
+        context=context,
         max_per_gene=int(max_per_gene),
-        progress=None,
-        logger=None,
         email=email,
         api_key=api_key,
     )
-
-# Hot-reload STRING enrichment helpers during dev
-try:
-    import importlib as _importlib
-    import src.core.string_enrichment as _cgs_str
-    _cgs_str = _importlib.reload(_cgs_str)
-    run_string_enrichment = _cgs_str.run_string_enrichment  # type: ignore
-    filter_enrichment = _cgs_str.filter_enrichment  # type: ignore
-    enrich_by_levels = _cgs_str.enrich_by_levels  # type: ignore
-    dfs_to_excel_bytes = _cgs_str.dfs_to_excel_bytes  # type: ignore
-except Exception:
-    pass
+    return fetch_pubmed_articles(genes_df, request)
 
 # -----------------------------------------------------------------------------
 # Configuración de la página Streamlit
@@ -955,14 +949,7 @@ if df_loaded is not None:
                     if combined is None or combined.empty:
                         st.info("Sin resultados de enriquecimiento para los parámetros actuales.")
                     else:
-                        # Filtros comunes
-                        combined_f = filter_enrichment(
-                            combined,
-                            include_categories=sel_cats or None,
-                            max_fdr=float(max_fdr),
-                            min_term_genes=int(min_size),
-                            top_n=int(top_n),
-                        )
+                        combined_f = combined
                         st.dataframe(combined_f)
 
                         # Pestañas por nivel + resumen
@@ -997,13 +984,7 @@ if df_loaded is not None:
                                 if lvl_df is None or lvl_df.empty:
                                     st.info("Sin términos enriquecidos para este nivel.")
                                     continue
-                                lvl_df_f = filter_enrichment(
-                                    lvl_df,
-                                    include_categories=sel_cats or None,
-                                    max_fdr=float(max_fdr),
-                                    min_term_genes=int(min_size),
-                                    top_n=int(top_n),
-                                )
+                                lvl_df_f = lvl_df
                                 st.dataframe(lvl_df_f)
                                 try:
                                     import numpy as np
@@ -1137,12 +1118,7 @@ if df_loaded is not None:
                 if bib is None or bib.empty:
                     st.info("No se encontraron artículos para los parámetros actuales.")
                 else:
-                    # Merge nivel_expresion
-                    bib2 = pd.merge(
-                        bib,
-                        genes_df.rename(columns={'target': 'Gene'})[['Gene', 'nivel_expresion']],
-                        on='Gene', how='left'
-                    )
+                    bib2 = merge_expression_levels(bib, genes_df[['target', 'nivel_expresion']])
                     st.dataframe(bib2.head(50))
                     st.download_button(
                         label="Descargar bibliografía (CSV)",

@@ -100,10 +100,12 @@ web_app/
       - Implementar `config/models.py` y `loader.py` con tests unitarios.
       - Reemplazar uso directo de `MENU = load_menu()` por `config = load_app_config()`.
       - [x] Unificar credenciales vía `AppConfig.services` (PubMed, Google NLP) eliminando dependencias de `os.getenv` en la UI.
-3. **Servicios y Adaptadores**
-   - Extraer funciones puras de `streamlit_app.py` hacia `services/` empezando por flujo qPCR (carga + clasificación + fold change).
-     - [x] `app/services/qpcr.py` contiene `build_long_table`, `summarize_extraction` y clasificadores reutilizables (prefijos, sufijos, regex, selección, resolución de colisiones).
-     - [x] `app/services/fold_change.py` encapsula imputación de Ct, métricas de calidad y generación de tablas de expresión.
+   3. **Servicios y Adaptadores**
+      - Extraer funciones puras de `streamlit_app.py` hacia `services/` empezando por flujo qPCR (carga + clasificación + fold change).
+        - [x] `app/services/qpcr.py` contiene `build_long_table`, `summarize_extraction` y clasificadores reutilizables (prefijos, sufijos, regex, selección, resolución de colisiones).
+        - [x] `app/services/fold_change.py` encapsula imputación de Ct, métricas de calidad y generación de tablas de expresión.
+        - [x] `app/services/string_enrichment.py` concentra la ejecución y filtrado de enriquecimiento STRING.
+        - [x] `app/services/bibliography.py` expone helpers para PubMed y anexo de niveles de expresión.
    - Crear adaptadores finos para integraciones externas (PubMed, STRING, Google).
 4. **UI y Páginas**
    - Dividir `streamlit_app.py` en páginas bajo `ui/pages/` manteniendo primero el flujo qPCR.

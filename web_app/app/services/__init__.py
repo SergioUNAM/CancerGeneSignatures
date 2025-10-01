@@ -26,6 +26,15 @@ from .visuals import (  # noqa: F401
     build_expression_distribution,
     build_expression_treemap,
 )
+from .string_enrichment import (  # noqa: F401
+    EnrichmentResult,
+    perform_string_enrichment,
+)
+from .bibliography import (  # noqa: F401
+    PubMedRequest,
+    fetch_pubmed_articles,
+    merge_expression_levels,
+)
 
 __all__ = [
     "ExtractionSummary",
@@ -48,4 +57,9 @@ __all__ = [
     "build_fc_detail_figure",
     "build_expression_distribution",
     "build_expression_treemap",
+    "EnrichmentResult",
+    "perform_string_enrichment",
+    "PubMedRequest",
+    "fetch_pubmed_articles",
+    "merge_expression_levels",
 ]
