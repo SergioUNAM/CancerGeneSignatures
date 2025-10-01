@@ -1,58 +1,88 @@
 # CancerGeneSignatures
-Generador de firmas genéticas asociadas a tipos de cáncer mediante análisis de expresión génica, integración bibliográfica y construcción de redes de interacción. Facilita la identificación de genes clave y su aplicación en investigación oncológica, diagnóstico o pronóstico.
+Generador de firmas genéticas asociadas a tipos de cáncer mediante análisis de expresión génica, integración bibliográfica y construcción de redes de interacción. La meta es ofrecer un flujo reproducible que ayude a equipos oncológicos a priorizar genes candidatos, explorar literatura relevante y producir reportes consistentes.
 
-## 🚀 Flujo General
+## Panorama rápido
+- Pipeline completo: importación de qPCR, cálculos de Fold Change, enriquecimiento STRING/Hallmarks y síntesis bibliográfica.
+- Servicios especializados desacoplados de Streamlit (`web_app/app/services/*`) para favorecer pruebas y reutilización.
+- UI modular multipágina en construcción, apoyada en secciones reutilizables (`web_app/app/ui/sections.py`).
+- Configuración centralizada (`AppConfig`, `ServicesConfig`) con soporte para distintos entornos y credenciales externas.
 
-1. **Carga y análisis qPCR** (`web_app/app/services/qpcr.py`): clasificación de controles/muestras, imputación de Ct y cálculo de Fold Change.
-2. **Anotación y enriquecimiento** (`app/services/string_enrichment.py`, `app/services/signatures.py`): integración con Ensembl, STRING y Hallmarks/MSigDB.
-3. **Bibliografía y heurística** (`app/services/bibliography.py`, `app/services/heuristics.py`): búsqueda PubMed, síntesis heurística por gen y visualizaciones.
-4. **Insights NLP** (`app/services/nlp.py`): preparación de corpus y análisis con Google Natural Language API.
-5. **UI modular** (`app/ui/sections.py`, próximamente `app/ui/pages/*`): cada sección se renderiza a partir de los servicios anteriores.
+## Flujo funcional
+1. **Ingesta qPCR** (`app/services/qpcr.py`): limpieza, clasificación de muestras/controles, imputación de Ct y panel de calidad.
+2. **Fold Change y métricas** (`app/services/fold_change.py`): reglas de `Undetermined`, control de NaN por grupo y cálculo de métricas.
+3. **Anotación y enriquecimiento** (`app/services/string_enrichment.py`, `app/services/signatures.py`): integración Ensembl/STRING, hallmarks, filtros y consolidación.
+4. **Bibliografía y heurística** (`app/services/bibliography.py`, `app/services/heuristics.py`): consultas PubMed, etiquetado heurístico y visualizaciones.
+5. **Insights NLP** (`app/services/nlp.py`): generación de corpus, etiquetado por tema y agregación con resultados de expresión.
+6. **UI multipágina (WIP)** (`app/ui/sections.py`, `app/ui/pages/*`): vistas independientes para qPCR, enriquecimiento, bibliografía e insights.
 
-## 📁 Estructura Principal
+## Arquitectura del repositorio
 ```
-web_app/
-├── streamlit_app.py        # Bootstrap, navegación y composición de secciones
-├── app/
-│   ├── config/             # Modelos y loader de configuración (AppConfig, ServicesConfig)
-│   ├── services/           # Lógica de negocio (qpcr, fold_change, string_enrichment, bibliography, heuristics, nlp, visuals)
-│   ├── ui/                 # Secciones reutilizables y (próximamente) páginas multipage
-│   └── state/              # Estado persistente de sesión Streamlit
-└── config/menu.json        # Menú por defecto (tipos de cáncer, contextos, normalización)
+CancerGeneSignatures/
+├── web_app/                 # Streamlit app (bootstrap, configuración, servicios, UI, estado)
+│   ├── streamlit_app.py
+│   └── app/
+│       ├── config/          # Modelos de configuración y cargadores tipados
+│       ├── services/        # Lógica de negocio desacoplada
+│       ├── ui/              # Componentes y páginas (en expansión)
+│       └── state/           # Manejo de `st.session_state`
+├── src/                     # Núcleo reusable (core analytics, integraciones)
+│   ├── core/
+│   └── integrations/
+├── docs/                    # ADRs, especificaciones y planes de modularización
+├── notebooks/               # Experimentación y validación exploratoria
+├── raw_data/                # Datasets fuente (mantener anonimizado)
+├── resultados/              # Salidas generadas durante el análisis
+├── MEJORAS.md               # Backlog priorizado por fases
+├── README_PLAN_ETAPAS.md    # Roadmap detallado
+└── README.md                # Este documento
 ```
 
-## 🛠️ Instalación Rápida
+## Requisitos previos
+- Python 3.10+ (recomendado 3.11 para aprovechar mejoras recientes).
+- `pip` o `uv`; opcionalmente `conda` para gestionar dependencias científicas.
+- Credenciales opcionales para APIs externas: PubMed (email + api key), STRING, Google Natural Language.
+
+## Instalación rápida
 ```bash
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -r web_app/requirements.txt
-streamlit run web_app/streamlit_app.py
+pip install -r requirements.txt          # dependencias núcleo
+pip install -r web_app/requirements.txt  # dependencias específicas de la app Streamlit
 ```
 
-### Variables útiles
-- `CGS_MENU_PATH`: ruta alternativa al menú JSON.
-- `CGS_LOGLEVEL`: nivel de logging (`INFO`, `DEBUG`, etc.).
-- `CGS_PUBMED_EMAIL`, `CGS_PUBMED_API_KEY`: credenciales por defecto para PubMed.
-- `CGS_GOOGLE_NLP_API_KEY`: clave de Google NLP.
+## Ejecución de la app
+```bash
+streamlit run web_app/streamlit_app.py
+```
+- Se puede definir `CGS_MENU_PATH` para apuntar a un menú alternativo (`web_app/config/menu.json` por defecto).
+- `CGS_LOGLEVEL`, `CGS_PUBMED_EMAIL`, `CGS_PUBMED_API_KEY` y `CGS_GOOGLE_NLP_API_KEY` permiten ajustar logs y credenciales.
+- Para despliegues, sobrescribir variables mediante `st.secrets` o ficheros `.env` gestionados fuera del control de versiones.
 
-## 📊 Servicios Destacados
-- `app/services/qpcr.py`: orquestación del flujo qPCR (clasificación, imputación, resumen).
-- `app/services/fold_change.py`: políticas de “Undetermined”, métricas de calidad y cálculo de FC.
-- `app/services/string_enrichment.py`: llamadas a STRING y filtrado final.
-- `app/services/bibliography.py`: consulta a PubMed y fusión con niveles de expresión.
-- `app/services/heuristics.py`: síntesis heurística de la bibliografía clasificada.
-- `app/services/nlp.py`: preparación de corpus y agregación de resultados de Google NLP.
+## Trabajo con datos
+- Colocar ficheros qPCR en `raw_data/` o cargarlos desde la UI; mantener identificadores anonimizados.
+- Las llamadas a PubMed/STRING se cachean mediante `@st.cache_data` (TTL configurable en `app/services/*`).
+- Referencias a datasets de ejemplo y fixtures se documentarán en la sub-etapa 1.5 (`README_PLAN_ETAPAS.md`).
 
-## 🧭 Roadmap (resumen)
-- **Etapa actual (1)**: modularización + UI distribuida. Pendiente mover cada sección a `app/ui/pages`, documentar estructura y publicar plantillas de configuración.
-- **Próxima sub-etapa (1.5)**: preparar fixtures/datasets sintéticos y base `tests/` para abordar Calidad (Etapa 2) y Pruebas (Etapa 3).
-- **Etapas posteriores**: ver `README_PLAN_ETAPAS.md` para el detalle de CI/CD, observabilidad y gobernanza.
+## Pruebas rápidas
+- Ejecutar `pytest` en la raíz para lanzar las pruebas básicas (`tests/`).
+- Los fixtures sintéticos viven en `tests/conftest.py` e incluyen un workbook qPCR en memoria para los servicios de ingesta.
+- `pytest.ini` fija rutas y filtros mínimos; se puede ampliar con marcadores según crezca la batería.
 
-## 🤝 Contribuciones
-Las contribuciones son bienvenidas. Recomendaciones actuales:
-- Mantener servicios libres de dependencias Streamlit.
-- Crear pruebas para cada módulo nuevo.
-- Documentar decisiones clave (ADR) en `docs/`.
+## Documentación relacionada
+- `docs/etapa1_modularizacion_config.md`: decisiones sobre configuración y modularización actual.
+- `MEJORAS.md`: backlog ordenado por fases con estado granular.
+- `README_PLAN_ETAPAS.md`: roadmap detallado y criterios de salida.
 
-## 📄 Licencia
+## Roadmap activo
+- **Etapa 1 (en curso)**: separación completa en `app/ui/pages`, plantillas de configuración y documentación final de la arquitectura.
+- **Etapa 1.5 (en curso)**: ampliación de fixtures sintéticos, estructura `tests/` y automatización inicial.
+- **Etapas 2-3**: calidad, pruebas y cobertura con CI. Detalles completos en el README de etapas.
+
+## Contribuir
+1. Crear rama descriptiva (`feature/`, `fix/`, `docs/`).
+2. Mantener la lógica en `app/services` o `src/core` sin dependencias explícitas de Streamlit.
+3. Añadir pruebas (cuando existan fixtures) y documentar decisiones clave en `docs/`.
+4. Enviar PR incluyendo referencias a tareas del roadmap o checklist en `MEJORAS.md`.
+
+## Licencia
 Proyecto bajo Licencia MIT (`LICENSE`).
