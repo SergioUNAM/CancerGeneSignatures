@@ -215,7 +215,7 @@ def build_heatmaps_by_method(
     *,
     alpha: float = 0.05,
     top_n_fallback: int = 20,
-) -> tuple[dict[str, pd.DataFrame], dict[str, list[str]], str]:
+) -> tuple[dict[str, pd.DataFrame], dict[str, list[str]], dict[str, pd.DataFrame], str]:
     """Construye una matriz heatmap por método, usando los genes seleccionados por cada método.
 
     Si algún método no produce genes significativos, usa los Top-N por menor q.
@@ -248,7 +248,7 @@ def build_heatmaps_by_method(
         gene_lists[method] = genes
         matrices[method] = build_heatmap_matrix(df_norm, genes)
 
-    return matrices, gene_lists, basic_ref_gene
+    return matrices, gene_lists, tables, basic_ref_gene
 
 
 def save_gene_sets(

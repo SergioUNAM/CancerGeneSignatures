@@ -43,6 +43,8 @@ from app.services.fold_change_visuals import (
     build_fc_methods_scatter,
     build_expression_classification_table,
     build_classification_summary_chart,
+    build_three_way_venn,
+    build_volcano_plot,
     summarize_fc_methods,
 )
 from app.services.heatmap_visuals import build_dendrogram_heatmap
@@ -75,6 +77,11 @@ def _format_list_preview(items: List[str], limit: int = 20) -> str:
     head = items[:limit]
     suffix = " …" if len(items) > limit else ""
     return ", ".join(head) + suffix
+
+
+def _eq(formula: str) -> None:
+    """Render LaTeX inline helper."""
+    st.latex(formula)
 
 
 def _notify_parameter_change(state_key: str, value: object, message: str) -> None:
@@ -612,10 +619,25 @@ def main() -> None:
 
     app_state = AppSessionState.load()
 
-    st.title("Flujo qPCR → Normalización avanzada → IDs Ensembl")
-    st.write(
-        "Carga tu hoja qPCR, clasifica controles y muestras, ejecuta la normalización avanzada "
-        "y obtén IDs Ensembl con descripciones asociadas."
+    st.title("Flujo qPCR → Normalización avanzada → Anotación Ensembl")
+    st.markdown(
+        "Cargue su archivo de qPCR, defina **controles** y **muestras**, ejecute la "
+        "**normalización avanzada** (búsqueda automática de referencias estables) y concluya con "
+        "la identificación de **genes diferencialmente expresados** y sus **IDs Ensembl**. "
+        "El recorrido replica la estructura de un artículo científico: diseño experimental, "
+        "control de calidad, normalización y, por último, tablas y figuras reproducibles."
+    )
+    st.info(
+        "**Ruta rápida**\n"
+        "1) Cargue el archivo Excel y revise pozos problemáticos u outliers.\n"
+        "2) Clasifique controles y muestras (prefijo, sufijo, regex o selección manual).\n"
+        "3) Elija la política para valores indeterminados y revise las métricas de calidad.\n"
+        "4) Ejecute la **normalización avanzada** y explore heatmaps, diagrama de Venn y volcano plot.\n"
+        "5) Exporte datasets, listas de genes y las anotaciones Ensembl.\n\n"
+        "**Política de imputación**\n"
+        "• `nan`: conserva Ct no determinados; útil para visualizar huecos reales.\n"
+        "• `ctmax`: sustituye por el Ct máximo observado del grupo; aproxima el límite de detección.\n"
+        "• `value`: usa un Ct fijo (p. ej. 40) para penalizar indetectables de forma uniforme."
     )
 
     with st.sidebar:
@@ -646,6 +668,10 @@ def main() -> None:
             min_value=0.0,
             max_value=100.0,
             step=0.5,
+        )
+        st.caption(
+            "Política de imputación: `nan` conserva el Ct sin determinar, `ctmax` sustituye por el máximo Ct válido del grupo "
+            "y `value` utiliza el número especificado. Ajuste la opción según la sensibilidad del ensayo." 
         )
 
         st.header("3) Opciones del estudio")
@@ -765,12 +791,14 @@ def main() -> None:
     st.divider()
     st.subheader("Clasificación de controles vs muestras")
     st.markdown(
-        "Identificamos primero qué pozos pertenecen a controles y a muestras, "
-        "tal como se explica en la sección de métodos de muchos artículos de qPCR: "
-        "sin una separación clara entre ambos grupos, cualquier métrica posterior "
-        "es ambigua. Usa este bloque como una sección de *Materiales y métodos* "
-        "interactiva: selecciona la estrategia que mejor refleje tu diseño experimental "
-        "y valida en la tabla previa que las etiquetas se vean consistentes."
+        "El primer paso es definir con precisión **qué pozos corresponden a controles y cuáles a muestras**. "
+        "Sin esta separación, las métricas posteriores carecen de validez. Este bloque funciona como una sección "
+        "de *Materiales y métodos* interactiva: seleccione la estrategia que refleje su diseño experimental y confirme "
+        "en la vista previa que las etiquetas sean coherentes."
+    )
+    st.caption(
+        "Revisión práctica: asegúrese de que cada regla capture solo los pozos esperados. Si un test aparece en ambos grupos, "
+        "ajuste la regla o utilice la selección manual."
     )
     file_key = f"assign::{df_loaded.source_name}:{df_loaded.sheet_name}"
     controles_df, muestras_df = _render_classification_ui(long_df, file_key)
@@ -811,11 +839,11 @@ def main() -> None:
     st.divider()
     st.subheader("Calidad de datos")
     st.markdown(
-        "Antes de avanzar a cálculos reproducibles, documentamos la calidad del panel. "
-        "Las métricas que ves aquí juegan el mismo papel que los controles de calidad en "
-        "la sección de resultados de un paper: verifican cobertura de genes, presencia de "
-        "valores faltantes y estabilidad básica. Si detectas un desequilibrio, vale la pena "
-        "volver sobre la clasificación o incluso replantear los filtros iniciales."
+        "Previo al análisis, se documenta la **calidad del panel**. Estas métricas cubren cobertura génica, presencia de valores faltantes "
+        "y estabilidad básica. Si se observa desbalance, conviene reetiquetar o revisar los filtros iniciales." 
+    )
+    st.caption(
+        "Como referencia práctica, valores de NaN superiores al 10% suelen justificar repetir mediciones o ajustar la estrategia de imputación."
     )
     metrics = compute_quality_metrics(controles_df, muestras_df)
     _quality_summary(metrics)
@@ -826,16 +854,36 @@ def main() -> None:
     st.divider()
     st.subheader("Normalización avanzada")
     st.markdown(
-        "Esta etapa replica la justificación metodológica de la normalización avanzada. "
-        "Al ajustar los parámetros estás, en la práctica, explorando distintas hipótesis "
-        "sobre qué subconjuntos de genes de referencia mejor capturan la estabilidad del experimento. "
-        "Los mensajes de retroalimentación resumen qué combinación quedó activa, del mismo modo "
-        "que un artículo detalla en texto los criterios de optimización adoptados."
+        "En esta etapa se identifica la **referencia más estable** y se aplican las transformaciones clásicas de qPCR. "
+        "Los parámetros ajustables representan hipótesis alternativas sobre la estabilidad de subconjuntos de genes de referencia."
+    )
+    _eq(r"S = 0.7\,\sigma_{\text{intra}} + 0.3\,\lvert \mu_{\text{Control}} - \mu_{\text{Muestra}} \rvert")
+    _eq(r"\Delta Ct_i = Ct_i - Ct_{\text{ref}}")
+    _eq(r"\log_2(\mathrm{expr}_i) = -\,\Delta Ct_i,\quad \Delta\Delta Ct = \Delta Ct_{\text{muestra}} - \Delta Ct_{\text{control}},\quad \mathrm{FC} = 2^{-\Delta\Delta Ct}")
+    st.markdown(
+        "El módulo automatiza la búsqueda de referencia y aplica ΔCt/ΔΔCt de manera explícita y reproducible."
+    )
+    st.markdown(
+        """
+        En la puntuación \(S\) se privilegia la estabilidad intra-grupo (70 %) y se deja un 30 % para penalizar desplazamientos
+        sistemáticos entre controles y muestras. Esta elección sigue la recomendación usual en textos de diseño experimental, donde se sugiere ponderar con
+        mayor peso la varianza interna cuando el objetivo es fijar un patrón de referencia robusto, manteniendo un término de
+        sesgo para evitar que la referencia arrastre diferencias reales. Si la variabilidad intra-grupo es pequeña y la brecha
+        entre medias es nula, el score se minimiza, lo que garantiza que los genes elegidos se comporten como verdaderos
+        “housekeeping”.
+        """
+    )
+    st.caption(
+        "Cuando el algoritmo avanzado termina seleccionando el mismo gen (K = 1) o un promedio casi idéntico al del método básico, "
+        "los perfiles normalizados coinciden de forma natural: ambos restan el mismo Ct y obtienen log2FC equivalentes. "
+        "Las diferencias emergen cuando la referencia óptima requiere combinar varios genes o cuando los controles muestran un sesgo "
+        "que el método de promedios no corrige; en esos casos, las tablas comparativas y el resumen cuantitativo revelan "
+        "discrepancias en log2FC mientras el básico permanece más conservador o más ruidoso."
     )
     adv_key = f"adv::{file_key}"
     adv_state = st.session_state.setdefault(adv_key, {})
 
-    with st.expander("Parámetros", expanded=False):
+    with st.expander("Parámetros", expanded=True):
         alpha = st.number_input(
             "Umbral FDR (q)",
             min_value=0.001,
@@ -856,8 +904,10 @@ def main() -> None:
         with col_b:
             k_refs = st.selectbox(
                 "Tamaño set referencia",
-                options=[1, 2, 3],
-                index=[1, 2, 3].index(int(getattr(adv_state.get("params"), "k_refs", 2))),
+                options=[1, 2, 3, 4, 5],
+                index=[1, 2, 3, 4, 5].index(int(getattr(adv_state.get("params"), "k_refs", 2)))
+                if int(getattr(adv_state.get("params"), "k_refs", 2)) in {1, 2, 3, 4, 5}
+                else 1,
             )
         with col_c:
             random_seed = st.number_input(
@@ -882,10 +932,22 @@ def main() -> None:
                 value=int(getattr(adv_state.get("params"), "permutation_iter", 100)),
                 step=20,
             )
+        st.markdown(
+            """
+            **Interpretación de los parámetros**
+
+            - *Umbral FDR (q)*: nivel de corrección por pruebas múltiples. Valores pequeños (≤0.05) privilegian especificidad; subirlo (0.1) amplía la lista de genes pero aumenta el riesgo de falsos positivos.
+            - *Genes candidatos*: número de genes con menor variabilidad que se exploran como referencias. Un N reducido da rapidez pero puede omitir combinaciones útiles; valores altos permiten descubrir referencias alternativas a costa de mayor tiempo de cómputo.
+            - *Tamaño set referencia (K)*: cantidad de genes que se promedian. K=1 replica el método básico; K≥2 mitiga ruido y sesgos. El sistema garantiza que el número de candidatos sea al menos igual a K; si la cohorte es pequeña, reduzca K para evitar combinaciones imposibles.
+            - *Semilla aleatoria*: fija el generador pseudoaleatorio para reproducir exactamente bootstrap y permutaciones. Cambiarla puede alterar levemente las frecuencias empíricas.
+            - *Iteraciones bootstrap*: número de re-muestreos del conjunto de pruebas. Más iteraciones (≥300) estabilizan la frecuencia de genes significativos; pocas iteraciones agilizan el cálculo pero dan estimaciones más ruidosas.
+            - *Permutaciones*: barajadas Control/Muestra usadas para estimar la tasa de falsos positivos. Incrementarlas (≥200) refina la estimación del FPR; valores bajos aceleran la corrida sacrificando precisión.
+            """
+        )
 
     params = AdvancedNormalizationParams(
         alpha=float(alpha),
-        n_candidates=int(n_candidates),
+        n_candidates=max(int(n_candidates), int(k_refs)),
         k_refs=int(k_refs),
         bootstrap_iter=int(bootstrap_iter),
         permutation_iter=int(permutation_iter),
@@ -931,11 +993,12 @@ def main() -> None:
     st.divider()
     st.subheader("Expresión relativa comparada (3 métodos)")
     st.markdown(
-        "Con la normalización avanzada como base, contrastamos los tres enfoques disponibles. "
-        "Piensa esta sección como el panel principal de figuras: cada heatmap es el equivalente "
-        "a una figura de resultados que sustenta la discusión. Elegir si ver solo los genes "
-        "significativos o el panel completo permite alternar entre una narrativa centrada en hallazgos "
-        "y otra que incluye la totalidad del contexto experimental."
+        "Con la referencia elegida se contrastan **tres enfoques**. Cada heatmap actúa como figura de resultados: "
+        "es posible mostrar únicamente los genes significativos o todo el panel, según se busque una narrativa focalizada "
+        "o un contexto más amplio."
+    )
+    st.caption(
+        "Columnas homogéneas sugieren consistencia entre muestras, mientras que bandas horizontales intensas reflejan genes con cambios robustos."
     )
     genes_all = sorted(result.df_norm["target"].dropna().astype(str).unique().tolist())
     if not genes_all:
@@ -1020,10 +1083,11 @@ def main() -> None:
     st.divider()
     st.subheader("Datasets de niveles de expresión por método")
     st.markdown(
-        "Aquí dejamos listos los conjuntos de datos que alimentarán los análisis posteriores. "
-        "Seleccionar un método equivale a explicitar, como harías en un paper, cuál será el marco "
-        "de referencia para la interpretación de resultados downstream. Cada descarga ofrece tanto "
-        "el formato largo (útil para estadísticas) como la matriz genes×tests (propicia para visualizaciones)."
+        "Se generan los conjuntos de datos que alimentarán los análisis posteriores. Seleccionar un método equivale a fijar el **marco de referencia** "
+        "para interpretar resultados subsecuentes. Cada pestaña ofrece formato largo y matriz genes×tests."
+    )
+    st.caption(
+        "Es recomendable conservar los tres para justificar comparaciones y la elección metodológica en la discusión."
     )
     expression_datasets, basic_ref_gene_expr = build_expression_datasets(
         controles_df, muestras_df, result
@@ -1082,11 +1146,11 @@ def main() -> None:
     st.divider()
     st.subheader("Genes diferencialmente expresados y heatmaps dedicados")
     st.markdown(
-        "Esta sección funciona como un *supplementary table* interactivo: reportamos qué genes "
-        "separan de manera consistente a los grupos según cada método. El mensaje de éxito resume "
-        "los conteos, y la lista unificada opera como la base de la narrativa biológica que seguirá. "
-        "Los heatmaps dedicados permiten inspeccionar visualmente la separación que justificará "
-        "las conclusiones en etapas de anotación y enriquecimiento."
+        "Se listan los genes que distinguen consistentemente a los grupos según cada método. "
+        "La lista unificada constituye la base para la interpretación biológica y la búsqueda bibliográfica."
+    )
+    st.caption(
+        "La intersección triple en el diagrama de Venn suele señalar candidatos robustos; los exclusivos pueden evidenciar efectos dependientes del método de normalización."
     )
     try:
         col_params1, col_params2, col_params3 = st.columns([1, 1, 1])
@@ -1122,7 +1186,7 @@ def main() -> None:
             "Recalculando genes diferencialmente expresados con los parámetros indicados… listo.",
         )
 
-        matrices_by_method, gene_lists, basic_ref_gene = build_heatmaps_by_method(
+        matrices_by_method, gene_lists, stats_by_method, basic_ref_gene = build_heatmaps_by_method(
             controles_df,
             muestras_df,
             result,
@@ -1216,12 +1280,11 @@ def main() -> None:
     st.divider()
     st.subheader("Tablas finales: ΔΔCt y Fold Change (3 métodos integrados)")
     st.markdown(
-        "Finalmente, consolidamos las métricas clave en tablas comparables con las que se publican "
-        "en la sección de resultados cuantitativos de los artículos. Separar ΔΔCt y Fold Change "
-        "ayuda a distinguir la interpretación en escala logarítmica y lineal, respectivamente. "
-        "El bloque de resumen cuantitativo aporta, en formato textual, los mismos indicadores "
-        "(correlaciones, discrepancias) que suelen describirse en la discusión para sustentar "
-        "la robustez de los hallazgos."
+        "Se presentan tablas de **ΔΔCt** y **Fold Change**, equivalentes a las incluidas en artículos científicos. "
+        "Separar ΔΔCt (escala logarítmica) y FC (escala lineal) facilita la interpretación."
+    )
+    st.caption(
+        "Signos invertidos entre métodos en ΔΔCt sugieren revisar la referencia. En FC, se recomienda priorizar genes con |log2FC| ≥ 1 y q < α."
     )
     try:
         fold_result = compute_fold_change_with_expression(controles_df, muestras_df)
@@ -1300,6 +1363,21 @@ def main() -> None:
         "si algún enfoque sesga hacia la sobreexpresión o subexpresión." 
     )
 
+    volcano_fig = build_volcano_plot(
+        stats_by_method,
+        labels={
+            "advanced": "Avanzada",
+            "global_mean": "Promedio",
+            "refgene": f"Gen ref ({basic_ref_gene})",
+        },
+        q_threshold=float(alpha_sel),
+        log2fc_threshold=np.log2(2.0),
+    )
+    st.plotly_chart(volcano_fig, width="stretch")
+    st.caption(
+        "El gráfico volcano resume magnitud (log2FC) y significancia (-log10 p). Los genes resaltados superan los umbrales de α y diferencia mínima."
+    )
+
     total_genes = int(fc_table["target"].notna().sum())
     if total_genes > 0:
         max_slider = min(150, total_genes)
@@ -1331,6 +1409,18 @@ def main() -> None:
                 ("advanced", "gen_ref"): "Avanzada vs Gen ref",
                 ("promedio", "gen_ref"): "Promedio vs Gen ref",
             }
+            st.markdown(
+                """
+                Este panel resume cuán alineados están los tres métodos cuando miramos los log2FC por gen:
+
+                * **r, RMSE, MAE** cuantifican la similitud entre pares de métodos. r≈1 implica ordenamientos casi idénticos;
+                  RMSE y MAE bajos indican magnitudes homogéneas. N especifica cuántos genes entraron en el cálculo.
+                * **Umbrales ≥1.5x, ≥2x** muestran cuántos genes superan esos fold change mínimos en cada método, cuántos coinciden todos
+                  y cuántos al menos uno. Útil para detectar métodos más conservadores o liberales.
+                * **Genes con mayor discrepancia** lista los casos donde la diferencia en log2FC respecto al método avanzado es más alta;
+                  revisa estos genes antes de sacar conclusiones.
+                """
+            )
             for pair, metrics in summary.get("pairwise_metrics", {}).items():
                 label = pair_labels.get(pair, f"{pair[0]} vs {pair[1]}")
                 st.write(

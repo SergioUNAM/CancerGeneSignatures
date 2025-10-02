@@ -554,6 +554,73 @@ def build_three_way_venn(
     return fig
 
 
+def build_volcano_plot(
+    stats_by_method: dict[str, pd.DataFrame],
+    *,
+    labels: dict[str, str] | None = None,
+    q_threshold: float = 0.05,
+    log2fc_threshold: float = 1.0,
+) -> go.Figure:
+    """Construye un volcano plot combinando métodos (log2FC vs -log10(p))."""
+
+    labels = labels or {
+        "advanced": "Avanzada",
+        "global_mean": "Promedio",
+        "refgene": "Gen ref",
+    }
+
+    traces = []
+    for method_key, stats in stats_by_method.items():
+        if not isinstance(stats, pd.DataFrame) or stats.empty:
+            continue
+        df = stats.copy()
+        if {"mean_case", "mean_ctrl", "p"}.issubset(df.columns):
+            df["log2fc"] = df["mean_case"].astype(float) - df["mean_ctrl"].astype(float)
+        elif "log2fc" in df.columns:
+            df["log2fc"] = df["log2fc"].astype(float)
+        else:
+            continue
+        df["neg_log10_p"] = -np.log10(df["p"].clip(lower=1e-12))
+        df["significant"] = False
+        if "q" in df.columns:
+            df["significant"] = df["q"].astype(float) < q_threshold
+        df["fc_pass"] = df["log2fc"].abs() >= log2fc_threshold
+        df["highlight"] = df["significant"] & df["fc_pass"]
+
+        traces.append(
+            go.Scatter(
+                x=df["log2fc"],
+                y=df["neg_log10_p"],
+                mode="markers",
+                name=labels.get(method_key, method_key),
+                marker=dict(
+                    size=np.where(df["highlight"], 10, 6),
+                    opacity=np.where(df["highlight"], 0.95, 0.6),
+                    line=dict(width=np.where(df["highlight"], 1.2, 0.4), color="#333"),
+                ),
+                hovertemplate=(
+                    "<b>%{text}</b><br>log2FC: %{x:.2f}<br>-log10(p): %{y:.2f}<extra></extra>"
+                ),
+                text=df.get("gene", df.get("target", df.index.astype(str))),
+            )
+        )
+
+    fig = go.Figure(data=traces)
+    fig.add_vline(x=log2fc_threshold, line=dict(color="#d62728", dash="dot", width=1))
+    fig.add_vline(x=-log2fc_threshold, line=dict(color="#d62728", dash="dot", width=1))
+    fig.add_hline(y=-np.log10(max(q_threshold, 1e-12)), line=dict(color="#2ca02c", dash="dot", width=1))
+    fig.update_layout(
+        title=dict(text="Volcano plot por método", x=0.5, xanchor="center"),
+        template="plotly_white",
+        xaxis_title="log2FC",
+        yaxis_title="-log10(p)",
+        height=560,
+        margin=dict(t=60, b=60, l=60, r=20),
+        legend=dict(orientation="h", x=1, xanchor="right", y=1.05),
+    )
+    return fig
+
+
 __all__ += [
     "build_fc_methods_bars",
     "build_fc_methods_scatter",
@@ -561,4 +628,5 @@ __all__ += [
     "build_expression_classification_table",
     "build_classification_summary_chart",
     "build_three_way_venn",
+    "build_volcano_plot",
 ]
