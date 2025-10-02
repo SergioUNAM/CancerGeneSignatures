@@ -49,3 +49,16 @@ def build_step_sequence(step_defs: Iterable[tuple[str, str, str]]) -> Sequence[P
     """Convierte una secuencia de tuplas en ``PipelineStep``s."""
 
     return [PipelineStep(title, description, status) for title, description, status in step_defs]
+
+
+def render_sidebar_progress(steps: Sequence[PipelineStep]) -> None:
+    """Renderiza los pasos del pipeline en formato compacto para la barra lateral."""
+
+    if not steps:
+        return
+
+    normalized = [PipelineStep(step.title, step.description, _normalize_status(step.status)) for step in steps]
+    for idx, step in enumerate(normalized, start=1):
+        emoji = _STATUS_EMOJI.get(step.status, _STATUS_EMOJI["pending"])
+        st.markdown(f"**{emoji} Paso {idx}. {step.title}**")
+        st.caption(step.description)

@@ -27,3 +27,11 @@ Este documento resume oportunidades de mejora de primer nivel en la experiencia 
 - **Propuesta**: Mostrar un estado principal (pendiente/completado) con tarjeta de KPIs, activar automáticamente la consulta cuando se detecta una nueva lista de genes y ofrecer búsqueda/filtrado directo sobre la tabla para agilizar exploración.
 
 Cada tarea debe abordarse manteniendo el rigor científico del flujo, pero priorizando la claridad visual y la reducción de fricción durante la carga, configuración y exportación de resultados.
+
+## Seguimiento de implementación
+
+### Etapa 1 — Guiado por etapas y reducción de carga cognitiva inicial
+- ✅ Se añadió un encabezado de progreso tipo wizard y las ayudas introductorias se trasladaron a expanders colapsados por defecto para aliviar la primera carga visual en la vista principal (`web_app/streamlit_app.py`).
+
+### Etapa 2 — Sidebar con estados y acciones dependientes
+- ✅ La barra lateral ahora renderiza el estado de cada etapa con indicadores compactos, bloquea selectores dependientes hasta que la carga de datos se completa y confirma visualmente el dataset activo tras cada procesamiento (`web_app/streamlit_app.py`).

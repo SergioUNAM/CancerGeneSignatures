@@ -49,7 +49,11 @@ from app.services.fold_change_visuals import (
 from app.services.heatmap_visuals import build_dendrogram_heatmap
 from app.services.qpcr import build_long_table, summarize_extraction
 from app.state import AppSessionState
-from app.ui.components import build_step_sequence, render_pipeline_progress
+from app.ui.components import (
+    build_step_sequence,
+    render_pipeline_progress,
+    render_sidebar_progress,
+)
 from app.ui.sections import render_classification_section
 
 
@@ -145,8 +149,10 @@ def _pipeline_status_labels(completions: Sequence[bool]) -> Sequence[str]:
     return statuses
 
 
-def _render_pipeline_header(df_loaded: Optional[LoadResult]) -> None:
-    """Renderiza el encabezado de etapas con el estado actual del flujo."""
+def _build_pipeline_steps(
+    df_loaded: Optional[LoadResult],
+) -> tuple[Sequence[object], Sequence[bool]]:
+    """Genera los pasos del pipeline y sus estados de completitud actuales."""
 
     completions = _compute_pipeline_completion(df_loaded)
     statuses = _pipeline_status_labels(completions)
@@ -154,7 +160,7 @@ def _render_pipeline_header(df_loaded: Optional[LoadResult]) -> None:
         (title, description, status)
         for (title, description), status in zip(_PIPELINE_STEPS_INFO, statuses)
     ]
-    render_pipeline_progress(build_step_sequence(step_defs))
+    return build_step_sequence(step_defs), completions
 
 
 def _eq(formula: str) -> None:
@@ -444,11 +450,7 @@ def main() -> None:
         "Sigue las etapas guiadas para pasar de Ct crudos a resultados exportables con anotación genética."
     )
 
-    _render_pipeline_header(df_loaded)
-
-    st.markdown(
-        "Utiliza la barra lateral para iniciar cada paso. El encabezado superior indica tu progreso en tiempo real."
-    )
+    progress_placeholder = st.container()
 
     with st.expander("Guía rápida del flujo", expanded=False):
         st.markdown(
@@ -468,8 +470,13 @@ def main() -> None:
             "• `value`: usa un Ct fijo (p. ej. 40) para penalizar indetectables de forma uniforme."
         )
 
+    pipeline_steps: Sequence[object] = []
+
     with st.sidebar:
-        st.header("1) Datos de entrada")
+        status_placeholder = st.container()
+        st.divider()
+        st.subheader("Paso 1 · Datos de entrada")
+        st.caption("Sube tu Excel qPCR y confirma su estructura antes de avanzar.")
         uploaded = st.file_uploader("Archivo Excel", type=["xlsx", "xls"])
         sheet: Optional[str] = None
         if uploaded is not None:
@@ -481,14 +488,21 @@ def main() -> None:
                 sheets = []
             if sheets:
                 sheet = st.selectbox("Hoja", options=sheets, index=0)
+        process_disabled = uploaded is None
+        run_btn = st.button("Procesar archivo", type="primary", disabled=process_disabled)
 
-        st.header("2) Valores 'Undetermined/ND'")
+        has_data = df_loaded is not None
+
+        st.divider()
+        st.subheader("Paso 2 · Valores 'Undetermined/ND'")
+        st.caption("Define la política de imputación que se aplicará al recargar y durante el análisis.")
         und_policy = st.selectbox(
             "Política",
             options=["nan", "ctmax", "value"],
             index=["nan", "ctmax", "value"].index(app_state.undetermined.policy)
             if app_state.undetermined.policy in {"nan", "ctmax", "value"}
             else 0,
+            disabled=not has_data,
         )
         und_value = st.number_input(
             "Valor fijo (si aplica)",
@@ -496,13 +510,18 @@ def main() -> None:
             min_value=0.0,
             max_value=100.0,
             step=0.5,
+            disabled=not has_data,
         )
         st.caption(
             "Política de imputación: `nan` conserva el Ct sin determinar, `ctmax` sustituye por el máximo Ct válido del grupo "
-            "y `value` utiliza el número especificado. Ajuste la opción según la sensibilidad del ensayo." 
+            "y `value` utiliza el número especificado. Ajuste la opción según la sensibilidad del ensayo."
         )
+        if not has_data:
+            st.info("Este paso se habilita una vez que el archivo se procesa correctamente.")
 
-        st.header("3) Opciones del estudio")
+        st.divider()
+        st.subheader("Paso 3 · Opciones del estudio")
+        st.caption("Selecciona las etiquetas con las que se documentará el experimento.")
         cancer_types = app_config.menu.cancer_types
         if not cancer_types:
             st.error("El menú de configuración no define tipos de cáncer disponibles.")
@@ -516,6 +535,7 @@ def main() -> None:
             "Tipo de cáncer",
             options=cancer_types,
             index=default_cancer,
+            disabled=not has_data,
         )
 
         context_options = [ctx.label for ctx in app_config.menu.contexts]
@@ -528,55 +548,96 @@ def main() -> None:
             "Contexto biológico",
             options=context_options,
             index=default_context_idx,
+            disabled=not has_data,
         )
+        if not has_data:
+            st.info("Selecciona un archivo válido para habilitar las opciones del estudio.")
 
-        run_btn = st.button("Procesar archivo", type="primary")
+        load_feedback: Optional[str] = None
+        load_error: Optional[str] = None
+        load_success = False
+        if uploaded is not None and run_btn:
+            candidate: Optional[LoadResult] = None
+            uploaded.seek(0)
+            try:
+                candidate = parse_qpcr_wide(
+                    uploaded,
+                    sheet_name=sheet,
+                    header_mode="coords",
+                    header_row_idx=3,
+                    well_col_idx=0,
+                    target_col_idx=1,
+                    undetermined_policy=und_policy,
+                    undetermined_value=float(und_value),
+                )
+            except Exception as exc:
+                load_feedback = (
+                    f"Cabecera esperada no encontrada ({exc}); intentando detección automática…"
+                )
+                uploaded.seek(0)
+                try:
+                    candidate = parse_qpcr_wide(
+                        uploaded,
+                        sheet_name=sheet,
+                        header_mode="auto",
+                        undetermined_policy=und_policy,
+                        undetermined_value=float(und_value),
+                    )
+                except Exception as exc_auto:
+                    load_error = f"No se pudo leer el archivo: {exc_auto}"
+                    logger.exception("Fallo al parsear archivo", exc_info=exc_auto)
+                    candidate = None
+                else:
+                    df_loaded = candidate
+                    load_success = True
+            else:
+                df_loaded = candidate
+                load_success = True
+
+            if load_success and df_loaded is not None:
+                app_state.df_loaded = df_loaded
+                logger.info(
+                    "Archivo cargado: %s | hoja=%s | forma=%s",
+                    df_loaded.source_name,
+                    df_loaded.sheet_name,
+                    df_loaded.df.shape,
+                )
+
+        has_data = df_loaded is not None
+
+        if load_error:
+            st.error(load_error)
+
+        if has_data and df_loaded is not None:
+            st.success(
+                "Archivo activo: "
+                f"{df_loaded.source_name} · {df_loaded.df.shape[0]} filas × {df_loaded.df.shape[1]} columnas."
+            )
+            if load_feedback:
+                st.caption(load_feedback)
+        else:
+            st.info(
+                "Carga un archivo Excel de qPCR y pulsa 'Procesar archivo' para habilitar el resto de pasos."
+            )
+
+        pipeline_steps, _ = _build_pipeline_steps(df_loaded)
+        with status_placeholder:
+            st.markdown("### Estado del flujo")
+            render_sidebar_progress(pipeline_steps)
 
     app_state.undetermined.policy = und_policy
     app_state.undetermined.value = float(und_value)
     app_state.cancer_type = str(cancer_selected)
     app_state.context_label = str(context_selected)
+    app_state.df_loaded = df_loaded
     app_state.persist()
 
-    df_loaded: Optional[LoadResult] = app_state.df_loaded
+    with progress_placeholder:
+        render_pipeline_progress(pipeline_steps)
 
-    if uploaded is not None and run_btn:
-        try:
-            uploaded.seek(0)
-            df_loaded = parse_qpcr_wide(
-                uploaded,
-                sheet_name=sheet,
-                header_mode="coords",
-                header_row_idx=3,
-                well_col_idx=0,
-                target_col_idx=1,
-                undetermined_policy=und_policy,
-                undetermined_value=float(und_value),
-            )
-        except Exception as exc:
-            st.warning(f"Cabecera esperada no encontrada ({exc}); intentando detección automática…")
-            uploaded.seek(0)
-            try:
-                df_loaded = parse_qpcr_wide(
-                    uploaded,
-                    sheet_name=sheet,
-                    header_mode="auto",
-                    undetermined_policy=und_policy,
-                    undetermined_value=float(und_value),
-                )
-            except Exception as exc_auto:
-                st.error(f"No se pudo leer el archivo: {exc_auto}")
-                logger.exception("Fallo al parsear archivo", exc_info=exc_auto)
-                df_loaded = None
-        if df_loaded is not None:
-            app_state.df_loaded = df_loaded
-            app_state.persist()
-            logger.info(
-                "Archivo cargado: %s | hoja=%s | forma=%s",
-                df_loaded.source_name,
-                df_loaded.sheet_name,
-                df_loaded.df.shape,
-            )
+    st.markdown(
+        "La barra lateral funciona como panel de etapas: cada bloque se habilita automáticamente al completar el anterior."
+    )
 
     if df_loaded is None:
         st.info("Carga un archivo Excel y pulsa 'Procesar archivo' para comenzar.")
