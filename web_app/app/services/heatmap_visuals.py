@@ -72,6 +72,14 @@ def build_dendrogram_heatmap(
     row_order, col_order = _order_by_dendrogram(mat, metric=distance, method=linkage_method)
     mat_ord = mat.loc[row_order, col_order]
 
+    # Ajustar dinámicamente la altura de la figura según el número de genes para evitar solapes
+    base_height = 450
+    per_row = 12
+    min_height = 450
+    max_height = 1600
+    calculated_height = base_height + per_row * len(mat_ord.index)
+    calculated_height = max(min_height, min(max_height, calculated_height))
+
     # Dendrogramas
     dendro_top = ff.create_dendrogram(mat_ord.values.T, orientation="bottom", labels=mat_ord.columns.tolist())
     dendro_side = ff.create_dendrogram(mat_ord.values, orientation="right", labels=mat_ord.index.tolist())
@@ -110,7 +118,8 @@ def build_dendrogram_heatmap(
         title=title,
         coloraxis=dict(colorscale=[[0.0, "#2c7bb6"], [0.5, "#ffffb2"], [1.0, "#d7191c"]]),
         showlegend=False,
-        margin=dict(t=60, l=0, r=0, b=0),
+        height=calculated_height,
+        margin=dict(t=60, l=120, r=40, b=80),
     )
 
     # Ocultar ticks innecesarios en dendrogramas
