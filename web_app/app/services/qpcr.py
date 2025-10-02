@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -9,6 +9,7 @@ from app.core.io import LoadResult
 from app.core.qpcr import (
     classify_by_prefixes as _classify_by_prefixes,
     classify_by_suffixes as _classify_by_suffixes,
+    group_by_initial_prefix,
     melt_wide_to_long,
 )
 from app.core.cleaning import drop_machine_controls
@@ -51,6 +52,15 @@ class ClassificationResult:
 
     def is_valid(self) -> bool:
         return not self.controles.empty and not self.muestras.empty
+
+
+@dataclass(frozen=True)
+class PrefixGrouping:
+    """Información consolidada de prefijos detectados en nombres de prueba."""
+
+    prefix_table: pd.DataFrame
+    groups: Dict[str, List[str]]
+    without_prefix: List[str]
 
 
 def build_long_table(
@@ -181,6 +191,41 @@ def _normalize_affixes(values: Sequence[str]) -> List[str]:
     return list(dict.fromkeys(norm))  # preserva orden sin duplicados
 
 
+def group_tests_by_initial_prefix(long_df: pd.DataFrame) -> PrefixGrouping:
+    """Analiza los nombres y devuelve metadata de prefijos detectados."""
+
+    if "test" not in long_df.columns:
+        empty_table = pd.DataFrame(columns=["prefijo", "total_tests", "ejemplos"])
+        return PrefixGrouping(prefix_table=empty_table, groups={}, without_prefix=[])
+
+    tests = [str(v) for v in long_df["test"].dropna().unique().tolist()]
+    grouped = group_by_initial_prefix(tests)
+    assigned = {name for names in grouped.values() for name in names}
+    without_prefix = sorted(name for name in tests if name not in assigned)
+
+    rows = []
+    for prefix, names in grouped.items():
+        examples = names[:3]
+        suffix = " …" if len(names) > len(examples) else ""
+        rows.append(
+            {
+                "prefijo": prefix,
+                "total_tests": len(names),
+                "ejemplos": ", ".join(examples) + suffix,
+            }
+        )
+
+    prefix_table = (
+        pd.DataFrame(rows, columns=["prefijo", "total_tests", "ejemplos"])
+        .sort_values("total_tests", ascending=False)
+        .reset_index(drop=True)
+        if rows
+        else pd.DataFrame(columns=["prefijo", "total_tests", "ejemplos"])
+    )
+
+    return PrefixGrouping(prefix_table=prefix_table, groups=grouped, without_prefix=without_prefix)
+
+
 __all__ = [
     "ExtractionSummary",
     "build_long_table",
@@ -192,4 +237,6 @@ __all__ = [
     "classify_tests_by_selection",
     "detect_collisions",
     "apply_collision_strategy",
+    "group_tests_by_initial_prefix",
+    "PrefixGrouping",
 ]

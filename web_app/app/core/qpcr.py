@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Sequence
 from collections import Counter
 import re
 
@@ -106,12 +106,54 @@ def suggest_name_affixes(sample_names: List[str], top_n: int = 10) -> Dict[str, 
     return {"prefixes": pref_list, "suffixes": suff_list}
 
 
+def extract_initial_prefix(sample_name: str) -> str:
+    """Obtiene el bloque alfanumérico inicial previo a la parte numérica variable."""
+
+    if sample_name is None:
+        return ""
+
+    normalized = re.sub(r"[^0-9A-Za-z]", "", str(sample_name)).upper()
+    if not normalized:
+        return ""
+
+    match = re.match(r"^(\d*[A-Z]+)", normalized)
+    if match:
+        return match.group(1)
+
+    digits_only = re.match(r"^(\d+)", normalized)
+    if digits_only:
+        return digits_only.group(1)
+
+    return normalized
+
+
+def group_by_initial_prefix(sample_names: Sequence[str]) -> Dict[str, List[str]]:
+    """Agrupa nombres por su prefijo inicial detectado."""
+
+    groups: Dict[str, List[str]] = {}
+    for name in sample_names:
+        prefix = extract_initial_prefix(name)
+        if not prefix:
+            continue
+        groups.setdefault(prefix, []).append(str(name))
+    for prefix in list(groups):
+        groups[prefix] = sorted(groups[prefix])
+    return groups
+
+
 def classify_by_prefixes(df_long: pd.DataFrame, ctrl_prefixes: List[str], sample_prefixes: List[str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
     t = df_long.copy()
+    ctrl_norm = tuple(str(p).strip().upper() for p in ctrl_prefixes if str(p).strip())
+    samp_norm = tuple(str(p).strip().upper() for p in sample_prefixes if str(p).strip())
     t["test_str"] = t["test"].astype(str)
-    ctrl = t[t["test_str"].str.startswith(tuple(ctrl_prefixes))] if ctrl_prefixes else t.iloc[0:0]
-    samp = t[t["test_str"].str.startswith(tuple(sample_prefixes))] if sample_prefixes else t.iloc[0:0]
-    return ctrl.drop(columns=["test_str"]) if not ctrl.empty else ctrl, samp.drop(columns=["test_str"]) if not samp.empty else samp
+    t["test_norm"] = t["test_str"].str.upper()
+    ctrl = t[t["test_norm"].str.startswith(ctrl_norm)] if ctrl_norm else t.iloc[0:0]
+    samp = t[t["test_norm"].str.startswith(samp_norm)] if samp_norm else t.iloc[0:0]
+    drop_cols = [col for col in ("test_str", "test_norm") if col in ctrl.columns]
+    ctrl = ctrl.drop(columns=drop_cols) if not ctrl.empty and drop_cols else ctrl
+    drop_cols = [col for col in ("test_str", "test_norm") if col in samp.columns]
+    samp = samp.drop(columns=drop_cols) if not samp.empty and drop_cols else samp
+    return ctrl, samp
 
 
 def classify_by_suffixes(df_long: pd.DataFrame, ctrl_suffixes: List[str], sample_suffixes: List[str]) -> Tuple[pd.DataFrame, pd.DataFrame]:

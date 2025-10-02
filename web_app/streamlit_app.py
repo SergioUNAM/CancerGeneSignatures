@@ -19,7 +19,6 @@ if str(_PROJ_ROOT) not in sys.path:
 from app.config.loader import ConfigError, load_app_config
 from app.core.ensembl import add_ensembl_info_batch
 from app.core.io import LoadResult, list_excel_sheets, parse_qpcr_wide
-from app.core.qpcr import suggest_name_affixes
 from app.core.reference_normalization import DifferentialExpressionResult
 from app.services.fold_change import (
     FoldChangePreparationError,
@@ -49,12 +48,11 @@ from app.services.fold_change_visuals import (
 )
 from app.services.heatmap_visuals import build_dendrogram_heatmap
 from app.services.qpcr import (
+    PrefixGrouping,
     build_long_table,
     classify_tests_by_prefixes,
-    classify_tests_by_regex,
-    classify_tests_by_selection,
-    classify_tests_by_suffixes,
     detect_collisions,
+    group_tests_by_initial_prefix,
     summarize_extraction,
 )
 from app.state import AppSessionState
@@ -118,6 +116,10 @@ def _clear_classification_state(state: Dict[str, object]) -> None:
     for key in (
         "ctrl_prefix",
         "samp_prefix",
+        "ctrl_prefixes",
+        "samp_prefixes",
+        "ctrl_unassigned",
+        "samp_unassigned",
         "ctrl_suffix",
         "samp_suffix",
         "ctrl_regex",
@@ -126,6 +128,7 @@ def _clear_classification_state(state: Dict[str, object]) -> None:
         "selected_samp",
         "controles_df",
         "muestras_df",
+        "_last_selection",
     ):
         state.pop(key, None)
     # Limpiar entradas asociadas en session_state de Streamlit
@@ -139,209 +142,219 @@ def _clear_classification_state(state: Dict[str, object]) -> None:
             "pref_samp_suggest::",
             "suff_ctrl_suggest::",
             "suff_samp_suggest::",
+            "ctrl_prefixes::",
+            "samp_prefixes::",
+            "ctrl_unassigned::",
+            "samp_unassigned::",
+            "auto_apply::",
         )):
             st.session_state.pop(ui_key, None)
 
 
 def _render_classification_ui(long_df: pd.DataFrame, file_key: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
     state = st.session_state.setdefault(file_key, {})
+
+    grouping: PrefixGrouping = group_tests_by_initial_prefix(long_df)
+    prefix_groups = grouping.groups
+    without_prefix = grouping.without_prefix
+    prefix_options = sorted(prefix_groups.keys())
+    label_map = {prefix: f"{prefix} ({len(prefix_groups[prefix])} tests)" for prefix in prefix_options}
+
     unique_tests = sorted(long_df["test"].astype(str).dropna().unique().tolist())
-    sugg = suggest_name_affixes(unique_tests, top_n=10)
-    suggested_prefixes = [p for p, _ in (sugg.get("prefixes") or [])]
-    suggested_suffixes = [s for s, _ in (sugg.get("suffixes") or [])]
+    total_tests = len(unique_tests)
 
-    tab_pref, tab_suff, tab_regex, tab_manual = st.tabs(
-        ["Por prefijos", "Por sufijos", "Por regex", "Selección manual"]
+    if not prefix_options:
+        st.warning("No se detectaron prefijos alfanuméricos en los nombres de prueba.")
+
+    default_ctrl = [p for p in state.get("ctrl_prefixes", []) if p in prefix_options]
+    default_samp = [p for p in state.get("samp_prefixes", []) if p in prefix_options]
+
+    ctrl_key = f"ctrl_prefixes::{file_key}"
+    samp_key = f"samp_prefixes::{file_key}"
+
+    if ctrl_key in st.session_state:
+        st.session_state[ctrl_key] = [p for p in st.session_state[ctrl_key] if p in prefix_options]
+    else:
+        st.session_state[ctrl_key] = default_ctrl
+
+    if samp_key in st.session_state:
+        st.session_state[samp_key] = [p for p in st.session_state[samp_key] if p in prefix_options]
+    else:
+        st.session_state[samp_key] = default_samp
+
+    ctrl_prefixes = st.multiselect(
+        "Prefijos controles",
+        options=prefix_options,
+        default=default_ctrl,
+        format_func=lambda value: label_map.get(value, value),
+        key=ctrl_key,
+    )
+    samp_prefixes = st.multiselect(
+        "Prefijos muestras",
+        options=prefix_options,
+        default=default_samp,
+        format_func=lambda value: label_map.get(value, value),
+        key=samp_key,
     )
 
-    with tab_pref:
-        col_pref_ctrl, col_pref_samp = st.columns(2)
-        ctrl_suggest = ""
-        samp_suggest = ""
-        if suggested_prefixes:
-            ctrl_options = ["(vacío)"] + suggested_prefixes
-            samp_options = ["(vacío)"] + suggested_prefixes
-            with col_pref_ctrl:
-                ctrl_suggest = st.selectbox(
-                    "Sugerencia controles",
-                    options=ctrl_options,
-                    index=0,
-                    key=f"pref_ctrl_suggest::{file_key}",
-                )
-            with col_pref_samp:
-                samp_suggest = st.selectbox(
-                    "Sugerencia muestras",
-                    options=samp_options,
-                    index=0,
-                    key=f"pref_samp_suggest::{file_key}",
-                )
-        with col_pref_ctrl:
-            default_ctrl = state.get("ctrl_prefix") or ("" if ctrl_suggest in {"", "(vacío)"} else ctrl_suggest)
-            ctrl_prefix = st.text_input(
-                "Prefijo controles",
-                value=default_ctrl,
-                help="Introduce un prefijo común de los tests de control.",
-                key=f"ctrl_prefix_input::{file_key}",
-            )
-        with col_pref_samp:
-            default_samp = state.get("samp_prefix") or ("" if samp_suggest in {"", "(vacío)"} else samp_suggest)
-            samp_prefix = st.text_input(
-                "Prefijo muestras",
-                value=default_samp,
-                help="Introduce un prefijo común de los tests de muestra.",
-                key=f"samp_prefix_input::{file_key}",
-            )
-        if suggested_prefixes:
-            st.caption("Sugerencias detectadas: " + ", ".join(suggested_prefixes))
-        prev_ctrl = [t for t in unique_tests if ctrl_prefix and str(t).startswith(ctrl_prefix)]
-        prev_samp = [t for t in unique_tests if samp_prefix and str(t).startswith(samp_prefix)]
-        st.caption(f"Controles previstos: {_format_list_preview(prev_ctrl)}")
-        st.caption(f"Muestras previstas: {_format_list_preview(prev_samp)}")
-        if st.button("Clasificar por prefijos", key=f"btn_pref_{file_key}"):
-            if not ctrl_prefix and not samp_prefix:
-                st.warning("Introduce al menos un prefijo para clasificar.")
-            else:
-                result = classify_tests_by_prefixes(
-                    long_df,
-                    [ctrl_prefix] if ctrl_prefix else [],
-                    [samp_prefix] if samp_prefix else [],
-                )
-                ctrl_df, samp_df = _store_classification(state, result.controles, result.muestras)
-                state["ctrl_prefix"] = ctrl_prefix
-                state["samp_prefix"] = samp_prefix
-                st.success(
-                    f"Clasificación aplicada → controles: {len(ctrl_df)}, muestras: {len(samp_df)}"
-                )
+    if not grouping.prefix_table.empty:
+        with st.expander("Prefijos detectados", expanded=False):
+            st.dataframe(grouping.prefix_table, use_container_width=True)
 
-    with tab_suff:
-        col_suff_ctrl, col_suff_samp = st.columns(2)
-        suff_suggest_ctrl = ""
-        suff_suggest_samp = ""
-        if suggested_suffixes:
-            suff_ctrl_options = ["(vacío)"] + suggested_suffixes
-            suff_samp_options = ["(vacío)"] + suggested_suffixes
-            with col_suff_ctrl:
-                suff_suggest_ctrl = st.selectbox(
-                    "Sugerencia controles",
-                    options=suff_ctrl_options,
-                    index=0,
-                    key=f"suff_ctrl_suggest::{file_key}",
-                )
-            with col_suff_samp:
-                suff_suggest_samp = st.selectbox(
-                    "Sugerencia muestras",
-                    options=suff_samp_options,
-                    index=0,
-                    key=f"suff_samp_suggest::{file_key}",
-                )
-        with col_suff_ctrl:
-            default_ctrl_suff = state.get("ctrl_suffix") or ("" if suff_suggest_ctrl in {"", "(vacío)"} else suff_suggest_ctrl)
-            ctrl_suffix = st.text_input(
-                "Sufijos controles (separados por coma)",
-                value=default_ctrl_suff,
-                key=f"ctrl_suffix_input::{file_key}",
-            )
-        with col_suff_samp:
-            default_samp_suff = state.get("samp_suffix") or ("" if suff_suggest_samp in {"", "(vacío)"} else suff_suggest_samp)
-            samp_suffix = st.text_input(
-                "Sufijos muestras (separados por coma)",
-                value=default_samp_suff,
-                key=f"samp_suffix_input::{file_key}",
-            )
-        if suggested_suffixes:
-            st.caption("Sugerencias detectadas: " + ", ".join(suggested_suffixes))
-        ctrl_suffixes = [s.strip() for s in ctrl_suffix.split(",") if s.strip()]
-        samp_suffixes = [s.strip() for s in samp_suffix.split(",") if s.strip()]
-        prev_ctrl = [t for t in unique_tests if any(str(t).endswith(s) for s in ctrl_suffixes)]
-        prev_samp = [t for t in unique_tests if any(str(t).endswith(s) for s in samp_suffixes)]
-        st.caption(f"Controles previstos: {_format_list_preview(prev_ctrl)}")
-        st.caption(f"Muestras previstas: {_format_list_preview(prev_samp)}")
-        if st.button("Clasificar por sufijos", key=f"btn_suff_{file_key}"):
-            if not ctrl_suffixes and not samp_suffixes:
-                st.warning("Define al menos un sufijo para clasificar.")
-            else:
-                result = classify_tests_by_suffixes(long_df, ctrl_suffixes, samp_suffixes)
-                ctrl_df, samp_df = _store_classification(state, result.controles, result.muestras)
-                state["ctrl_suffix"] = ctrl_suffix
-                state["samp_suffix"] = samp_suffix
-                st.success(
-                    f"Clasificación aplicada → controles: {len(ctrl_df)}, muestras: {len(samp_df)}"
-                )
+    ctrl_unassigned_key = f"ctrl_unassigned::{file_key}"
+    samp_unassigned_key = f"samp_unassigned::{file_key}"
 
-    with tab_regex:
-        col_regex_ctrl, col_regex_samp = st.columns(2)
-        with col_regex_ctrl:
-            ctrl_regex = st.text_input(
-                "Regex controles",
-                value=state.get("ctrl_regex", ""),
-            )
-        with col_regex_samp:
-            samp_regex = st.text_input(
-                "Regex muestras",
-                value=state.get("samp_regex", ""),
-            )
-        try:
-            ctrl_pattern = re.compile(ctrl_regex) if ctrl_regex else None
-        except re.error:
-            ctrl_pattern = None
-            st.warning("Regex de controles inválido, actualízalo antes de clasificar.")
-        try:
-            samp_pattern = re.compile(samp_regex) if samp_regex else None
-        except re.error:
-            samp_pattern = None
-            st.warning("Regex de muestras inválido, actualízalo antes de clasificar.")
-        prev_ctrl = [t for t in unique_tests if ctrl_pattern and ctrl_pattern.search(str(t))]
-        prev_samp = [t for t in unique_tests if samp_pattern and samp_pattern.search(str(t))]
-        st.caption(f"Controles previstos: {_format_list_preview(prev_ctrl)}")
-        st.caption(f"Muestras previstas: {_format_list_preview(prev_samp)}")
-        if st.button("Clasificar por regex", key=f"btn_regex_{file_key}"):
-            if not ctrl_regex and not samp_regex:
-                st.warning("Introduce al menos un patrón regex para clasificar.")
-            else:
-                try:
-                    result = classify_tests_by_regex(long_df, ctrl_regex, samp_regex)
-                except re.error as exc:  # type: ignore[name-defined]
-                    st.error(f"Regex inválido: {exc}")
-                else:
-                    ctrl_df, samp_df = _store_classification(state, result.controles, result.muestras)
-                    state["ctrl_regex"] = ctrl_regex
-                    state["samp_regex"] = samp_regex
-                    st.success(
-                        f"Clasificación aplicada → controles: {len(ctrl_df)}, muestras: {len(samp_df)}"
-                    )
+    default_ctrl_unassigned = [t for t in state.get("ctrl_unassigned", []) if t in without_prefix]
+    default_samp_unassigned = [t for t in state.get("samp_unassigned", []) if t in without_prefix]
 
-    with tab_manual:
-        col_sel_ctrl, col_sel_samp = st.columns(2)
-        with col_sel_ctrl:
-            selected_ctrl = st.multiselect(
-                "Pruebas controles",
-                options=unique_tests,
-                default=state.get("selected_ctrl", []),
-            )
-        with col_sel_samp:
-            selected_samp = st.multiselect(
-                "Pruebas muestras",
-                options=unique_tests,
-                default=state.get("selected_samp", []),
-            )
-        if st.button("Clasificar selección", key=f"btn_sel_{file_key}"):
-            if not selected_ctrl and not selected_samp:
-                st.warning("Selecciona al menos una prueba en cualquiera de los grupos.")
-            else:
-                result = classify_tests_by_selection(long_df, selected_ctrl, selected_samp)
-                ctrl_df, samp_df = _store_classification(state, result.controles, result.muestras)
-                state["selected_ctrl"] = selected_ctrl
-                state["selected_samp"] = selected_samp
-                st.success(
-                    f"Clasificación aplicada → controles: {len(ctrl_df)}, muestras: {len(samp_df)}"
-                )
+    if ctrl_unassigned_key in st.session_state:
+        st.session_state[ctrl_unassigned_key] = [t for t in st.session_state[ctrl_unassigned_key] if t in without_prefix]
+    else:
+        st.session_state[ctrl_unassigned_key] = default_ctrl_unassigned
 
-    st.button(
-        "Limpiar clasificación",
-        key=f"btn_clear_{file_key}",
-        on_click=_clear_classification_state,
-        kwargs={"state": state},
+    if samp_unassigned_key in st.session_state:
+        st.session_state[samp_unassigned_key] = [t for t in st.session_state[samp_unassigned_key] if t in without_prefix]
+    else:
+        st.session_state[samp_unassigned_key] = default_samp_unassigned
+
+    ctrl_unassigned = []
+    samp_unassigned = []
+    if without_prefix:
+        st.caption("Pruebas sin prefijo detectado: " + _format_list_preview(without_prefix))
+        col_un_ctrl, col_un_samp = st.columns(2)
+        with col_un_ctrl:
+            ctrl_unassigned = st.multiselect(
+                "Asignar manualmente a controles",
+                options=without_prefix,
+                default=default_ctrl_unassigned,
+                key=ctrl_unassigned_key,
+            )
+        with col_un_samp:
+            samp_unassigned = st.multiselect(
+                "Asignar manualmente a muestras",
+                options=without_prefix,
+                default=default_samp_unassigned,
+                key=samp_unassigned_key,
+            )
+
+    ctrl_preview = sorted(
+        set(test for prefix in ctrl_prefixes for test in prefix_groups.get(prefix, []))
+        .union(set(ctrl_unassigned))
     )
+    samp_preview = sorted(
+        set(test for prefix in samp_prefixes for test in prefix_groups.get(prefix, []))
+        .union(set(samp_unassigned))
+    )
+
+    st.caption(f"Controles previstos: {_format_list_preview(ctrl_preview)}")
+    st.caption(f"Muestras previstas: {_format_list_preview(samp_preview)}")
+
+    overlap_prefixes = set(ctrl_prefixes).intersection(samp_prefixes)
+    if overlap_prefixes:
+        st.warning(
+            "Los prefijos seleccionados se superponen entre controles y muestras: "
+            + ", ".join(sorted(overlap_prefixes))
+        )
+
+    overlap_tests = set(ctrl_preview).intersection(samp_preview)
+    if overlap_tests:
+        st.warning(
+            "Algunas pruebas quedaron en ambos grupos: " + _format_list_preview(sorted(overlap_tests), limit=10)
+        )
+
+    assigned_tests = len(set(ctrl_preview).union(samp_preview))
+    coverage = (assigned_tests / total_tests) if total_tests else 0.0
+
+    preview_summary = pd.DataFrame([
+        {
+            "grupo": "Controles",
+            "prefijos": ", ".join(ctrl_prefixes) or "-",
+            "manual": len(ctrl_unassigned),
+            "total_tests": len(ctrl_preview),
+        },
+        {
+            "grupo": "Muestras",
+            "prefijos": ", ".join(samp_prefixes) or "-",
+            "manual": len(samp_unassigned),
+            "total_tests": len(samp_preview),
+        },
+    ])
+    st.dataframe(preview_summary, use_container_width=True, hide_index=True)
+
+    col_metrics = st.columns(3)
+    col_metrics[0].metric("Tests únicos", total_tests)
+    col_metrics[1].metric("Asignados", assigned_tests)
+    col_metrics[2].metric("Cobertura", f"{coverage:.0%}")
+
+    auto_apply_key = f"auto_apply::{file_key}"
+    auto_apply_default = state.get("auto_apply", True)
+    auto_apply_value = st.checkbox(
+        "Aplicar automáticamente al cambiar la selección",
+        value=st.session_state.get(auto_apply_key, auto_apply_default),
+        key=auto_apply_key,
+        help="Cuando está activo, la clasificación se actualiza en cuanto cambian los prefijos seleccionados.",
+    )
+    state["auto_apply"] = auto_apply_value
+
+    selection_signature = (
+        tuple(sorted(ctrl_prefixes)),
+        tuple(sorted(samp_prefixes)),
+        tuple(sorted(ctrl_unassigned)),
+        tuple(sorted(samp_unassigned)),
+    )
+
+    if not auto_apply_value and selection_signature != tuple(state.get("_last_selection", ())):
+        st.info("Pulsa 'Aplicar clasificación' para actualizar la separación de controles y muestras.")
+
+    def apply_classification() -> Tuple[pd.DataFrame, pd.DataFrame]:
+        result = classify_tests_by_prefixes(long_df, ctrl_prefixes, samp_prefixes)
+        ctrl_df = result.controles
+        samp_df = result.muestras
+
+        if ctrl_unassigned:
+            ctrl_df = pd.concat([
+                ctrl_df,
+                long_df[long_df["test"].astype(str).isin(ctrl_unassigned)],
+            ], ignore_index=True).drop_duplicates().reset_index(drop=True)
+        if samp_unassigned:
+            samp_df = pd.concat([
+                samp_df,
+                long_df[long_df["test"].astype(str).isin(samp_unassigned)],
+            ], ignore_index=True).drop_duplicates().reset_index(drop=True)
+
+        ctrl_df, samp_df = _store_classification(state, ctrl_df, samp_df)
+        state["ctrl_prefixes"] = ctrl_prefixes
+        state["samp_prefixes"] = samp_prefixes
+        state["ctrl_unassigned"] = ctrl_unassigned
+        state["samp_unassigned"] = samp_unassigned
+        state["_last_selection"] = selection_signature
+        return ctrl_df, samp_df
+
+    classification_applied = False
+    if auto_apply_value and ctrl_preview and samp_preview:
+        if selection_signature != tuple(state.get("_last_selection", ())):
+            ctrl_df, samp_df = apply_classification()
+            st.success(
+                f"Clasificación aplicada → controles: {len(ctrl_df)}, muestras: {len(samp_df)}"
+            )
+            classification_applied = True
+    else:
+        if st.button("Aplicar clasificación", key=f"btn_pref_{file_key}"):
+            if not ctrl_preview or not samp_preview:
+                st.warning("Selecciona al menos un elemento en cada grupo para clasificar.")
+            else:
+                ctrl_df, samp_df = apply_classification()
+                st.success(
+                    f"Clasificación aplicada → controles: {len(ctrl_df)}, muestras: {len(samp_df)}"
+                )
+                classification_applied = True
+
+    if not classification_applied:
+        ctrl_df = state.get("controles_df")
+        samp_df = state.get("muestras_df")
+    else:
+        ctrl_df = state.get("controles_df")
+        samp_df = state.get("muestras_df")
 
     controles_df = state.get("controles_df")
     muestras_df = state.get("muestras_df")
@@ -349,6 +362,16 @@ def _render_classification_ui(long_df: pd.DataFrame, file_key: str) -> Tuple[pd.
         controles_df = pd.DataFrame()
     if not isinstance(muestras_df, pd.DataFrame):
         muestras_df = pd.DataFrame()
+
+    if not controles_df.empty or not muestras_df.empty:
+        with st.expander("Vista previa de clasificación", expanded=False):
+            col_ctrl, col_samp = st.columns(2)
+            with col_ctrl:
+                st.caption(f"Controles → {len(controles_df)} filas")
+                st.dataframe(controles_df.head(20), use_container_width=True)
+            with col_samp:
+                st.caption(f"Muestras → {len(muestras_df)} filas")
+                st.dataframe(muestras_df.head(20), use_container_width=True)
     return controles_df, muestras_df
 
 
