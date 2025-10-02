@@ -4,14 +4,16 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Sequence, Tuple
 
 import pandas as pd
+import numpy as np
 
 from app.core.reference_normalization import (
     AdvancedNormalizationError,
     AdvancedNormalizationResult,
+    DifferentialExpressionResult,
     run_advanced_normalization,
 )
-from app.core.fold_change import compute_fold_change
-from app.core.reference_normalization import build_heatmap_matrix
+from app.core.fold_change import compute_fold_change, FoldChangeResult
+from app.core.reference_normalization import build_heatmap_matrix, evaluate_differential_expression
 
 
 @dataclass(frozen=True)
@@ -142,4 +144,223 @@ __all__ = [
     "build_total_dataframe",
     "execute_advanced_normalization",
     "build_method_matrices",
+]
+
+# ===================== Selección por método y persistencia ======================
+
+def compute_basic_normalizations(
+    controles: pd.DataFrame,
+    muestras: pd.DataFrame,
+    adv_result: AdvancedNormalizationResult,
+) -> tuple[pd.DataFrame, pd.DataFrame, str]:
+    """Devuelve (df_norm_global_mean, df_norm_refgene, basic_ref_gene).
+
+    - "global_mean": normalización por promedio global por test.
+    - "refgene": normalización por gen de referencia básico (elegido por std mínima).
+    """
+    df_total = build_total_dataframe(controles, muestras)
+
+    # Global mean
+    gm_norm = _normalize_by_global_mean(df_total)
+
+    # Single reference (básico) tomado de compute_fold_change
+    basic_fc = compute_fold_change(controles, muestras)
+    basic_ref_gene = basic_fc.reference_gene
+    ref_norm, _ = _normalize_by_single_reference(df_total, basic_ref_gene)
+
+    return gm_norm, ref_norm, basic_ref_gene
+
+
+def detect_significant_genes_by_method(
+    controles: pd.DataFrame,
+    muestras: pd.DataFrame,
+    adv_result: AdvancedNormalizationResult,
+    *,
+    alpha: float = 0.05,
+) -> tuple[dict[str, list[str]], dict[str, pd.DataFrame], str]:
+    """Calcula genes diferencialmente expresados (q < alpha) para tres métodos.
+
+    Devuelve:
+    - dict "significant" por método: {"advanced", "global_mean", "refgene"} -> lista de genes
+    - dict "tables" por método: tablas completas con estadísticas y q
+    - basic_ref_gene: nombre del gen de referencia básico utilizado
+    """
+    # Avanzada: ya viene en adv_result
+    adv_sig = list(adv_result.differential.significant_genes)
+    adv_table = adv_result.differential.stats.copy()
+
+    gm_norm, ref_norm, basic_ref_gene = compute_basic_normalizations(controles, muestras, adv_result)
+
+    # Evaluación de significancia reaprovechando la función general
+    gm_diff: DifferentialExpressionResult = evaluate_differential_expression(gm_norm, alpha=alpha)
+    ref_diff: DifferentialExpressionResult = evaluate_differential_expression(ref_norm, alpha=alpha)
+
+    significant = {
+        "advanced": adv_sig,
+        "global_mean": list(gm_diff.significant_genes),
+        "refgene": list(ref_diff.significant_genes),
+    }
+    tables = {
+        "advanced": adv_table,
+        "global_mean": gm_diff.stats,
+        "refgene": ref_diff.stats,
+    }
+    return significant, tables, basic_ref_gene
+
+
+def build_heatmaps_by_method(
+    controles: pd.DataFrame,
+    muestras: pd.DataFrame,
+    adv_result: AdvancedNormalizationResult,
+    *,
+    alpha: float = 0.05,
+    top_n_fallback: int = 20,
+) -> tuple[dict[str, pd.DataFrame], dict[str, list[str]], str]:
+    """Construye una matriz heatmap por método, usando los genes seleccionados por cada método.
+
+    Si algún método no produce genes significativos, usa los Top-N por menor q.
+    Devuelve: (matrices, gene_lists, basic_ref_gene)
+    """
+    sig, tables, basic_ref_gene = detect_significant_genes_by_method(
+        controles, muestras, adv_result, alpha=alpha
+    )
+
+    df_total = build_total_dataframe(controles, muestras)
+
+    # Normalizados por método
+    adv_norm = adv_result.df_norm.copy()
+    gm_norm = _normalize_by_global_mean(df_total)
+    ref_norm, _ = _normalize_by_single_reference(df_total, basic_ref_gene)
+
+    matrices: dict[str, pd.DataFrame] = {}
+    gene_lists: dict[str, list[str]] = {}
+
+    for method, df_norm in (
+        ("advanced", adv_norm),
+        ("global_mean", gm_norm),
+        ("refgene", ref_norm),
+    ):
+        genes = list(sig.get(method) or [])
+        if not genes:
+            table = tables.get(method)
+            if table is not None and not table.empty:
+                genes = table.sort_values(["q", "t_abs"], ascending=[True, False])["gene"].head(top_n_fallback).tolist()
+        gene_lists[method] = genes
+        matrices[method] = build_heatmap_matrix(df_norm, genes)
+
+    return matrices, gene_lists, basic_ref_gene
+
+
+def save_gene_sets(
+    gene_lists: dict[str, list[str]],
+    *,
+    output_dir: str = "resultados/genes_significativos",
+    basic_ref_gene: str | None = None,
+) -> dict[str, str]:
+    """Guarda los conjuntos de genes por método como CSV (una columna 'gene').
+
+    Devuelve dict método -> ruta del archivo.
+    """
+    import os
+
+    os.makedirs(output_dir, exist_ok=True)
+    paths: dict[str, str] = {}
+    for method, genes in gene_lists.items():
+        fname = f"genes_significativos_{method}.csv"
+        if method == "refgene" and basic_ref_gene:
+            fname = f"genes_significativos_refgene_{basic_ref_gene}.csv"
+        path = os.path.join(output_dir, fname)
+        pd.DataFrame({"gene": genes}).to_csv(path, index=False)
+        paths[method] = path
+    return paths
+
+
+def build_expression_datasets(
+    controles: pd.DataFrame,
+    muestras: pd.DataFrame,
+    adv_result: AdvancedNormalizationResult,
+    *,
+    include_reference_ct: bool = True,
+) -> tuple[dict[str, pd.DataFrame], str]:
+    """Devuelve DataFrames normalizados (formato largo) para cada método."""
+
+    gm_norm, ref_norm, basic_ref_gene = compute_basic_normalizations(controles, muestras, adv_result)
+
+    datasets: dict[str, pd.DataFrame] = {
+        "advanced": adv_result.df_norm.copy(),
+        "global_mean": gm_norm.copy(),
+        "refgene": ref_norm.copy(),
+    }
+
+    if not include_reference_ct:
+        for df in datasets.values():
+            for col in ("ref_ct",):
+                if col in df.columns:
+                    df.drop(columns=col, inplace=True)
+
+    return datasets, basic_ref_gene
+
+
+def build_combined_ddct_fc_tables(
+    adv_result: AdvancedNormalizationResult,
+    fold_change_result: FoldChangeResult,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Construye tablas consolidadas (ΔΔCt y Fold Change) integrando los tres métodos."""
+
+    consolidated = fold_change_result.consolidated.copy()
+    # Log2FC para métodos básicos
+    consolidated["log2fc_promedio"] = -consolidated["delta_delta_ct_promedio"].astype(float)
+    consolidated["log2fc_gen_ref"] = -consolidated["delta_delta_ct_gen_ref"].astype(float)
+
+    adv_norm = adv_result.df_norm.copy()
+    ctrl_mask = adv_norm["tipo"] == "Control"
+    ctrl_means = adv_norm.loc[ctrl_mask].groupby("target")["log2_rel_expr"].mean()
+    case_means = adv_norm.loc[~ctrl_mask].groupby("target")["log2_rel_expr"].mean()
+
+    all_targets = sorted(set(consolidated["target"].astype(str)) | set(ctrl_means.index.astype(str)) | set(case_means.index.astype(str)))
+    ctrl_means = ctrl_means.reindex(all_targets)
+    case_means = case_means.reindex(all_targets)
+
+    adv_log2fc = (case_means - ctrl_means).reindex(all_targets)
+    adv_ddct = (-adv_log2fc).reindex(all_targets)
+    adv_fc = np.power(2.0, -adv_ddct)
+
+    advanced_df = pd.DataFrame(
+        {
+            "target": all_targets,
+            "delta_delta_ct_advanced": adv_ddct.to_numpy(dtype=float, na_value=np.nan),
+            "fold_change_advanced": adv_fc.to_numpy(dtype=float, na_value=np.nan),
+            "log2fc_advanced": adv_log2fc.to_numpy(dtype=float, na_value=np.nan),
+        }
+    )
+
+    merged = consolidated.reset_index(drop=True).merge(advanced_df, on="target", how="outer")
+
+    ddct_table = merged[[
+        "target",
+        "delta_delta_ct_advanced",
+        "delta_delta_ct_promedio",
+        "delta_delta_ct_gen_ref",
+    ]].copy()
+
+    fc_table = merged[[
+        "target",
+        "fold_change_advanced",
+        "fold_change_promedio",
+        "fold_change_gen_ref",
+        "log2fc_advanced",
+        "log2fc_promedio",
+        "log2fc_gen_ref",
+    ]].copy()
+
+    return ddct_table, fc_table
+
+
+__all__ += [
+    "compute_basic_normalizations",
+    "detect_significant_genes_by_method",
+    "build_heatmaps_by_method",
+    "save_gene_sets",
+    "build_expression_datasets",
+    "build_combined_ddct_fc_tables",
 ]
