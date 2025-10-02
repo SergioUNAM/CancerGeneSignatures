@@ -993,12 +993,24 @@ def main() -> None:
 
         genes_for_heatmap = genes_all if genes_mode.endswith("(todos)") else None
 
-        matrices, basic_ref_gene = build_method_matrices(
+        matrices, basic_ref_gene, comp_warnings = build_method_matrices(
             controles_df,
             muestras_df,
             result,
             genes_for_heatmap=genes_for_heatmap,
         )
+
+        labels_map = {
+            "advanced": "Avanzada",
+            "global_mean": "Promedio global",
+            "refgene": "Gen de referencia básico",
+        }
+        for key, messages in comp_warnings.items():
+            if not messages:
+                continue
+            label = labels_map.get(key, key)
+            for msg in messages:
+                st.warning(f"[{label}] {msg}")
 
         refs_adv = ", ".join(result.reference_result.references)
         if len(result.reference_result.references) == 1 and refs_adv == str(basic_ref_gene):
@@ -1007,7 +1019,10 @@ def main() -> None:
                 "por eso las visualizaciones pueden verse muy similares."
             )
 
-        tab_adv, tab_gm, tab_ref = st.tabs(["Avanzada", "Promedio global", f"Gen ref básico ({basic_ref_gene})"])
+        basic_ref_label = basic_ref_gene or "N/D"
+        tab_adv, tab_gm, tab_ref = st.tabs(
+            ["Avanzada", "Promedio global", f"Gen ref básico ({basic_ref_label})"]
+        )
         with tab_adv:
             fig_a = build_dendrogram_heatmap(
                 matrices["advanced"],
@@ -1037,7 +1052,11 @@ def main() -> None:
         with tab_ref:
             fig_r = build_dendrogram_heatmap(
                 matrices["refgene"],
-                title=f"Gen de referencia ({basic_ref_gene}) — z-score por gen" if zscore_rows else f"Gen de referencia ({basic_ref_gene})",
+                title=(
+                    f"Gen de referencia ({basic_ref_label}) — z-score por gen"
+                    if zscore_rows
+                    else f"Gen de referencia ({basic_ref_label})"
+                ),
                 zscore_by_gene=zscore_rows,
             )
             st.plotly_chart(fig_r, use_container_width=True)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -100,39 +100,75 @@ def build_method_matrices(
     adv_result: AdvancedNormalizationResult,
     *,
     genes_for_heatmap: Optional[Sequence[str]] = None,
-) -> Tuple[Dict[str, pd.DataFrame], str]:
+) -> Tuple[Dict[str, pd.DataFrame], str, Dict[str, List[str]]]:
     """Construye matrices (genes x tests) de log2_rel_expr para tres métodos:
     - "advanced": referencias múltiples elegidas por el pipeline avanzado
     - "global_mean": promedio global por test
     - "refgene": un único gen de referencia básico (más estable) por test
 
-    Devuelve: (dict de matrices, nombre_gen_ref_basico)
+    Devuelve: (dict de matrices, nombre_gen_ref_basico, advertencias_por_método)
     """
     # Base combinada
     df_total = build_total_dataframe(controles, muestras)
 
     # 1) Avanzado — ya tenemos df_norm; reutilizar matriz generada o reconstruir según genes solicitados
     adv_norm = adv_result.df_norm.copy()
-    refgene_adv = ", ".join(adv_result.reference_result.references)
+    adv_refs = list(adv_result.reference_result.references)
+
     if genes_for_heatmap is None:
         # si no se especifica, usa la lista del resultado (df_heatmap ya contiene orden base)
         adv_mat = adv_result.df_heatmap.copy()
         heat_genes = adv_mat.index.tolist()
     else:
-        heat_genes = list(genes_for_heatmap)
+        heat_genes = list(dict.fromkeys(str(g) for g in genes_for_heatmap))
         adv_mat = build_heatmap_matrix(adv_norm, heat_genes)
 
-    # 2) Global mean por test
-    gm_norm = _normalize_by_global_mean(df_total)
-    gm_mat = build_heatmap_matrix(gm_norm.rename(columns={"log2_rel_expr": "log2_rel_expr"}), heat_genes)
+    heat_genes = list(dict.fromkeys(heat_genes))
+    if not heat_genes:
+        heat_genes = list(dict.fromkeys(adv_norm["target"].dropna().astype(str).tolist()))
+        adv_mat = build_heatmap_matrix(adv_norm, heat_genes)
+    all_tests = sorted(df_total["test"].dropna().astype(str).unique().tolist())
+
+    def _align_matrix(mat: Optional[pd.DataFrame]) -> pd.DataFrame:
+        out = (mat.copy() if isinstance(mat, pd.DataFrame) else pd.DataFrame())
+        if heat_genes:
+            out = out.reindex(heat_genes)
+        if all_tests:
+            out = out.reindex(columns=all_tests)
+        return out
+
+    adv_mat = _align_matrix(adv_mat)
+
+    warnings: Dict[str, List[str]] = {"advanced": [], "global_mean": [], "refgene": []}
+
+    # 2) Global mean por test (manejar fallos sin romper la interfaz)
+    gm_mat: pd.DataFrame = pd.DataFrame()
+    try:
+        gm_norm = _normalize_by_global_mean(df_total)
+        gm_mat = build_heatmap_matrix(gm_norm, heat_genes)
+    except Exception as err:
+        warnings["global_mean"].append(
+            f"No se pudo calcular el método de promedio global: {err}"
+        )
+    gm_mat = _align_matrix(gm_mat)
 
     # 3) Gen de referencia básico — obtener gen más estable del método básico
-    basic_fc = compute_fold_change(controles, muestras)
-    basic_ref_gene = basic_fc.reference_gene
-    ref_norm, _ = _normalize_by_single_reference(df_total, basic_ref_gene)
-    ref_mat = build_heatmap_matrix(ref_norm.rename(columns={"log2_rel_expr": "log2_rel_expr"}), heat_genes)
+    basic_ref_gene = adv_refs[0] if adv_refs else ""
+    ref_mat: pd.DataFrame = pd.DataFrame()
+    try:
+        basic_fc = compute_fold_change(controles, muestras)
+        basic_ref_gene = basic_fc.reference_gene
+        ref_norm, ref_warn = _normalize_by_single_reference(df_total, basic_ref_gene)
+        if ref_warn:
+            warnings["refgene"].extend(ref_warn)
+        ref_mat = build_heatmap_matrix(ref_norm, heat_genes)
+    except Exception as err:
+        warnings["refgene"].append(
+            f"No se pudo calcular el método del gen de referencia básico: {err}"
+        )
+    ref_mat = _align_matrix(ref_mat)
 
-    return {"advanced": adv_mat, "global_mean": gm_mat, "refgene": ref_mat}, basic_ref_gene
+    return {"advanced": adv_mat, "global_mean": gm_mat, "refgene": ref_mat}, basic_ref_gene, warnings
 
 
 __all__ = [
