@@ -6,15 +6,16 @@ from typing import Iterator
 import pandas as pd
 import pytest
 
+ROOT = Path(__file__).resolve().parents[1]
+APP_PKG_PATH = ROOT / "web_app"
+if str(APP_PKG_PATH) not in sys.path:
+    sys.path.insert(0, str(APP_PKG_PATH))
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _ensure_app_on_path() -> Iterator[Path]:
     """Guarantee that the `app` package (web_app/app) is importable during tests."""
-    root = Path(__file__).resolve().parents[1]
-    app_pkg_path = root / "web_app"
-    if str(app_pkg_path) not in sys.path:
-        sys.path.insert(0, str(app_pkg_path))
-    yield root
+    yield ROOT
     # No cleanup required; pytest finalises the process afterwards.
 
 

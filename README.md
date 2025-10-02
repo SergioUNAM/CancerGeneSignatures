@@ -58,6 +58,11 @@ streamlit run web_app/streamlit_app.py
 - `CGS_LOGLEVEL`, `CGS_PUBMED_EMAIL`, `CGS_PUBMED_API_KEY` y `CGS_GOOGLE_NLP_API_KEY` permiten ajustar logs y credenciales.
 - Para despliegues, sobrescribir variables mediante `st.secrets` o ficheros `.env` gestionados fuera del control de versiones.
 
+### Configuración por entorno
+- Copia una plantilla de `web_app/config/templates/` (`.env.dev`, `.env.staging`, `.env.prod`) y ajusta credenciales locales.
+- `menu.dev.json` y `menu.shared.json` sirven como base para preparar menús reducidos o compartidos según el entorno.
+- Mantén los secretos en gestores seguros y referencia las rutas mediante `CGS_MENU_PATH`.
+
 ## Trabajo con datos
 - Colocar ficheros qPCR en `raw_data/` o cargarlos desde la UI; mantener identificadores anonimizados.
 - Las llamadas a PubMed/STRING se cachean mediante `@st.cache_data` (TTL configurable en `app/services/*`).

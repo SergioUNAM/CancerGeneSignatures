@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "menu": {
+    "cancer_types": [
+      "Breast Cancer",
+      "Melanoma",
+      "Colon Cancer",
+      "Glioblastoma"
+    ],
+    "contexts": [
+      {"key": "tem", "label": "Microambiente tumoral"},
+      {"key": "micro_rnas", "label": "Micro RNAs"},
+      {"key": "metastasis", "label": "Metástasis"}
+    ],
+    "normalization_methods": [
+      {"key": "reference_gene", "label": "Gen de referencia"},
+      {"key": "means", "label": "Promedios"},
+      {"key": "ddct", "label": "ΔΔCt"}
+    ]
+  }
+}
