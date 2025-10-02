@@ -392,6 +392,47 @@ def _render_advanced_results(
     params: AdvancedNormalizationParams,
 ) -> pd.DataFrame:
     st.subheader("Resultados de la normalización avanzada")
+    with st.expander("¿Qué hace la normalización avanzada?", expanded=False):
+        st.markdown(
+            r"""
+            La normalización avanzada consta de cuatro pasos fundamentales:
+
+            1. **Selección de genes de referencia.** Se ordenan los genes por la desviación
+               estándar de sus valores de Ct y se consideran las mejores combinaciones de tamaño
+               $k$. Para cada conjunto candidato $R$ se calcula una métrica de estabilidad
+               
+               $$
+               S(R) = w_{\text{intra}} \cdot \overline{\sigma}_{\text{intra}} +
+               w_{\text{inter}} \cdot \bigl(\max_{g \in G} \mu_g - \min_{g \in G} \mu_g\bigr),
+               $$
+               
+               donde $\overline{\sigma}_{\text{intra}}$ promedia la desviación estándar del Ct de
+               las referencias dentro de cada grupo (control vs. caso) y la diferencia de medias
+               $\max \mu_g - \min \mu_g$ penaliza desplazamientos entre grupos. Se escoge el
+               conjunto con menor $S(R)$.
+
+            2. **Normalización por referencias múltiples.** Para cada prueba $j$ se promedia el Ct de
+               las referencias elegidas, $\mathrm{Ct}^{(R)}_j = \frac{1}{|R|} \sum_{r \in R} \mathrm{Ct}_{j,r}$.
+               Cada gen $g$ obtiene su expresión relativa
+               
+               $$
+               \Delta \mathrm{Ct}_{j,g} = \mathrm{Ct}_{j,g} - \mathrm{Ct}^{(R)}_j, \qquad
+               \log_2 \text{rel\_expr}_{j,g} = -\Delta \mathrm{Ct}_{j,g},
+               $$
+               
+               lo cual equivale al método $2^{-\Delta\Delta Ct}$ en escala log$_2$.
+
+            3. **Expresión diferencial.** Se aplica una prueba *t* de Welch entre controles y casos
+               sobre $\log_2 \text{rel\_expr}$ para cada gen. Los valores $p$ se corrigen con
+               Benjamini–Hochberg para obtener $q$ y estimar genes significativos ($q < \alpha$).
+
+            4. **Estimación de robustez.** Se repite el análisis con *bootstrap* de pruebas para
+               aproximar la frecuencia de selección de cada gen y, además, se permutan las etiquetas de
+               los ensayos para estimar la tasa empírica de falsos positivos.
+
+            El panel siguiente muestra métricas, tablas y descargas generadas por este pipeline.
+            """
+        )
     summary = result.summary()
     if summary:
         metric_cols = st.columns(len(summary))
@@ -952,12 +993,24 @@ def main() -> None:
 
         genes_for_heatmap = genes_all if genes_mode.endswith("(todos)") else None
 
-        matrices, basic_ref_gene = build_method_matrices(
+        matrices, basic_ref_gene, comp_warnings = build_method_matrices(
             controles_df,
             muestras_df,
             result,
             genes_for_heatmap=genes_for_heatmap,
         )
+
+        labels_map = {
+            "advanced": "Avanzada",
+            "global_mean": "Promedio global",
+            "refgene": "Gen de referencia básico",
+        }
+        for key, messages in comp_warnings.items():
+            if not messages:
+                continue
+            label = labels_map.get(key, key)
+            for msg in messages:
+                st.warning(f"[{label}] {msg}")
 
         refs_adv = ", ".join(result.reference_result.references)
         if len(result.reference_result.references) == 1 and refs_adv == str(basic_ref_gene):
@@ -966,7 +1019,10 @@ def main() -> None:
                 "por eso las visualizaciones pueden verse muy similares."
             )
 
-        tab_adv, tab_gm, tab_ref = st.tabs(["Avanzada", "Promedio global", f"Gen ref básico ({basic_ref_gene})"])
+        basic_ref_label = basic_ref_gene or "N/D"
+        tab_adv, tab_gm, tab_ref = st.tabs(
+            ["Avanzada", "Promedio global", f"Gen ref básico ({basic_ref_label})"]
+        )
         with tab_adv:
             fig_a = build_dendrogram_heatmap(
                 matrices["advanced"],
@@ -996,7 +1052,11 @@ def main() -> None:
         with tab_ref:
             fig_r = build_dendrogram_heatmap(
                 matrices["refgene"],
-                title=f"Gen de referencia ({basic_ref_gene}) — z-score por gen" if zscore_rows else f"Gen de referencia ({basic_ref_gene})",
+                title=(
+                    f"Gen de referencia ({basic_ref_label}) — z-score por gen"
+                    if zscore_rows
+                    else f"Gen de referencia ({basic_ref_label})"
+                ),
                 zscore_by_gene=zscore_rows,
             )
             st.plotly_chart(fig_r, use_container_width=True)
