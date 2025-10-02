@@ -5,7 +5,7 @@ import logging
 import re
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -49,6 +49,7 @@ from app.services.fold_change_visuals import (
 from app.services.heatmap_visuals import build_dendrogram_heatmap
 from app.services.qpcr import build_long_table, summarize_extraction
 from app.state import AppSessionState
+from app.ui.components import build_step_sequence, render_pipeline_progress
 from app.ui.sections import render_classification_section
 
 
@@ -61,6 +62,99 @@ def _annotate_ensembl_cached(df_csv: str, max_workers: int = 3) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
     return add_ensembl_info_batch(df, symbol_col="target", max_workers=max_workers)
+
+
+_PIPELINE_STEPS_INFO = (
+    (
+        "Carga de datos",
+        "Sube tu Excel qPCR, elige la hoja y valida la vista previa.",
+    ),
+    (
+        "Clasificación",
+        "Separa controles y muestras para habilitar métricas de calidad.",
+    ),
+    (
+        "Normalización",
+        "Ejecuta la búsqueda de referencias y genera resultados reproducibles.",
+    ),
+    (
+        "Resultados y exportación",
+        "Descarga heatmaps, tablas y listas de genes diferencialmente expresados.",
+    ),
+    (
+        "Anotación Ensembl",
+        "Completa IDs y descripciones para tus genes prioritarios.",
+    ),
+)
+
+
+def _compute_pipeline_completion(
+    df_loaded: Optional[LoadResult],
+) -> Sequence[bool]:
+    """Evalúa qué etapas del pipeline están completas en función del estado actual."""
+
+    has_data = df_loaded is not None
+    classification_done = False
+    normalization_done = False
+    exports_ready = False
+    ensembl_ready = False
+
+    if has_data and df_loaded is not None:
+        file_key = f"assign::{df_loaded.source_name}:{df_loaded.sheet_name}"
+        assign_state = st.session_state.get(file_key, {})
+        ctrl_df = assign_state.get("controles_df")
+        samp_df = assign_state.get("muestras_df")
+        classification_done = (
+            isinstance(ctrl_df, pd.DataFrame)
+            and isinstance(samp_df, pd.DataFrame)
+            and not ctrl_df.empty
+            and not samp_df.empty
+        )
+
+        adv_key = f"adv::{file_key}"
+        adv_state = st.session_state.get(adv_key, {})
+        normalization_done = isinstance(
+            adv_state.get("result"),
+            AdvancedNormalizationResult,
+        )
+        exports_ready = normalization_done
+
+    ensembl_df = st.session_state.get("_ensembl_df")
+    if isinstance(ensembl_df, pd.DataFrame) and not ensembl_df.empty:
+        ensembl_ready = True
+
+    return has_data, classification_done, normalization_done, exports_ready, ensembl_ready
+
+
+def _pipeline_status_labels(completions: Sequence[bool]) -> Sequence[str]:
+    statuses: List[str] = []
+    active_assigned = False
+    for completed in completions:
+        if completed:
+            statuses.append("complete")
+        elif not active_assigned:
+            statuses.append("active")
+            active_assigned = True
+        else:
+            statuses.append("pending")
+    if not statuses:
+        return statuses
+    if not active_assigned:
+        # Todas las etapas se marcaron como completas.
+        return statuses
+    return statuses
+
+
+def _render_pipeline_header(df_loaded: Optional[LoadResult]) -> None:
+    """Renderiza el encabezado de etapas con el estado actual del flujo."""
+
+    completions = _compute_pipeline_completion(df_loaded)
+    statuses = _pipeline_status_labels(completions)
+    step_defs = [
+        (title, description, status)
+        for (title, description), status in zip(_PIPELINE_STEPS_INFO, statuses)
+    ]
+    render_pipeline_progress(build_step_sequence(step_defs))
 
 
 def _eq(formula: str) -> None:
@@ -343,27 +437,36 @@ def main() -> None:
         st.warning(warning_msg)
 
     app_state = AppSessionState.load()
+    df_loaded = app_state.df_loaded
 
     st.title("Flujo qPCR → Normalización avanzada → Anotación Ensembl")
+    st.caption(
+        "Sigue las etapas guiadas para pasar de Ct crudos a resultados exportables con anotación genética."
+    )
+
+    _render_pipeline_header(df_loaded)
+
     st.markdown(
-        "Cargue su archivo de qPCR, defina **controles** y **muestras**, ejecute la "
-        "**normalización avanzada** (búsqueda automática de referencias estables) y concluya con "
-        "la identificación de **genes diferencialmente expresados** y sus **IDs Ensembl**. "
-        "El recorrido replica la estructura de un artículo científico: diseño experimental, "
-        "control de calidad, normalización y, por último, tablas y figuras reproducibles."
+        "Utiliza la barra lateral para iniciar cada paso. El encabezado superior indica tu progreso en tiempo real."
     )
-    st.info(
-        "**Ruta rápida**\n"
-        "1) Cargue el archivo Excel y revise pozos problemáticos u outliers.\n"
-        "2) Clasifique controles y muestras (prefijo, sufijo, regex o selección manual).\n"
-        "3) Elija la política para valores indeterminados y revise las métricas de calidad.\n"
-        "4) Ejecute la **normalización avanzada** y explore heatmaps, diagrama de Venn y volcano plot.\n"
-        "5) Exporte datasets, listas de genes y las anotaciones Ensembl.\n\n"
-        "**Política de imputación**\n"
-        "• `nan`: conserva Ct no determinados; útil para visualizar huecos reales.\n"
-        "• `ctmax`: sustituye por el Ct máximo observado del grupo; aproxima el límite de detección.\n"
-        "• `value`: usa un Ct fijo (p. ej. 40) para penalizar indetectables de forma uniforme."
-    )
+
+    with st.expander("Guía rápida del flujo", expanded=False):
+        st.markdown(
+            "**Ruta rápida**\n"
+            "1) Carga el archivo Excel y revisa pozos problemáticos u outliers.\n"
+            "2) Clasifica controles y muestras (prefijos, sufijos, regex o selección manual).\n"
+            "3) Elige la política para valores indeterminados y revisa las métricas de calidad.\n"
+            "4) Ejecuta la **normalización avanzada** y explora heatmaps, diagrama de Venn y volcano plot.\n"
+            "5) Exporta datasets, listas de genes y las anotaciones Ensembl."
+        )
+
+    with st.expander("¿Cómo se imputan los valores 'Undetermined/ND'?", expanded=False):
+        st.markdown(
+            "**Política de imputación**\n"
+            "• `nan`: conserva Ct no determinados; útil para visualizar huecos reales.\n"
+            "• `ctmax`: sustituye por el Ct máximo observado del grupo; aproxima el límite de detección.\n"
+            "• `value`: usa un Ct fijo (p. ej. 40) para penalizar indetectables de forma uniforme."
+        )
 
     with st.sidebar:
         st.header("1) Datos de entrada")
