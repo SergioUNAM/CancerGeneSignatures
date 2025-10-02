@@ -29,14 +29,14 @@ def render_nav_picker(active: str = "entrada") -> None:
     st.markdown('<div class="cgs-nav-container"><div class="cgs-nav">', unsafe_allow_html=True)
     col1, col2, _ = st.columns([1, 1, 4])
     with col1:
-        if st.button("Entrada", key="nav_ent", help="Entrada y Clasificación", use_container_width=True):
+        if st.button("Entrada", key="nav_ent", help="Entrada y Clasificación", width="stretch"):
             if hasattr(st, "switch_page"):
                 try:
                     st.switch_page("pages/1_Entrada_y_Clasificacion.py")
                 except Exception:
                     pass
     with col2:
-        if st.button("Normalización", key="nav_norm", help="Normalización y Fold Change", use_container_width=True):
+        if st.button("Normalización", key="nav_norm", help="Normalización y Fold Change", width="stretch"):
             if hasattr(st, "switch_page"):
                 try:
                     st.switch_page("pages/2_Normalizacion_y_FoldChange.py")
