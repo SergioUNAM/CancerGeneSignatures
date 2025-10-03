@@ -4,6 +4,7 @@ import io
 import logging
 import re
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import List, Optional, Sequence
 
@@ -90,6 +91,40 @@ _PIPELINE_STEPS_INFO = (
         "Completa IDs y descripciones para tus genes prioritarios.",
     ),
 )
+
+
+_ADVANCED_PRESETS = {
+    "Rápido": AdvancedNormalizationParams(
+        alpha=0.1,
+        n_candidates=12,
+        k_refs=1,
+        bootstrap_iter=100,
+        permutation_iter=60,
+        random_seed=123,
+    ),
+    "Equilibrado": AdvancedNormalizationParams(
+        alpha=0.05,
+        n_candidates=20,
+        k_refs=2,
+        bootstrap_iter=200,
+        permutation_iter=100,
+        random_seed=123,
+    ),
+    "Exhaustivo": AdvancedNormalizationParams(
+        alpha=0.03,
+        n_candidates=28,
+        k_refs=3,
+        bootstrap_iter=400,
+        permutation_iter=220,
+        random_seed=123,
+    ),
+}
+
+_ADVANCED_PRESET_NOTES = {
+    "Rápido": "Optimiza tiempos de cálculo con un K simple (1) y menos permutaciones.",
+    "Equilibrado": "Configura un balance entre sensibilidad y robustez, ideal para corridas estándar.",
+    "Exhaustivo": "Amplía la búsqueda de referencias y las iteraciones para detectar efectos sutiles.",
+}
 
 
 def _compute_pipeline_completion(
@@ -836,75 +871,132 @@ def main() -> None:
     adv_key = f"adv::{file_key}"
     adv_state = st.session_state.setdefault(adv_key, {})
 
-    with st.expander("Parámetros", expanded=True):
-        alpha = st.number_input(
-            "Umbral FDR (q)",
-            min_value=0.001,
-            max_value=0.5,
-            value=float(getattr(adv_state.get("params"), "alpha", 0.05)),
-            step=0.005,
-            format="%.3f",
-            key=f"adv_alpha_{adv_key}",
+    with st.expander("Configuración avanzada", expanded=True):
+        stored_params = adv_state.get("params")
+        if "form" not in adv_state:
+            if isinstance(stored_params, AdvancedNormalizationParams):
+                adv_state["form"] = asdict(stored_params)
+            else:
+                adv_state["form"] = asdict(_ADVANCED_PRESETS["Equilibrado"])
+
+        preset_options = [*list(_ADVANCED_PRESETS.keys()), "Personalizado"]
+        preset_key = f"adv_preset_choice_{adv_key}"
+        current_preset = adv_state.get("preset", "Equilibrado")
+        if current_preset not in preset_options:
+            current_preset = "Personalizado"
+
+        selected_preset = st.radio(
+            "Estilo de configuración",
+            options=preset_options,
+            horizontal=True,
+            index=preset_options.index(current_preset),
+            key=preset_key,
+            help="Aplica valores sugeridos para equilibrar rapidez, sensibilidad o exhaustividad.",
         )
-        col_a, col_b, col_c = st.columns(3)
-        with col_a:
+
+        if selected_preset != adv_state.get("preset"):
+            adv_state["preset"] = selected_preset
+            if selected_preset in _ADVANCED_PRESETS:
+                adv_state["form"] = asdict(_ADVANCED_PRESETS[selected_preset])
+
+        form_values = adv_state.get("form", asdict(_ADVANCED_PRESETS["Equilibrado"]))
+        note = _ADVANCED_PRESET_NOTES.get(selected_preset)
+        if note:
+            st.caption(note)
+
+        st.divider()
+        left_col, right_col = st.columns(2, gap="large")
+
+        with left_col:
+            st.markdown("##### Sensibilidad y descubrimiento")
+            alpha = st.slider(
+                "Umbral FDR (q)",
+                min_value=0.001,
+                max_value=0.5,
+                value=float(form_values.get("alpha", 0.05)),
+                step=0.001,
+                help="Controla la tolerancia a falsos positivos tras corrección FDR.",
+            )
             n_candidates = st.slider(
                 "Genes candidatos",
                 min_value=4,
-                max_value=30,
-                value=int(getattr(adv_state.get("params"), "n_candidates", 20)),
+                max_value=32,
+                value=int(form_values.get("n_candidates", 20)),
+                help="Cantidad de genes evaluados como posibles referencias.",
             )
-        with col_b:
+            k_refs_value = int(form_values.get("k_refs", 2))
+            k_refs_options = [1, 2, 3, 4, 5]
+            k_refs_index = k_refs_options.index(k_refs_value) if k_refs_value in k_refs_options else 1
             k_refs = st.selectbox(
-                "Tamaño set referencia",
-                options=[1, 2, 3, 4, 5],
-                index=[1, 2, 3, 4, 5].index(int(getattr(adv_state.get("params"), "k_refs", 2)))
-                if int(getattr(adv_state.get("params"), "k_refs", 2)) in {1, 2, 3, 4, 5}
-                else 1,
+                "Tamaño del set de referencia (K)",
+                options=k_refs_options,
+                index=k_refs_index,
+                help="Número de genes promedio usados como referencia agregada.",
             )
-        with col_c:
-            random_seed = st.number_input(
-                "Semilla aleatoria",
-                value=int(getattr(adv_state.get("params"), "random_seed", 123) or 123),
-                step=1,
-            )
-        col_boot, col_perm = st.columns(2)
-        with col_boot:
-            bootstrap_iter = st.number_input(
+
+        with right_col:
+            st.markdown("##### Robustez y reproducibilidad")
+            bootstrap_iter = st.slider(
                 "Iteraciones bootstrap",
                 min_value=0,
-                max_value=1000,
-                value=int(getattr(adv_state.get("params"), "bootstrap_iter", 200)),
-                step=50,
+                max_value=600,
+                value=int(form_values.get("bootstrap_iter", 200)),
+                step=20,
+                help="Remuestreos internos para estabilizar la selección de referencias.",
             )
-        with col_perm:
-            permutation_iter = st.number_input(
+            permutation_iter = st.slider(
                 "Permutaciones",
                 min_value=0,
-                max_value=600,
-                value=int(getattr(adv_state.get("params"), "permutation_iter", 100)),
+                max_value=400,
+                value=int(form_values.get("permutation_iter", 100)),
                 step=20,
+                help="Intercambios Control/Muestra para estimar tasa de falsos positivos.",
             )
-        st.markdown(
-            """
-            **Interpretación de los parámetros**
+            random_seed = st.number_input(
+                "Semilla aleatoria",
+                value=int(form_values.get("random_seed", 123) or 123),
+                step=1,
+                help="Fija el generador pseudoaleatorio y permite reproducir resultados.",
+            )
 
-            - *Umbral FDR (q)*: nivel de corrección por pruebas múltiples. Valores pequeños (≤0.05) privilegian especificidad; subirlo (0.1) amplía la lista de genes pero aumenta el riesgo de falsos positivos.
-            - *Genes candidatos*: número de genes con menor variabilidad que se exploran como referencias. Un N reducido da rapidez pero puede omitir combinaciones útiles; valores altos permiten descubrir referencias alternativas a costa de mayor tiempo de cómputo.
-            - *Tamaño set referencia (K)*: cantidad de genes que se promedian. K=1 replica el método básico; K≥2 mitiga ruido y sesgos. El sistema garantiza que el número de candidatos sea al menos igual a K; si la cohorte es pequeña, reduzca K para evitar combinaciones imposibles.
-            - *Semilla aleatoria*: fija el generador pseudoaleatorio para reproducir exactamente bootstrap y permutaciones. Cambiarla puede alterar levemente las frecuencias empíricas.
-            - *Iteraciones bootstrap*: número de re-muestreos del conjunto de pruebas. Más iteraciones (≥300) estabilizan la frecuencia de genes significativos; pocas iteraciones agilizan el cálculo pero dan estimaciones más ruidosas.
-            - *Permutaciones*: barajadas Control/Muestra usadas para estimar la tasa de falsos positivos. Incrementarlas (≥200) refina la estimación del FPR; valores bajos aceleran la corrida sacrificando precisión.
-            """
-        )
+        n_candidates = max(int(n_candidates), int(k_refs))
+        st.caption("La app asegura que el número de candidatos siempre sea ≥ K para construir combinaciones válidas.")
+        adv_state["form"] = {
+            "alpha": float(alpha),
+            "n_candidates": n_candidates,
+            "k_refs": int(k_refs),
+            "bootstrap_iter": int(bootstrap_iter),
+            "permutation_iter": int(permutation_iter),
+            "random_seed": int(random_seed),
+        }
+
+        if selected_preset in _ADVANCED_PRESETS:
+            preset_dict = asdict(_ADVANCED_PRESETS[selected_preset])
+            if any(adv_state["form"][key] != preset_dict[key] for key in preset_dict):
+                adv_state["preset"] = "Personalizado"
+                st.session_state[preset_key] = "Personalizado"
+                selected_preset = "Personalizado"
+                st.caption("Has ajustado los valores: el preset se marcó como Personalizado.")
+
+        with st.expander("¿Qué controla cada parámetro?", expanded=False):
+            st.markdown(
+                """
+                - **Umbral FDR (q)**: reduce falsos positivos al precio de omitir señales débiles si es muy estricto.
+                - **Genes candidatos**: explora más combinaciones para encontrar referencias estables.
+                - **Tamaño del set (K)**: promedio de genes usados como ancla; K≥2 amortigua sesgos individuales.
+                - **Bootstrap**: refina la frecuencia con la que aparece cada gen en la referencia.
+                - **Permutaciones**: estima cuántos genes surgirían por azar al intercambiar etiquetas.
+                - **Semilla**: asegura reproducibilidad cuando se comparten resultados con otras personas.
+                """
+            )
 
     params = AdvancedNormalizationParams(
-        alpha=float(alpha),
-        n_candidates=max(int(n_candidates), int(k_refs)),
-        k_refs=int(k_refs),
-        bootstrap_iter=int(bootstrap_iter),
-        permutation_iter=int(permutation_iter),
-        random_seed=int(random_seed),
+        alpha=float(adv_state["form"]["alpha"]),
+        n_candidates=int(adv_state["form"]["n_candidates"]),
+        k_refs=int(adv_state["form"]["k_refs"]),
+        bootstrap_iter=int(adv_state["form"]["bootstrap_iter"]),
+        permutation_iter=int(adv_state["form"]["permutation_iter"]),
+        random_seed=int(adv_state["form"]["random_seed"]),
     )
 
     if st.button("Ejecutar normalización avanzada", key=f"btn_run_adv_{adv_key}", width="stretch"):
