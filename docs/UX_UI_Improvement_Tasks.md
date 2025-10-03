@@ -37,3 +37,7 @@ Cada tarea debe abordarse manteniendo el rigor científico del flujo, pero prior
 - ✅ La barra lateral ahora renderiza el estado de cada etapa con indicadores compactos, bloquea selectores dependientes hasta que la carga de datos se completa y confirma visualmente el dataset activo tras cada procesamiento (`web_app/streamlit_app.py`).
 - ✅ Los controles de imputación y etiquetado del estudio se trasladaron al cuerpo principal para configurarse con contexto y explicación inmediata, manteniendo la barra lateral enfocada en carga y estado global (`web_app/streamlit_app.py`).
 - ✅ La carga del archivo también se movió al flujo principal, dejando la barra lateral exclusivamente como tablero de seguimiento del pipeline (`web_app/streamlit_app.py`).
+
+### Etapa 3 — Clasificación de controles/muestras más visual
+- ✅ La sección de clasificación ahora combina buscador, tabla resumen y selectores en tarjetas paralelas, mostrando badges de conteo por prefijo y reorganizando las asignaciones manuales para reducir el scroll (`web_app/app/ui/sections/classification.py`).
+- ✅ Se incorporó un panel de vista previa sticky con métricas vivas y chips de ejemplos por grupo, sustituyendo los expanders por tabs directas para revisar los dataframes aplicados (`web_app/app/ui/sections/classification.py`).
