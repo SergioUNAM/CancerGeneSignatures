@@ -42,12 +42,12 @@ Guía para la adopción progresiva de mejores prácticas en **CancerGeneSignatur
 - `web_app/streamlit_app.py` reducido a bootstrapping; lógica en `app/services` y `app/ui`.
 - Configuración tipada (`AppConfig`, `ServicesConfig`) con lectura resiliente.
 - Servicios especializados (qPCR, fold change, STRING, bibliografía, heurística, NLP).
-- Secciones UI reutilizables en `app/ui/sections.py`.
+- Primer bloque UI extraído a `app/ui/sections` (clasificación controles vs muestras).
+- Plantillas `.env` y menús por entorno en `web_app/config/templates/`.
 
 **Acciones restantes prioritarias**
 - Crear `app/ui/pages/*` para desacoplar qPCR, enriquecimiento, firmas y reportes.
 - Añadir adaptadores ligeros para nuevas fuentes (cacheo Ensembl/STRING).
-- Publicar plantillas de configuración por entorno (`dev`, `staging`, `prod`).
 
 **Entregables pendientes**
 - README principal actualizado (ver `README.md`).

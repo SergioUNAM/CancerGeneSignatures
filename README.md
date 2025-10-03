@@ -6,6 +6,7 @@ Generador de firmas genéticas asociadas a tipos de cáncer mediante análisis d
 - Servicios especializados desacoplados de Streamlit (`web_app/app/services/*`) para favorecer pruebas y reutilización.
 - UI modular multipágina en construcción, apoyada en secciones reutilizables (`web_app/app/ui/sections.py`).
 - Configuración centralizada (`AppConfig`, `ServicesConfig`) con soporte para distintos entornos y credenciales externas.
+- Panel de exportación consolidado que registra automáticamente datasets, heatmaps y listas de genes con metadatos del análisis.
 
 ## Flujo funcional
 1. **Ingesta qPCR** (`app/services/qpcr.py`): limpieza, clasificación de muestras/controles, imputación de Ct y panel de calidad.
@@ -57,6 +58,11 @@ streamlit run web_app/streamlit_app.py
 - Se puede definir `CGS_MENU_PATH` para apuntar a un menú alternativo (`web_app/config/menu.json` por defecto).
 - `CGS_LOGLEVEL`, `CGS_PUBMED_EMAIL`, `CGS_PUBMED_API_KEY` y `CGS_GOOGLE_NLP_API_KEY` permiten ajustar logs y credenciales.
 - Para despliegues, sobrescribir variables mediante `st.secrets` o ficheros `.env` gestionados fuera del control de versiones.
+
+### Configuración por entorno
+- Copia una plantilla de `web_app/config/templates/` (`.env.dev`, `.env.staging`, `.env.prod`) y ajusta credenciales locales.
+- `menu.dev.json` y `menu.shared.json` sirven como base para preparar menús reducidos o compartidos según el entorno.
+- Mantén los secretos en gestores seguros y referencia las rutas mediante `CGS_MENU_PATH`.
 
 ## Trabajo con datos
 - Colocar ficheros qPCR en `raw_data/` o cargarlos desde la UI; mantener identificadores anonimizados.

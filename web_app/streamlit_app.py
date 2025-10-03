@@ -4,8 +4,9 @@ import io
 import logging
 import re
 import sys
+from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -47,15 +48,18 @@ from app.services.fold_change_visuals import (
     summarize_fc_methods,
 )
 from app.services.heatmap_visuals import build_dendrogram_heatmap
-from app.services.qpcr import (
-    PrefixGrouping,
-    build_long_table,
-    classify_tests_by_prefixes,
-    detect_collisions,
-    group_tests_by_initial_prefix,
-    summarize_extraction,
-)
+from app.services.qpcr import build_long_table, summarize_extraction
 from app.state import AppSessionState
+from app.ui.components import (
+    ExportRegistry,
+    Highlight,
+    build_step_sequence,
+    render_highlight_pills,
+    render_pipeline_progress,
+    render_sidebar_progress,
+    render_export_panel,
+)
+from app.ui.sections import render_classification_section
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -69,12 +73,133 @@ def _annotate_ensembl_cached(df_csv: str, max_workers: int = 3) -> pd.DataFrame:
     return add_ensembl_info_batch(df, symbol_col="target", max_workers=max_workers)
 
 
-def _format_list_preview(items: List[str], limit: int = 20) -> str:
-    if not items:
-        return "(sin coincidencias)"
-    head = items[:limit]
-    suffix = " …" if len(items) > limit else ""
-    return ", ".join(head) + suffix
+_PIPELINE_STEPS_INFO = (
+    (
+        "Carga de datos",
+        "Sube tu Excel qPCR, elige la hoja y valida la vista previa.",
+    ),
+    (
+        "Clasificación",
+        "Separa controles y muestras para habilitar métricas de calidad.",
+    ),
+    (
+        "Normalización",
+        "Ejecuta la búsqueda de referencias y genera resultados reproducibles.",
+    ),
+    (
+        "Resultados y exportación",
+        "Descarga heatmaps, tablas y listas de genes diferencialmente expresados.",
+    ),
+    (
+        "Anotación Ensembl",
+        "Completa IDs y descripciones para tus genes prioritarios.",
+    ),
+)
+
+
+_ADVANCED_PRESETS = {
+    "Rápido": AdvancedNormalizationParams(
+        alpha=0.1,
+        n_candidates=12,
+        k_refs=1,
+        bootstrap_iter=100,
+        permutation_iter=60,
+        random_seed=123,
+    ),
+    "Equilibrado": AdvancedNormalizationParams(
+        alpha=0.05,
+        n_candidates=20,
+        k_refs=2,
+        bootstrap_iter=200,
+        permutation_iter=100,
+        random_seed=123,
+    ),
+    "Exhaustivo": AdvancedNormalizationParams(
+        alpha=0.03,
+        n_candidates=28,
+        k_refs=3,
+        bootstrap_iter=400,
+        permutation_iter=220,
+        random_seed=123,
+    ),
+}
+
+_ADVANCED_PRESET_NOTES = {
+    "Rápido": "Optimiza tiempos de cálculo con un K simple (1) y menos permutaciones.",
+    "Equilibrado": "Configura un balance entre sensibilidad y robustez, ideal para corridas estándar.",
+    "Exhaustivo": "Amplía la búsqueda de referencias y las iteraciones para detectar efectos sutiles.",
+}
+
+
+def _compute_pipeline_completion(
+    df_loaded: Optional[LoadResult],
+) -> Sequence[bool]:
+    """Evalúa qué etapas del pipeline están completas en función del estado actual."""
+
+    has_data = df_loaded is not None
+    classification_done = False
+    normalization_done = False
+    exports_ready = False
+    ensembl_ready = False
+
+    if has_data and df_loaded is not None:
+        file_key = f"assign::{df_loaded.source_name}:{df_loaded.sheet_name}"
+        assign_state = st.session_state.get(file_key, {})
+        ctrl_df = assign_state.get("controles_df")
+        samp_df = assign_state.get("muestras_df")
+        classification_done = (
+            isinstance(ctrl_df, pd.DataFrame)
+            and isinstance(samp_df, pd.DataFrame)
+            and not ctrl_df.empty
+            and not samp_df.empty
+        )
+
+        adv_key = f"adv::{file_key}"
+        adv_state = st.session_state.get(adv_key, {})
+        normalization_done = isinstance(
+            adv_state.get("result"),
+            AdvancedNormalizationResult,
+        )
+        exports_ready = normalization_done
+
+    ensembl_df = st.session_state.get("_ensembl_df")
+    if isinstance(ensembl_df, pd.DataFrame) and not ensembl_df.empty:
+        ensembl_ready = True
+
+    return has_data, classification_done, normalization_done, exports_ready, ensembl_ready
+
+
+def _pipeline_status_labels(completions: Sequence[bool]) -> Sequence[str]:
+    statuses: List[str] = []
+    active_assigned = False
+    for completed in completions:
+        if completed:
+            statuses.append("complete")
+        elif not active_assigned:
+            statuses.append("active")
+            active_assigned = True
+        else:
+            statuses.append("pending")
+    if not statuses:
+        return statuses
+    if not active_assigned:
+        # Todas las etapas se marcaron como completas.
+        return statuses
+    return statuses
+
+
+def _build_pipeline_steps(
+    df_loaded: Optional[LoadResult],
+) -> tuple[Sequence[object], Sequence[bool]]:
+    """Genera los pasos del pipeline y sus estados de completitud actuales."""
+
+    completions = _compute_pipeline_completion(df_loaded)
+    statuses = _pipeline_status_labels(completions)
+    step_defs = [
+        (title, description, status)
+        for (title, description), status in zip(_PIPELINE_STEPS_INFO, statuses)
+    ]
+    return build_step_sequence(step_defs), completions
 
 
 def _eq(formula: str) -> None:
@@ -89,290 +214,6 @@ def _notify_parameter_change(state_key: str, value: object, message: str) -> Non
     if feedback_state.get(state_key) != value:
         feedback_state[state_key] = value
         st.info(message)
-
-
-def _store_classification(
-    state: Dict[str, object],
-    ctrl_df: pd.DataFrame,
-    samp_df: pd.DataFrame,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    ctrl_df = ctrl_df.copy()
-    samp_df = samp_df.copy()
-    collisions = detect_collisions(ctrl_df, samp_df)
-    if collisions:
-        preview = _format_list_preview(collisions, limit=10)
-        st.warning(
-            "Algunas pruebas aparecen tanto en controles como en muestras. "
-            "Se priorizarán como controles: "
-            f"{preview}"
-        )
-        samp_df = samp_df[~samp_df["test"].astype(str).isin(collisions)].copy()
-    state["controles_df"] = ctrl_df
-    state["muestras_df"] = samp_df
-    return ctrl_df, samp_df
-
-
-def _clear_classification_state(state: Dict[str, object]) -> None:
-    for key in (
-        "ctrl_prefix",
-        "samp_prefix",
-        "ctrl_prefixes",
-        "samp_prefixes",
-        "ctrl_unassigned",
-        "samp_unassigned",
-        "ctrl_suffix",
-        "samp_suffix",
-        "ctrl_regex",
-        "samp_regex",
-        "selected_ctrl",
-        "selected_samp",
-        "controles_df",
-        "muestras_df",
-        "_last_selection",
-    ):
-        state.pop(key, None)
-    # Limpiar entradas asociadas en session_state de Streamlit
-    for ui_key in list(st.session_state.keys()):
-        if any(ui_key.startswith(prefix) for prefix in (
-            "ctrl_prefix_input::",
-            "samp_prefix_input::",
-            "ctrl_suffix_input::",
-            "samp_suffix_input::",
-            "pref_ctrl_suggest::",
-            "pref_samp_suggest::",
-            "suff_ctrl_suggest::",
-            "suff_samp_suggest::",
-            "ctrl_prefixes::",
-            "samp_prefixes::",
-            "ctrl_unassigned::",
-            "samp_unassigned::",
-            "auto_apply::",
-        )):
-            st.session_state.pop(ui_key, None)
-
-
-def _render_classification_ui(long_df: pd.DataFrame, file_key: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    state = st.session_state.setdefault(file_key, {})
-
-    grouping: PrefixGrouping = group_tests_by_initial_prefix(long_df)
-    prefix_groups = grouping.groups
-    without_prefix = grouping.without_prefix
-    prefix_options = sorted(prefix_groups.keys())
-    label_map = {prefix: f"{prefix} ({len(prefix_groups[prefix])} tests)" for prefix in prefix_options}
-
-    unique_tests = sorted(long_df["test"].astype(str).dropna().unique().tolist())
-    total_tests = len(unique_tests)
-
-    if not prefix_options:
-        st.warning("No se detectaron prefijos alfanuméricos en los nombres de prueba.")
-
-    default_ctrl = [p for p in state.get("ctrl_prefixes", []) if p in prefix_options]
-    default_samp = [p for p in state.get("samp_prefixes", []) if p in prefix_options]
-
-    ctrl_key = f"ctrl_prefixes::{file_key}"
-    samp_key = f"samp_prefixes::{file_key}"
-
-    if ctrl_key in st.session_state:
-        st.session_state[ctrl_key] = [p for p in st.session_state[ctrl_key] if p in prefix_options]
-    else:
-        st.session_state[ctrl_key] = default_ctrl
-
-    if samp_key in st.session_state:
-        st.session_state[samp_key] = [p for p in st.session_state[samp_key] if p in prefix_options]
-    else:
-        st.session_state[samp_key] = default_samp
-
-    ctrl_prefixes = st.multiselect(
-        "Prefijos controles",
-        options=prefix_options,
-        default=default_ctrl,
-        format_func=lambda value: label_map.get(value, value),
-        key=ctrl_key,
-    )
-    samp_prefixes = st.multiselect(
-        "Prefijos muestras",
-        options=prefix_options,
-        default=default_samp,
-        format_func=lambda value: label_map.get(value, value),
-        key=samp_key,
-    )
-
-    if not grouping.prefix_table.empty:
-        with st.expander("Prefijos detectados", expanded=False):
-            st.dataframe(grouping.prefix_table, use_container_width=True)
-
-    ctrl_unassigned_key = f"ctrl_unassigned::{file_key}"
-    samp_unassigned_key = f"samp_unassigned::{file_key}"
-
-    default_ctrl_unassigned = [t for t in state.get("ctrl_unassigned", []) if t in without_prefix]
-    default_samp_unassigned = [t for t in state.get("samp_unassigned", []) if t in without_prefix]
-
-    if ctrl_unassigned_key in st.session_state:
-        st.session_state[ctrl_unassigned_key] = [t for t in st.session_state[ctrl_unassigned_key] if t in without_prefix]
-    else:
-        st.session_state[ctrl_unassigned_key] = default_ctrl_unassigned
-
-    if samp_unassigned_key in st.session_state:
-        st.session_state[samp_unassigned_key] = [t for t in st.session_state[samp_unassigned_key] if t in without_prefix]
-    else:
-        st.session_state[samp_unassigned_key] = default_samp_unassigned
-
-    ctrl_unassigned = []
-    samp_unassigned = []
-    if without_prefix:
-        st.caption("Pruebas sin prefijo detectado: " + _format_list_preview(without_prefix))
-        col_un_ctrl, col_un_samp = st.columns(2)
-        with col_un_ctrl:
-            ctrl_unassigned = st.multiselect(
-                "Asignar manualmente a controles",
-                options=without_prefix,
-                default=default_ctrl_unassigned,
-                key=ctrl_unassigned_key,
-            )
-        with col_un_samp:
-            samp_unassigned = st.multiselect(
-                "Asignar manualmente a muestras",
-                options=without_prefix,
-                default=default_samp_unassigned,
-                key=samp_unassigned_key,
-            )
-
-    ctrl_preview = sorted(
-        set(test for prefix in ctrl_prefixes for test in prefix_groups.get(prefix, []))
-        .union(set(ctrl_unassigned))
-    )
-    samp_preview = sorted(
-        set(test for prefix in samp_prefixes for test in prefix_groups.get(prefix, []))
-        .union(set(samp_unassigned))
-    )
-
-    st.caption(f"Controles previstos: {_format_list_preview(ctrl_preview)}")
-    st.caption(f"Muestras previstas: {_format_list_preview(samp_preview)}")
-
-    overlap_prefixes = set(ctrl_prefixes).intersection(samp_prefixes)
-    if overlap_prefixes:
-        st.warning(
-            "Los prefijos seleccionados se superponen entre controles y muestras: "
-            + ", ".join(sorted(overlap_prefixes))
-        )
-
-    overlap_tests = set(ctrl_preview).intersection(samp_preview)
-    if overlap_tests:
-        st.warning(
-            "Algunas pruebas quedaron en ambos grupos: " + _format_list_preview(sorted(overlap_tests), limit=10)
-        )
-
-    assigned_tests = len(set(ctrl_preview).union(samp_preview))
-    coverage = (assigned_tests / total_tests) if total_tests else 0.0
-
-    preview_summary = pd.DataFrame([
-        {
-            "grupo": "Controles",
-            "prefijos": ", ".join(ctrl_prefixes) or "-",
-            "manual": len(ctrl_unassigned),
-            "total_tests": len(ctrl_preview),
-        },
-        {
-            "grupo": "Muestras",
-            "prefijos": ", ".join(samp_prefixes) or "-",
-            "manual": len(samp_unassigned),
-            "total_tests": len(samp_preview),
-        },
-    ])
-    st.dataframe(preview_summary, use_container_width=True, hide_index=True)
-
-    col_metrics = st.columns(3)
-    col_metrics[0].metric("Tests únicos", total_tests)
-    col_metrics[1].metric("Asignados", assigned_tests)
-    col_metrics[2].metric("Cobertura", f"{coverage:.0%}")
-
-    auto_apply_key = f"auto_apply::{file_key}"
-    auto_apply_default = state.get("auto_apply", True)
-    auto_apply_value = st.checkbox(
-        "Aplicar automáticamente al cambiar la selección",
-        value=st.session_state.get(auto_apply_key, auto_apply_default),
-        key=auto_apply_key,
-        help="Cuando está activo, la clasificación se actualiza en cuanto cambian los prefijos seleccionados.",
-    )
-    state["auto_apply"] = auto_apply_value
-
-    selection_signature = (
-        tuple(sorted(ctrl_prefixes)),
-        tuple(sorted(samp_prefixes)),
-        tuple(sorted(ctrl_unassigned)),
-        tuple(sorted(samp_unassigned)),
-    )
-
-    if not auto_apply_value and selection_signature != tuple(state.get("_last_selection", ())):
-        st.info("Pulsa 'Aplicar clasificación' para actualizar la separación de controles y muestras.")
-
-    def apply_classification() -> Tuple[pd.DataFrame, pd.DataFrame]:
-        result = classify_tests_by_prefixes(long_df, ctrl_prefixes, samp_prefixes)
-        ctrl_df = result.controles
-        samp_df = result.muestras
-
-        if ctrl_unassigned:
-            ctrl_df = pd.concat([
-                ctrl_df,
-                long_df[long_df["test"].astype(str).isin(ctrl_unassigned)],
-            ], ignore_index=True).drop_duplicates().reset_index(drop=True)
-        if samp_unassigned:
-            samp_df = pd.concat([
-                samp_df,
-                long_df[long_df["test"].astype(str).isin(samp_unassigned)],
-            ], ignore_index=True).drop_duplicates().reset_index(drop=True)
-
-        ctrl_df, samp_df = _store_classification(state, ctrl_df, samp_df)
-        state["ctrl_prefixes"] = ctrl_prefixes
-        state["samp_prefixes"] = samp_prefixes
-        state["ctrl_unassigned"] = ctrl_unassigned
-        state["samp_unassigned"] = samp_unassigned
-        state["_last_selection"] = selection_signature
-        return ctrl_df, samp_df
-
-    classification_applied = False
-    if auto_apply_value and ctrl_preview and samp_preview:
-        if selection_signature != tuple(state.get("_last_selection", ())):
-            ctrl_df, samp_df = apply_classification()
-            st.success(
-                f"Clasificación aplicada → controles: {len(ctrl_df)}, muestras: {len(samp_df)}"
-            )
-            classification_applied = True
-    else:
-        if st.button("Aplicar clasificación", key=f"btn_pref_{file_key}"):
-            if not ctrl_preview or not samp_preview:
-                st.warning("Selecciona al menos un elemento en cada grupo para clasificar.")
-            else:
-                ctrl_df, samp_df = apply_classification()
-                st.success(
-                    f"Clasificación aplicada → controles: {len(ctrl_df)}, muestras: {len(samp_df)}"
-                )
-                classification_applied = True
-
-    if not classification_applied:
-        ctrl_df = state.get("controles_df")
-        samp_df = state.get("muestras_df")
-    else:
-        ctrl_df = state.get("controles_df")
-        samp_df = state.get("muestras_df")
-
-    controles_df = state.get("controles_df")
-    muestras_df = state.get("muestras_df")
-    if not isinstance(controles_df, pd.DataFrame):
-        controles_df = pd.DataFrame()
-    if not isinstance(muestras_df, pd.DataFrame):
-        muestras_df = pd.DataFrame()
-
-    if not controles_df.empty or not muestras_df.empty:
-        with st.expander("Vista previa de clasificación", expanded=False):
-            col_ctrl, col_samp = st.columns(2)
-            with col_ctrl:
-                st.caption(f"Controles → {len(controles_df)} filas")
-                st.dataframe(controles_df.head(20), use_container_width=True)
-            with col_samp:
-                st.caption(f"Muestras → {len(muestras_df)} filas")
-                st.dataframe(muestras_df.head(20), use_container_width=True)
-    return controles_df, muestras_df
 
 
 def _quality_summary(metrics: QualityMetrics) -> None:
@@ -435,6 +276,8 @@ def _build_expression_summary(
 def _render_advanced_results(
     result: AdvancedNormalizationResult,
     params: AdvancedNormalizationParams,
+    exports: ExportRegistry,
+    export_prefix: str,
 ) -> pd.DataFrame:
     st.subheader("Resultados de la normalización avanzada")
     summary = result.summary()
@@ -451,31 +294,54 @@ def _render_advanced_results(
         candidates["refs"] = candidates["refs"].apply(lambda ref: ", ".join(ref))
         st.markdown("**Ranking de combinaciones candidata**")
         st.dataframe(candidates[["refs", "score"]].head(30), width="stretch")
-        st.download_button(
-            "Descargar ranking (CSV)",
-            candidates.to_csv(index=False),
+        exports.register_dataframe(
+            key=f"{export_prefix}::advanced_ranking",
+            section="Normalización avanzada",
+            label="Ranking de combinaciones candidata",
             file_name="normalizacion_avanzada_candidatos.csv",
-            width="stretch",
+            dataframe=candidates,
+            method_label="Avanzada",
+            description="Score de combinaciones evaluadas durante la búsqueda de referencias.",
+            parameters={
+                "α": params.alpha,
+                "K": params.k_refs,
+                "Bootstrap": params.bootstrap_iter,
+                "Permutaciones": params.permutation_iter,
+            },
         )
 
     st.markdown("**Tabla normalizada (df_norm)**")
     st.dataframe(result.df_norm.head(100), width="stretch")
-    st.download_button(
-        "Descargar df_norm (CSV)",
-        result.df_norm.to_csv(index=False),
+    exports.register_dataframe(
+        key=f"{export_prefix}::advanced_df_norm",
+        section="Normalización avanzada",
+        label="Tabla normalizada (df_norm)",
         file_name="normalizacion_avanzada_df_norm.csv",
-        width="stretch",
+        dataframe=result.df_norm,
+        method_label="Avanzada",
+        description="Resultados de ΔCt ajustados con la combinación óptima de referencias.",
+        parameters={
+            "α": params.alpha,
+            "Refs": ", ".join(ref_res.references),
+        },
     )
 
     stats_df = result.differential.stats.copy()
     if not stats_df.empty:
         st.markdown("**Estadísticas diferenciales**")
         st.dataframe(stats_df.head(50), width="stretch")
-        st.download_button(
-            "Descargar estadísticas (CSV)",
-            stats_df.to_csv(index=False),
+        exports.register_dataframe(
+            key=f"{export_prefix}::advanced_stats",
+            section="Normalización avanzada",
+            label="Estadísticas diferenciales",
             file_name="normalizacion_avanzada_stats.csv",
-            width="stretch",
+            dataframe=stats_df,
+            method_label="Avanzada",
+            description="Resultados completos de pruebas de significancia tras la normalización avanzada.",
+            parameters={
+                "α": params.alpha,
+                "Refs": ", ".join(ref_res.references),
+            },
         )
     else:
         st.info("No se obtuvieron estadísticas significativas con los parámetros actuales.")
@@ -484,7 +350,11 @@ def _render_advanced_results(
     if isinstance(heat_df, pd.DataFrame) and not heat_df.empty:
         try:
             fig_heat = build_dendrogram_heatmap(heat_df, title="Avanzada — Heatmap con dendrogramas")
-            st.plotly_chart(fig_heat, width="stretch")
+            st.plotly_chart(
+                fig_heat,
+                width="stretch",
+                key=f"classification_heatmap::{export_prefix}",
+            )
         except Exception:
             st.dataframe(heat_df, width="stretch")
 
@@ -496,11 +366,18 @@ def _render_advanced_results(
     else:
         st.markdown("**Resumen de expresión diferenciada**")
         st.dataframe(expr_summary.head(50), width="stretch")
-        st.download_button(
-            "Descargar resumen (CSV)",
-            expr_summary.to_csv(index=False),
+        exports.register_dataframe(
+            key=f"{export_prefix}::advanced_expr_summary",
+            section="Normalización avanzada",
+            label="Resumen de expresión diferenciada",
             file_name="normalizacion_avanzada_resumen_expresion.csv",
-            width="stretch",
+            dataframe=expr_summary,
+            method_label="Avanzada",
+            description="Síntesis de genes con ΔΔCt y fold change tras la normalización avanzada.",
+            parameters={
+                "α": params.alpha,
+                "Top candidatos": params.n_candidates,
+            },
         )
         counts = expr_summary["nivel_expresion"].value_counts()
         st.success(
@@ -512,7 +389,25 @@ def _render_advanced_results(
     return expr_summary
 
 
-def _render_ensembl_section(expr_summary: pd.DataFrame) -> None:
+def _prepare_heatmap_export(matrix: pd.DataFrame, *, zscore: bool) -> pd.DataFrame:
+    if not isinstance(matrix, pd.DataFrame) or matrix.empty:
+        return pd.DataFrame()
+    export_df = matrix.copy()
+    if zscore:
+        arr = export_df.values.astype(float)
+        means = np.nanmean(arr, axis=1, keepdims=True)
+        stds = np.nanstd(arr, axis=1, keepdims=True)
+        stds[stds == 0] = 1.0
+        export_df = pd.DataFrame(arr - means, index=export_df.index, columns=export_df.columns)
+        export_df = export_df.divide(stds, axis=0)
+    return export_df
+
+
+def _render_ensembl_section(
+    expr_summary: pd.DataFrame,
+    exports: ExportRegistry,
+    export_prefix: str,
+) -> None:
     st.subheader("Anotación Ensembl (IDs génicos)")
     if expr_summary is None or expr_summary.empty:
         st.info("Ejecuta la normalización avanzada para generar un listado de genes.")
@@ -581,11 +476,18 @@ def _render_ensembl_section(expr_summary: pd.DataFrame) -> None:
             st.metric("Con descripción", int(annotated["has_desc"].sum()))
 
         st.dataframe(annotated, width="stretch")
-        st.download_button(
-            "Descargar anotaciones (CSV)",
-            annotated.to_csv(index=False),
+        exports.register_dataframe(
+            key=f"{export_prefix}::ensembl",
+            section="Anotación Ensembl",
+            label="Listado anotado Ensembl",
             file_name="ensembl_anotado.csv",
-            width="stretch",
+            dataframe=annotated,
+            method_label="Consulta API Ensembl",
+            description="Tabla con IDs, descripciones y niveles de expresión para la lista priorizada de genes.",
+            parameters={
+                "Genes": tot,
+                "Hilos": int(workers),
+            },
         )
 
         st.markdown("**Enlaces rápidos**")
@@ -641,30 +543,96 @@ def main() -> None:
         st.warning(warning_msg)
 
     app_state = AppSessionState.load()
+    df_loaded = app_state.df_loaded
+    exports = ExportRegistry()
+
+    # Definimos llaves compartidas para los selectores ubicados en el cuerpo principal.
+    UND_POLICY_KEY = "_und_policy"
+    UND_VALUE_KEY = "_und_value"
+    STUDY_CANCER_KEY = "_study_cancer"
+    STUDY_CONTEXT_KEY = "_study_context"
+
+    und_defaults = {"nan", "ctmax", "value"}
+    policy_default = (
+        app_state.undetermined.policy
+        if app_state.undetermined.policy in und_defaults
+        else "nan"
+    )
+    value_default = float(app_state.undetermined.value)
+
+    if UND_POLICY_KEY not in st.session_state:
+        st.session_state[UND_POLICY_KEY] = policy_default
+    elif st.session_state[UND_POLICY_KEY] not in und_defaults:
+        st.session_state[UND_POLICY_KEY] = policy_default
+
+    if UND_VALUE_KEY not in st.session_state:
+        st.session_state[UND_VALUE_KEY] = value_default
+
+    cancer_types = app_config.menu.cancer_types
+    if not cancer_types:
+        st.error("El menú de configuración no define tipos de cáncer disponibles.")
+        cancer_types = ["Sin definir"]
+    cancer_default = (
+        app_state.cancer_type
+        if app_state.cancer_type in cancer_types
+        else cancer_types[0]
+    )
+    if STUDY_CANCER_KEY not in st.session_state:
+        st.session_state[STUDY_CANCER_KEY] = cancer_default
+    elif st.session_state[STUDY_CANCER_KEY] not in cancer_types:
+        st.session_state[STUDY_CANCER_KEY] = cancer_default
+
+    context_options = [ctx.label for ctx in app_config.menu.contexts]
+    if not context_options:
+        context_options = ["Sin contexto"]
+    context_default = (
+        app_state.context_label
+        if app_state.context_label in context_options
+        else context_options[0]
+    )
+    if STUDY_CONTEXT_KEY not in st.session_state:
+        st.session_state[STUDY_CONTEXT_KEY] = context_default
+    elif st.session_state[STUDY_CONTEXT_KEY] not in context_options:
+        st.session_state[STUDY_CONTEXT_KEY] = context_default
 
     st.title("Flujo qPCR → Normalización avanzada → Anotación Ensembl")
-    st.markdown(
-        "Cargue su archivo de qPCR, defina **controles** y **muestras**, ejecute la "
-        "**normalización avanzada** (búsqueda automática de referencias estables) y concluya con "
-        "la identificación de **genes diferencialmente expresados** y sus **IDs Ensembl**. "
-        "El recorrido replica la estructura de un artículo científico: diseño experimental, "
-        "control de calidad, normalización y, por último, tablas y figuras reproducibles."
-    )
-    st.info(
-        "**Ruta rápida**\n"
-        "1) Cargue el archivo Excel y revise pozos problemáticos u outliers.\n"
-        "2) Clasifique controles y muestras (prefijo, sufijo, regex o selección manual).\n"
-        "3) Elija la política para valores indeterminados y revise las métricas de calidad.\n"
-        "4) Ejecute la **normalización avanzada** y explore heatmaps, diagrama de Venn y volcano plot.\n"
-        "5) Exporte datasets, listas de genes y las anotaciones Ensembl.\n\n"
-        "**Política de imputación**\n"
-        "• `nan`: conserva Ct no determinados; útil para visualizar huecos reales.\n"
-        "• `ctmax`: sustituye por el Ct máximo observado del grupo; aproxima el límite de detección.\n"
-        "• `value`: usa un Ct fijo (p. ej. 40) para penalizar indetectables de forma uniforme."
+    st.caption(
+        "Sigue las etapas guiadas para pasar de Ct crudos a resultados exportables con anotación genética."
     )
 
-    with st.sidebar:
-        st.header("1) Datos de entrada")
+    progress_placeholder = st.container()
+
+    with st.expander("Guía rápida del flujo", expanded=False):
+        st.markdown(
+            "**Ruta rápida**\n"
+            "1) Carga el archivo Excel y revisa pozos problemáticos u outliers.\n"
+            "2) Clasifica controles y muestras (prefijos, sufijos, regex o selección manual).\n"
+            "3) Elige la política para valores indeterminados y revisa las métricas de calidad.\n"
+            "4) Ejecuta la **normalización avanzada** y explora heatmaps, diagrama de Venn y volcano plot.\n"
+            "5) Exporta datasets, listas de genes y las anotaciones Ensembl."
+        )
+
+    with st.expander("¿Cómo se imputan los valores 'Undetermined/ND'?", expanded=False):
+        st.markdown(
+            "**Política de imputación**\n"
+            "• `nan`: conserva Ct no determinados; útil para visualizar huecos reales.\n"
+            "• `ctmax`: sustituye por el Ct máximo observado del grupo; aproxima el límite de detección.\n"
+            "• `value`: usa un Ct fijo (p. ej. 40) para penalizar indetectables de forma uniforme."
+        )
+
+    pipeline_steps: Sequence[object] = []
+
+    st.subheader("Paso 1 · Carga de datos")
+    st.caption(
+        "Sube tu Excel qPCR, valida su estructura y procesa la tabla base antes de avanzar al siguiente paso."
+    )
+
+    load_feedback: Optional[str] = None
+    load_error: Optional[str] = None
+    load_success = False
+
+    upload_cols = st.columns((2, 1))
+    with upload_cols[0]:
         uploaded = st.file_uploader("Archivo Excel", type=["xlsx", "xls"])
         sheet: Optional[str] = None
         if uploaded is not None:
@@ -676,102 +644,110 @@ def main() -> None:
                 sheets = []
             if sheets:
                 sheet = st.selectbox("Hoja", options=sheets, index=0)
-
-        st.header("2) Valores 'Undetermined/ND'")
-        und_policy = st.selectbox(
-            "Política",
-            options=["nan", "ctmax", "value"],
-            index=["nan", "ctmax", "value"].index(app_state.undetermined.policy)
-            if app_state.undetermined.policy in {"nan", "ctmax", "value"}
-            else 0,
-        )
-        und_value = st.number_input(
-            "Valor fijo (si aplica)",
-            value=float(app_state.undetermined.value),
-            min_value=0.0,
-            max_value=100.0,
-            step=0.5,
-        )
-        st.caption(
-            "Política de imputación: `nan` conserva el Ct sin determinar, `ctmax` sustituye por el máximo Ct válido del grupo "
-            "y `value` utiliza el número especificado. Ajuste la opción según la sensibilidad del ensayo." 
+    with upload_cols[1]:
+        st.markdown(
+            "**Consejos**\n"
+            "- Prefiere archivos con cabeceras en filas 1–4 y pozos en la primera columna.\n"
+            "- Si cambias la política de imputación deberás reprocesar el archivo para reflejar los ajustes."
         )
 
-        st.header("3) Opciones del estudio")
-        cancer_types = app_config.menu.cancer_types
-        if not cancer_types:
-            st.error("El menú de configuración no define tipos de cáncer disponibles.")
-            cancer_types = ["Sin definir"]
-        default_cancer = (
-            cancer_types.index(app_state.cancer_type)
-            if app_state.cancer_type in cancer_types
-            else 0
-        )
-        cancer_selected = st.selectbox(
-            "Tipo de cáncer",
-            options=cancer_types,
-            index=default_cancer,
-        )
+    current_und_policy = str(st.session_state.get(UND_POLICY_KEY, policy_default))
+    current_und_value = float(st.session_state.get(UND_VALUE_KEY, value_default))
 
-        context_options = [ctx.label for ctx in app_config.menu.contexts]
-        default_context_idx = (
-            context_options.index(app_state.context_label)
-            if app_state.context_label in context_options
-            else 0
-        )
-        context_selected = st.selectbox(
-            "Contexto biológico",
-            options=context_options,
-            index=default_context_idx,
-        )
-
-        run_btn = st.button("Procesar archivo", type="primary")
-
-    app_state.undetermined.policy = und_policy
-    app_state.undetermined.value = float(und_value)
-    app_state.cancer_type = str(cancer_selected)
-    app_state.context_label = str(context_selected)
-    app_state.persist()
-
-    df_loaded: Optional[LoadResult] = app_state.df_loaded
+    process_disabled = uploaded is None
+    run_btn = st.button("Procesar archivo", type="primary", disabled=process_disabled)
 
     if uploaded is not None and run_btn:
+        candidate: Optional[LoadResult] = None
+        uploaded.seek(0)
         try:
-            uploaded.seek(0)
-            df_loaded = parse_qpcr_wide(
+            candidate = parse_qpcr_wide(
                 uploaded,
                 sheet_name=sheet,
                 header_mode="coords",
                 header_row_idx=3,
                 well_col_idx=0,
                 target_col_idx=1,
-                undetermined_policy=und_policy,
-                undetermined_value=float(und_value),
+                undetermined_policy=current_und_policy,
+                undetermined_value=current_und_value,
             )
         except Exception as exc:
-            st.warning(f"Cabecera esperada no encontrada ({exc}); intentando detección automática…")
+            load_feedback = (
+                f"Cabecera esperada no encontrada ({exc}); intentando detección automática…"
+            )
             uploaded.seek(0)
             try:
-                df_loaded = parse_qpcr_wide(
+                candidate = parse_qpcr_wide(
                     uploaded,
                     sheet_name=sheet,
                     header_mode="auto",
-                    undetermined_policy=und_policy,
-                    undetermined_value=float(und_value),
+                    undetermined_policy=current_und_policy,
+                    undetermined_value=current_und_value,
                 )
             except Exception as exc_auto:
-                st.error(f"No se pudo leer el archivo: {exc_auto}")
+                load_error = f"No se pudo leer el archivo: {exc_auto}"
                 logger.exception("Fallo al parsear archivo", exc_info=exc_auto)
-                df_loaded = None
-        if df_loaded is not None:
+                candidate = None
+            else:
+                df_loaded = candidate
+                load_success = True
+        else:
+            df_loaded = candidate
+            load_success = True
+
+        if load_success and df_loaded is not None:
             app_state.df_loaded = df_loaded
-            app_state.persist()
             logger.info(
                 "Archivo cargado: %s | hoja=%s | forma=%s",
                 df_loaded.source_name,
                 df_loaded.sheet_name,
                 df_loaded.df.shape,
             )
+
+    has_data = df_loaded is not None
+
+    if load_error:
+        st.error(load_error)
+
+    if has_data and df_loaded is not None:
+        st.success(
+            "Archivo activo: "
+            f"{df_loaded.source_name} · {df_loaded.df.shape[0]} filas × {df_loaded.df.shape[1]} columnas."
+        )
+        if load_feedback:
+            st.caption(load_feedback)
+    else:
+        st.info(
+            "Carga un archivo Excel de qPCR y pulsa 'Procesar archivo' para habilitar el resto de pasos."
+        )
+
+    pipeline_steps, _ = _build_pipeline_steps(df_loaded)
+
+    with st.sidebar:
+        st.markdown("### Estado del flujo")
+        render_sidebar_progress(pipeline_steps)
+        st.caption("Usa la vista principal para completar cada etapa y observarás aquí el progreso consolidado.")
+
+    # Recuperamos los valores vigentes tras posibles interacciones en el cuerpo principal.
+    und_policy = str(st.session_state.get(UND_POLICY_KEY, policy_default))
+    und_value = float(st.session_state.get(UND_VALUE_KEY, value_default))
+    cancer_selected = str(st.session_state.get(STUDY_CANCER_KEY, cancer_default))
+    context_selected = str(st.session_state.get(STUDY_CONTEXT_KEY, context_default))
+
+    app_state.undetermined.policy = und_policy
+    app_state.undetermined.value = float(und_value)
+    app_state.cancer_type = str(cancer_selected)
+    app_state.context_label = str(context_selected)
+    app_state.df_loaded = df_loaded
+    app_state.persist()
+
+    with progress_placeholder:
+        render_pipeline_progress(pipeline_steps)
+
+    st.markdown(
+        "La barra lateral funciona como monitor de progreso; la carga de archivos y las decisiones analíticas "
+        "se gestionan dentro de los pasos guiados del cuerpo principal para ofrecer contexto inmediato."
+    )
 
     if df_loaded is None:
         st.info("Carga un archivo Excel y pulsa 'Procesar archivo' para comenzar.")
@@ -800,18 +776,73 @@ def main() -> None:
     except Exception as exc:
         st.warning(f"No se pudo generar el resumen: {exc}")
 
-    long_df, controls_warning = build_long_table(df_loaded)
-    if controls_warning:
-        st.warning(f"No se filtraron los controles de máquina: {controls_warning}")
+    st.subheader("Política de imputación de Ct indeterminados")
+    st.caption(
+        "Define cómo se reemplazan los valores 'Undetermined/ND' al volver a procesar el archivo. "
+        "Los cambios requieren pulsar nuevamente **Procesar archivo** para aplicarse a la tabla base."
+    )
+    imp_cols = st.columns((2, 1))
+    with imp_cols[0]:
+        st.selectbox(
+            "Política",
+            options=["nan", "ctmax", "value"],
+            key=UND_POLICY_KEY,
+            disabled=df_loaded is None,
+        )
+    with imp_cols[1]:
+        st.number_input(
+            "Valor fijo (si aplica)",
+            min_value=0.0,
+            max_value=100.0,
+            step=0.5,
+            key=UND_VALUE_KEY,
+            disabled=df_loaded is None,
+        )
+    st.caption(
+        "• `nan`: conserva el Ct sin determinar; útil para visualizar huecos reales.\n"
+        "• `ctmax`: sustituye por el Ct máximo válido observado en el grupo.\n"
+        "• `value`: aplica un Ct constante (p. ej. 40) para penalizar indetectables."
+        )
+
+    st.divider()
+
+    st.subheader("Etiquetas del estudio")
+    st.caption("Selecciona cómo se documentará el contexto biológico del análisis.")
+    study_cols = st.columns(2)
+    with study_cols[0]:
+        st.selectbox(
+            "Tipo de cáncer",
+            options=cancer_types,
+            key=STUDY_CANCER_KEY,
+            disabled=df_loaded is None,
+        )
+    with study_cols[1]:
+        st.selectbox(
+            "Contexto biológico",
+            options=context_options,
+            key=STUDY_CONTEXT_KEY,
+            disabled=df_loaded is None,
+        )
+
+    # Actualizamos las variables locales tras posibles cambios de los widgets.
+    und_policy = str(st.session_state.get(UND_POLICY_KEY, policy_default))
+    und_value = float(st.session_state.get(UND_VALUE_KEY, value_default))
+    cancer_selected = str(st.session_state.get(STUDY_CANCER_KEY, cancer_default))
+    context_selected = str(st.session_state.get(STUDY_CONTEXT_KEY, context_default))
 
     st.markdown("**Configuración actual del estudio**")
     col_conf1, col_conf2 = st.columns(2)
     with col_conf1:
-        st.info(f"Tipo de cáncer: {app_state.cancer_type or app_config.menu.cancer_types[0]}")
+        st.info(f"Tipo de cáncer: {cancer_selected}")
     with col_conf2:
-        st.info(f"Contexto biológico: {app_state.context_label or app_config.menu.contexts[0].label}")
+        st.info(f"Contexto biológico: {context_selected}")
 
     st.divider()
+
+    long_df, controls_warning = build_long_table(df_loaded)
+    if controls_warning:
+        st.warning(f"No se filtraron los controles de máquina: {controls_warning}")
+
     st.subheader("Clasificación de controles vs muestras")
     st.markdown(
         "El primer paso es definir con precisión **qué pozos corresponden a controles y cuáles a muestras**. "
@@ -824,7 +855,7 @@ def main() -> None:
         "ajuste la regla o utilice la selección manual."
     )
     file_key = f"assign::{df_loaded.source_name}:{df_loaded.sheet_name}"
-    controles_df, muestras_df = _render_classification_ui(long_df, file_key)
+    controles_df, muestras_df = render_classification_section(long_df, file_key)
 
     st.write(f"Controles clasificados: {len(controles_df)} filas")
     st.write(f"Muestras clasificadas: {len(muestras_df)} filas")
@@ -852,11 +883,17 @@ def main() -> None:
     if not imputation.summary.empty:
         st.markdown("**Detalle de imputaciones**")
         st.dataframe(imputation.summary.head(50), width="stretch")
-        st.download_button(
-            "Descargar imputaciones (CSV)",
-            imputation.summary.to_csv(index=False),
+        exports.register_dataframe(
+            key=f"{file_key}::imputaciones",
+            section="Preparación e imputación",
+            label="Detalle de imputaciones",
             file_name="detalle_imputaciones.csv",
-            width="stretch",
+            dataframe=imputation.summary,
+            description="Registro de Ct reemplazados al aplicar la política de valores indeterminados.",
+            parameters={
+                "Política": und_policy,
+                "Valor fijo": und_value if und_policy == "value" else "N/A",
+            },
         )
 
     st.divider()
@@ -906,75 +943,132 @@ def main() -> None:
     adv_key = f"adv::{file_key}"
     adv_state = st.session_state.setdefault(adv_key, {})
 
-    with st.expander("Parámetros", expanded=True):
-        alpha = st.number_input(
-            "Umbral FDR (q)",
-            min_value=0.001,
-            max_value=0.5,
-            value=float(getattr(adv_state.get("params"), "alpha", 0.05)),
-            step=0.005,
-            format="%.3f",
-            key=f"adv_alpha_{adv_key}",
+    with st.expander("Configuración avanzada", expanded=True):
+        stored_params = adv_state.get("params")
+        if "form" not in adv_state:
+            if isinstance(stored_params, AdvancedNormalizationParams):
+                adv_state["form"] = asdict(stored_params)
+            else:
+                adv_state["form"] = asdict(_ADVANCED_PRESETS["Equilibrado"])
+
+        preset_options = [*list(_ADVANCED_PRESETS.keys()), "Personalizado"]
+        preset_key = f"adv_preset_choice_{adv_key}"
+        current_preset = adv_state.get("preset", "Equilibrado")
+        if current_preset not in preset_options:
+            current_preset = "Personalizado"
+
+        selected_preset = st.radio(
+            "Estilo de configuración",
+            options=preset_options,
+            horizontal=True,
+            index=preset_options.index(current_preset),
+            key=preset_key,
+            help="Aplica valores sugeridos para equilibrar rapidez, sensibilidad o exhaustividad.",
         )
-        col_a, col_b, col_c = st.columns(3)
-        with col_a:
+
+        if selected_preset != adv_state.get("preset"):
+            adv_state["preset"] = selected_preset
+            if selected_preset in _ADVANCED_PRESETS:
+                adv_state["form"] = asdict(_ADVANCED_PRESETS[selected_preset])
+
+        form_values = adv_state.get("form", asdict(_ADVANCED_PRESETS["Equilibrado"]))
+        note = _ADVANCED_PRESET_NOTES.get(selected_preset)
+        if note:
+            st.caption(note)
+
+        st.divider()
+        left_col, right_col = st.columns(2, gap="large")
+
+        with left_col:
+            st.markdown("##### Sensibilidad y descubrimiento")
+            alpha = st.slider(
+                "Umbral FDR (q)",
+                min_value=0.001,
+                max_value=0.5,
+                value=float(form_values.get("alpha", 0.05)),
+                step=0.001,
+                help="Controla la tolerancia a falsos positivos tras corrección FDR.",
+            )
             n_candidates = st.slider(
                 "Genes candidatos",
                 min_value=4,
-                max_value=30,
-                value=int(getattr(adv_state.get("params"), "n_candidates", 20)),
+                max_value=32,
+                value=int(form_values.get("n_candidates", 20)),
+                help="Cantidad de genes evaluados como posibles referencias.",
             )
-        with col_b:
+            k_refs_value = int(form_values.get("k_refs", 2))
+            k_refs_options = [1, 2, 3, 4, 5]
+            k_refs_index = k_refs_options.index(k_refs_value) if k_refs_value in k_refs_options else 1
             k_refs = st.selectbox(
-                "Tamaño set referencia",
-                options=[1, 2, 3, 4, 5],
-                index=[1, 2, 3, 4, 5].index(int(getattr(adv_state.get("params"), "k_refs", 2)))
-                if int(getattr(adv_state.get("params"), "k_refs", 2)) in {1, 2, 3, 4, 5}
-                else 1,
+                "Tamaño del set de referencia (K)",
+                options=k_refs_options,
+                index=k_refs_index,
+                help="Número de genes promedio usados como referencia agregada.",
             )
-        with col_c:
-            random_seed = st.number_input(
-                "Semilla aleatoria",
-                value=int(getattr(adv_state.get("params"), "random_seed", 123) or 123),
-                step=1,
-            )
-        col_boot, col_perm = st.columns(2)
-        with col_boot:
-            bootstrap_iter = st.number_input(
+
+        with right_col:
+            st.markdown("##### Robustez y reproducibilidad")
+            bootstrap_iter = st.slider(
                 "Iteraciones bootstrap",
                 min_value=0,
-                max_value=1000,
-                value=int(getattr(adv_state.get("params"), "bootstrap_iter", 200)),
-                step=50,
+                max_value=600,
+                value=int(form_values.get("bootstrap_iter", 200)),
+                step=20,
+                help="Remuestreos internos para estabilizar la selección de referencias.",
             )
-        with col_perm:
-            permutation_iter = st.number_input(
+            permutation_iter = st.slider(
                 "Permutaciones",
                 min_value=0,
-                max_value=600,
-                value=int(getattr(adv_state.get("params"), "permutation_iter", 100)),
+                max_value=400,
+                value=int(form_values.get("permutation_iter", 100)),
                 step=20,
+                help="Intercambios Control/Muestra para estimar tasa de falsos positivos.",
             )
-        st.markdown(
-            """
-            **Interpretación de los parámetros**
+            random_seed = st.number_input(
+                "Semilla aleatoria",
+                value=int(form_values.get("random_seed", 123) or 123),
+                step=1,
+                help="Fija el generador pseudoaleatorio y permite reproducir resultados.",
+            )
 
-            - *Umbral FDR (q)*: nivel de corrección por pruebas múltiples. Valores pequeños (≤0.05) privilegian especificidad; subirlo (0.1) amplía la lista de genes pero aumenta el riesgo de falsos positivos.
-            - *Genes candidatos*: número de genes con menor variabilidad que se exploran como referencias. Un N reducido da rapidez pero puede omitir combinaciones útiles; valores altos permiten descubrir referencias alternativas a costa de mayor tiempo de cómputo.
-            - *Tamaño set referencia (K)*: cantidad de genes que se promedian. K=1 replica el método básico; K≥2 mitiga ruido y sesgos. El sistema garantiza que el número de candidatos sea al menos igual a K; si la cohorte es pequeña, reduzca K para evitar combinaciones imposibles.
-            - *Semilla aleatoria*: fija el generador pseudoaleatorio para reproducir exactamente bootstrap y permutaciones. Cambiarla puede alterar levemente las frecuencias empíricas.
-            - *Iteraciones bootstrap*: número de re-muestreos del conjunto de pruebas. Más iteraciones (≥300) estabilizan la frecuencia de genes significativos; pocas iteraciones agilizan el cálculo pero dan estimaciones más ruidosas.
-            - *Permutaciones*: barajadas Control/Muestra usadas para estimar la tasa de falsos positivos. Incrementarlas (≥200) refina la estimación del FPR; valores bajos aceleran la corrida sacrificando precisión.
-            """
-        )
+        n_candidates = max(int(n_candidates), int(k_refs))
+        st.caption("La app asegura que el número de candidatos siempre sea ≥ K para construir combinaciones válidas.")
+        adv_state["form"] = {
+            "alpha": float(alpha),
+            "n_candidates": n_candidates,
+            "k_refs": int(k_refs),
+            "bootstrap_iter": int(bootstrap_iter),
+            "permutation_iter": int(permutation_iter),
+            "random_seed": int(random_seed),
+        }
+
+        if selected_preset in _ADVANCED_PRESETS:
+            preset_dict = asdict(_ADVANCED_PRESETS[selected_preset])
+            if any(adv_state["form"][key] != preset_dict[key] for key in preset_dict):
+                adv_state["preset"] = "Personalizado"
+                st.session_state[preset_key] = "Personalizado"
+                selected_preset = "Personalizado"
+                st.caption("Has ajustado los valores: el preset se marcó como Personalizado.")
+
+        with st.expander("¿Qué controla cada parámetro?", expanded=False):
+            st.markdown(
+                """
+                - **Umbral FDR (q)**: reduce falsos positivos al precio de omitir señales débiles si es muy estricto.
+                - **Genes candidatos**: explora más combinaciones para encontrar referencias estables.
+                - **Tamaño del set (K)**: promedio de genes usados como ancla; K≥2 amortigua sesgos individuales.
+                - **Bootstrap**: refina la frecuencia con la que aparece cada gen en la referencia.
+                - **Permutaciones**: estima cuántos genes surgirían por azar al intercambiar etiquetas.
+                - **Semilla**: asegura reproducibilidad cuando se comparten resultados con otras personas.
+                """
+            )
 
     params = AdvancedNormalizationParams(
-        alpha=float(alpha),
-        n_candidates=max(int(n_candidates), int(k_refs)),
-        k_refs=int(k_refs),
-        bootstrap_iter=int(bootstrap_iter),
-        permutation_iter=int(permutation_iter),
-        random_seed=int(random_seed),
+        alpha=float(adv_state["form"]["alpha"]),
+        n_candidates=int(adv_state["form"]["n_candidates"]),
+        k_refs=int(adv_state["form"]["k_refs"]),
+        bootstrap_iter=int(adv_state["form"]["bootstrap_iter"]),
+        permutation_iter=int(adv_state["form"]["permutation_iter"]),
+        random_seed=int(adv_state["form"]["random_seed"]),
     )
 
     if st.button("Ejecutar normalización avanzada", key=f"btn_run_adv_{adv_key}", width="stretch"):
@@ -1010,10 +1104,13 @@ def main() -> None:
         f"Resultados vigentes con α={params_used.alpha:.3f}, candidatos={params_used.n_candidates} y K={params_used.k_refs}.",
     )
 
-    expr_summary = _render_advanced_results(result, params_used)
+    expr_summary = _render_advanced_results(result, params_used, exports, adv_key)
     st.session_state["_expression_summary"] = expr_summary
 
     st.divider()
+    st.info(
+        "Las descargas a partir de esta etapa se concentran al final en el panel de exportación consolidado."
+    )
     st.subheader("Expresión relativa comparada (3 métodos)")
     st.markdown(
         "Con la referencia elegida se contrastan **tres enfoques**. Cada heatmap actúa como figura de resultados: "
@@ -1062,6 +1159,37 @@ def main() -> None:
             f"Referencias avanzadas: {refs_adv or 'sin definir'}. Gen de referencia básico: {basic_ref_gene}."
         )
 
+        heatmap_labels = {
+            "advanced": "Matriz avanzada para heatmap",
+            "global_mean": "Matriz promedio global para heatmap",
+            "refgene": f"Matriz gen de referencia ({basic_ref_gene})",
+        }
+        for method_key, label in heatmap_labels.items():
+            export_df = _prepare_heatmap_export(
+                matrices.get(method_key, pd.DataFrame()),
+                zscore=zscore_rows,
+            )
+            if not export_df.empty:
+                exports.register_dataframe(
+                    key=f"{adv_key}::heatmap::{method_key}",
+                    section="Visualizaciones comparativas",
+                    label=label,
+                    file_name=f"heatmap_{method_key}.csv",
+                    dataframe=export_df,
+                    method_label={
+                        "advanced": "Avanzada",
+                        "global_mean": "Promedio global",
+                        "refgene": f"Gen ref ({basic_ref_gene})",
+                    }.get(method_key, method_key),
+                    description="Matriz utilizada para construir el heatmap con dendrogramas.",
+                    parameters={
+                        "Genes": export_df.shape[0],
+                        "Tests": export_df.shape[1],
+                        "z-score": "Sí" if zscore_rows else "No",
+                        "Selección": genes_mode,
+                    },
+                )
+
         tab_adv, tab_gm, tab_ref = st.tabs(["Avanzada", "Promedio global", f"Gen ref básico ({basic_ref_gene})"])
         with tab_adv:
             fig_a = build_dendrogram_heatmap(
@@ -1069,12 +1197,10 @@ def main() -> None:
                 title="Avanzada — z-score por gen" if zscore_rows else "Avanzada",
                 zscore_by_gene=zscore_rows,
             )
-            st.plotly_chart(fig_a, width="stretch")
-            st.download_button(
-                "Descargar matriz avanzada (CSV)",
-                matrices.get("advanced", pd.DataFrame()).to_csv(),
-                file_name="heatmap_avanzada.csv",
+            st.plotly_chart(
+                fig_a,
                 width="stretch",
+                key=f"heatmap_adv::{adv_key}::{genes_mode}::{zscore_rows}",
             )
         with tab_gm:
             fig_g = build_dendrogram_heatmap(
@@ -1082,12 +1208,10 @@ def main() -> None:
                 title="Promedio global — z-score por gen" if zscore_rows else "Promedio global",
                 zscore_by_gene=zscore_rows,
             )
-            st.plotly_chart(fig_g, width="stretch")
-            st.download_button(
-                "Descargar matriz promedio global (CSV)",
-                matrices.get("global_mean", pd.DataFrame()).to_csv(),
-                file_name="heatmap_promedio_global.csv",
+            st.plotly_chart(
+                fig_g,
                 width="stretch",
+                key=f"heatmap_global::{adv_key}::{genes_mode}::{zscore_rows}",
             )
         with tab_ref:
             fig_r = build_dendrogram_heatmap(
@@ -1095,12 +1219,10 @@ def main() -> None:
                 title=f"Gen de referencia ({basic_ref_gene}) — z-score por gen" if zscore_rows else f"Gen de referencia ({basic_ref_gene})",
                 zscore_by_gene=zscore_rows,
             )
-            st.plotly_chart(fig_r, width="stretch")
-            st.download_button(
-                "Descargar matriz gen de referencia (CSV)",
-                matrices.get("refgene", pd.DataFrame()).to_csv(),
-                file_name="heatmap_gen_referencia.csv",
+            st.plotly_chart(
+                fig_r,
                 width="stretch",
+                key=f"heatmap_ref::{adv_key}::{genes_mode}::{zscore_rows}",
             )
 
     st.divider()
@@ -1152,19 +1274,36 @@ def main() -> None:
             )
             col_long, col_pivot = st.columns(2)
             with col_long:
-                st.download_button(
-                    "Descargar formato largo (CSV)",
-                    df_method.to_csv(index=False),
+                exports.register_dataframe(
+                    key=f"{adv_key}::expression::{method_key}::long",
+                    section="Datasets de expresión",
+                    label=f"Dataset en formato largo ({method_labels[method_key]})",
                     file_name=f"expresion_{method_key}_largo.csv",
-                    width="stretch",
+                    dataframe=df_method,
+                    method_label=method_labels[method_key],
+                    description="Tabla long-form con log2(expr) relativa para cada test y gen.",
+                    parameters={
+                        "Genes": df_method["target"].nunique(),
+                        "Tests": df_method["test"].nunique(),
+                    },
                 )
+                st.caption("Disponible en el panel de exportación consolidado.")
             with col_pivot:
-                st.download_button(
-                    "Descargar matriz genes×tests (CSV)",
-                    pivot.to_csv(),
+                exports.register_dataframe(
+                    key=f"{adv_key}::expression::{method_key}::matrix",
+                    section="Datasets de expresión",
+                    label=f"Matriz genes×tests ({method_labels[method_key]})",
                     file_name=f"expresion_{method_key}_matriz.csv",
-                    width="stretch",
+                    dataframe=pivot,
+                    method_label=method_labels[method_key],
+                    description="Matriz pivoteada para análisis estadístico adicional.",
+                    parameters={
+                        "Genes": pivot.shape[0],
+                        "Tests": pivot.shape[1],
+                    },
+                    include_index=True,
                 )
+                st.caption("Disponible en el panel de exportación consolidado.")
 
     st.divider()
     st.subheader("Genes diferencialmente expresados y heatmaps dedicados")
@@ -1225,27 +1364,43 @@ def main() -> None:
         st.success(f"Genes diferencialmente expresados detectados → {counts_msg}")
 
         col_dl1, col_dl2, col_dl3, col_save = st.columns([1, 1, 1, 1])
+        export_gene_labels = {
+            "advanced": ("Genes DE — método avanzado", "genes_significativos_avanzada.csv"),
+            "global_mean": ("Genes DE — promedio global", "genes_significativos_promedio.csv"),
+            "refgene": (
+                f"Genes DE — gen de referencia ({basic_ref_gene})",
+                f"genes_significativos_refgene_{basic_ref_gene}.csv",
+            ),
+        }
+        for method_key, (label, filename) in export_gene_labels.items():
+            genes = gene_lists.get(method_key, [])
+            if genes:
+                exports.register_dataframe(
+                    key=f"{adv_key}::genes::{method_key}",
+                    section="Genes diferencialmente expresados",
+                    label=label,
+                    file_name=filename,
+                    dataframe=pd.DataFrame({"gene": genes}),
+                    method_label={
+                        "advanced": "Avanzada",
+                        "global_mean": "Promedio global",
+                        "refgene": f"Gen ref ({basic_ref_gene})",
+                    }.get(method_key, method_key),
+                    description="Lista priorizada según el método de normalización seleccionado.",
+                    parameters={"α": alpha_sel, "Top fallback": topn_fb},
+                )
         with col_dl1:
-            st.download_button(
-                "Descargar genes DE (avanzada)",
-                pd.DataFrame({"gene": gene_lists.get("advanced", [])}).to_csv(index=False),
-                file_name="genes_significativos_avanzada.csv",
-                width="stretch",
-            )
+            st.metric("Genes DE (avanzada)", len(gene_lists.get("advanced", [])))
+            st.caption("Descarga disponible en el panel consolidado.")
         with col_dl2:
-            st.download_button(
-                "Descargar genes DE (promedio)",
-                pd.DataFrame({"gene": gene_lists.get("global_mean", [])}).to_csv(index=False),
-                file_name="genes_significativos_promedio.csv",
-                width="stretch",
-            )
+            st.metric("Genes DE (promedio)", len(gene_lists.get("global_mean", [])))
+            st.caption("Descarga disponible en el panel consolidado.")
         with col_dl3:
-            st.download_button(
-                f"Descargar genes DE (gen ref: {basic_ref_gene})",
-                pd.DataFrame({"gene": gene_lists.get("refgene", [])}).to_csv(index=False),
-                file_name=f"genes_significativos_refgene_{basic_ref_gene}.csv",
-                width="stretch",
+            st.metric(
+                f"Genes DE (gen ref {basic_ref_gene})",
+                len(gene_lists.get("refgene", [])),
             )
+            st.caption("Descarga disponible en el panel consolidado.")
         with col_save:
             do_save = st.checkbox("Guardar conjuntos en resultados/", value=False, key=f"genes_save::{adv_key}")
             if do_save:
@@ -1257,18 +1412,27 @@ def main() -> None:
         with st.expander("Lista completa de genes a priorizar en etapas posteriores"):
             union_df = pd.DataFrame({"gene": union_genes})
             st.dataframe(union_df, width="stretch", hide_index=True)
-            st.download_button(
-                "Descargar lista unificada (CSV)",
-                union_df.to_csv(index=False),
-                file_name="genes_diferenciales_unificados.csv",
-                width="stretch",
-            )
+            if not union_df.empty:
+                exports.register_dataframe(
+                    key=f"{adv_key}::genes::union",
+                    section="Genes diferencialmente expresados",
+                    label="Lista unificada de genes DE",
+                    file_name="genes_diferenciales_unificados.csv",
+                    dataframe=union_df,
+                    description="Unión de genes significativos detectados por los tres métodos.",
+                    parameters={"α": alpha_sel, "Top fallback": topn_fb},
+                )
+            st.caption("Descarga disponible en el panel consolidado.")
 
         venn_fig = build_three_way_venn(
             gene_lists,
             labels=("Avanzada", "Promedio", f"Gen ref ({basic_ref_gene})"),
         )
-        st.plotly_chart(venn_fig, width="stretch")
+        st.plotly_chart(
+            venn_fig,
+            width="stretch",
+            key=f"venn_diagram::{adv_key}::{selected_method}",
+        )
         st.caption(
             "El diagrama de Venn resume cuántos genes son exclusivos o compartidos por los métodos; "
             "puedes priorizar aquellos en la intersección triple para discusiones posteriores."
@@ -1282,21 +1446,33 @@ def main() -> None:
                 title="Avanzada — genes DE (z-score)" if zscore_rows_bymethod else "Avanzada — genes DE",
                 zscore_by_gene=zscore_rows_bymethod,
             )
-            st.plotly_chart(fig_a2, width="stretch")
+            st.plotly_chart(
+                fig_a2,
+                width="stretch",
+                key=f"heatmap_focus_adv::{adv_key}::{selected_method}",
+            )
         with tab_g2:
             fig_g2 = build_dendrogram_heatmap(
                 matrices_by_method.get("global_mean", pd.DataFrame()),
                 title="Promedio global — genes DE (z-score)" if zscore_rows_bymethod else "Promedio global — genes DE",
                 zscore_by_gene=zscore_rows_bymethod,
             )
-            st.plotly_chart(fig_g2, width="stretch")
+            st.plotly_chart(
+                fig_g2,
+                width="stretch",
+                key=f"heatmap_focus_global::{adv_key}::{selected_method}",
+            )
         with tab_r2:
             fig_r2 = build_dendrogram_heatmap(
                 matrices_by_method.get("refgene", pd.DataFrame()),
                 title=f"Gen de referencia ({basic_ref_gene}) — genes DE (z-score)" if zscore_rows_bymethod else f"Gen de referencia ({basic_ref_gene}) — genes DE",
                 zscore_by_gene=zscore_rows_bymethod,
             )
-            st.plotly_chart(fig_r2, width="stretch")
+            st.plotly_chart(
+                fig_r2,
+                width="stretch",
+                key=f"heatmap_focus_ref::{adv_key}::{selected_method}",
+            )
     except Exception as exc:
         st.info(f"No se pudo calcular la selección por método: {exc}")
 
@@ -1321,13 +1497,52 @@ def main() -> None:
     fc_table = fc_table.sort_values("target").reset_index(drop=True)
 
     st.markdown("**Tabla ΔΔCt (tres métodos)**")
-    st.dataframe(ddct_table, width="stretch")
-    st.download_button(
-        "Descargar tabla ΔΔCt (CSV)",
-        ddct_table.to_csv(index=False),
-        file_name="tabla_delta_delta_ct_3_metodos.csv",
-        width="stretch",
+    total_ddct = int(ddct_table["target"].notna().sum())
+    ddct_neg = int((ddct_table["delta_delta_ct_advanced"] < -0.25).sum())
+    ddct_pos = int((ddct_table["delta_delta_ct_advanced"] > 0.25).sum())
+    ddct_neutral = int(
+        (ddct_table["delta_delta_ct_advanced"].abs() <= 0.25).sum()
     )
+    render_highlight_pills(
+        [
+            Highlight(
+                label="Genes evaluados",
+                value=total_ddct,
+                help="Total de genes presentes tras la normalización consolidada.",
+            ),
+            Highlight(
+                label="ΔΔCt < 0 (sobreexpresados)",
+                value=ddct_neg,
+                help="Genes con ΔΔCt ≤ -0.25 en el método avanzado → sobreexpresión en muestras.",
+            ),
+            Highlight(
+                label="ΔΔCt estable (±0.25)",
+                value=ddct_neutral,
+                help="Genes con variación marginal según el método avanzado (|ΔΔCt| ≤ 0.25).",
+            ),
+            Highlight(
+                label="ΔΔCt > 0 (subexpresados)",
+                value=ddct_pos,
+                help="Genes con ΔΔCt ≥ 0.25 en el método avanzado → subexpresión en muestras.",
+            ),
+        ],
+        key=f"ddct-overview::{adv_key}",
+    )
+    with st.expander("Ver tabla ΔΔCt completa"):
+        st.dataframe(ddct_table, width="stretch")
+    exports.register_dataframe(
+        key=f"{adv_key}::tables::ddct",
+        section="Tablas finales ΔΔCt/FC",
+        label="Tabla ΔΔCt (3 métodos)",
+        file_name="tabla_delta_delta_ct_3_metodos.csv",
+        dataframe=ddct_table,
+        description="ΔΔCt comparativo para los métodos avanzado, promedio y gen de referencia.",
+        parameters={
+            "α": alpha_sel,
+            "Método expresión": method_labels.get(selected_method, selected_method),
+        },
+    )
+    st.caption("Descarga disponible en el panel consolidado.")
 
     ddct_help = {
         "target": "Nombre del gen evaluado.",
@@ -1343,13 +1558,44 @@ def main() -> None:
     fc_table = fc_table.assign(
         max_abs_log2fc=fc_table[["log2fc_advanced", "log2fc_promedio", "log2fc_gen_ref"]].abs().max(axis=1)
     )
-    st.dataframe(fc_table, width="stretch")
-    st.download_button(
-        "Descargar tabla Fold Change (CSV)",
-        fc_table.to_csv(index=False),
-        file_name="tabla_fold_change_3_metodos.csv",
-        width="stretch",
+    high_abs = int((fc_table["max_abs_log2fc"].abs() >= 1).sum())
+    high_adv = int((fc_table["fold_change_advanced"].abs() >= 2).sum())
+    under_adv = int((fc_table["fold_change_advanced"] <= 0.5).sum())
+    render_highlight_pills(
+        [
+            Highlight(
+                label="|log2FC| ≥ 1 (cualquier método)",
+                value=high_abs,
+                help="Genes que alcanzan un cambio de al menos 2× en alguno de los tres métodos.",
+            ),
+            Highlight(
+                label="Sobreexpresión ≥ 2× (Avanzada)",
+                value=high_adv,
+                help="Genes con fold change ≥ 2 bajo el método avanzado.",
+            ),
+            Highlight(
+                label="Subexpresión ≤ 0.5× (Avanzada)",
+                value=under_adv,
+                help="Genes cuyo fold change avanzado sugiere al menos 50% de reducción.",
+            ),
+        ],
+        key=f"fc-overview::{adv_key}",
     )
+    with st.expander("Ver tabla Fold Change completa"):
+        st.dataframe(fc_table, width="stretch")
+    exports.register_dataframe(
+        key=f"{adv_key}::tables::fold_change",
+        section="Tablas finales ΔΔCt/FC",
+        label="Tabla Fold Change (3 métodos)",
+        file_name="tabla_fold_change_3_metodos.csv",
+        dataframe=fc_table,
+        description="Fold change y log2FC comparables entre los tres enfoques de normalización.",
+        parameters={
+            "α": alpha_sel,
+            "Top fallback": topn_fb,
+        },
+    )
+    st.caption("Descarga disponible en el panel consolidado.")
 
     fc_help = {
         "target": "Nombre del gen evaluado.",
@@ -1372,15 +1618,51 @@ def main() -> None:
         "repitiendo el criterio para los tres enfoques. Las columnas `delta_log2fc` muestran cómo difieren "
         "los log2FC entre métodos; valores altos anticipan discrepancias que merecen discusión."
     )
-    st.dataframe(classification_table.head(150), width="stretch")
-    st.download_button(
-        "Descargar clasificaciones (CSV)",
-        classification_table.to_csv(index=False),
-        file_name="clasificacion_niveles_expresion_3_metodos.csv",
-        width="stretch",
+    class_counts = classification_table["clasificacion_advanced"].value_counts().reindex(
+        ["sobreexpresado", "estable", "subexpresado"],
+        fill_value=0,
     )
+    render_highlight_pills(
+        [
+            Highlight(
+                label="Sobreexpresados (Avanzada)",
+                value=int(class_counts["sobreexpresado"]),
+                help="Genes clasificados como sobreexpresados en el método avanzado.",
+            ),
+            Highlight(
+                label="Estables (Avanzada)",
+                value=int(class_counts["estable"]),
+                help="Genes con comportamiento estable (0.5×–2×) según el método avanzado.",
+            ),
+            Highlight(
+                label="Subexpresados (Avanzada)",
+                value=int(class_counts["subexpresado"]),
+                help="Genes clasificados como subexpresados en el método avanzado.",
+            ),
+        ],
+        key=f"classification-overview::{adv_key}",
+    )
+    with st.expander("Ver tabla de clasificación por métodos"):
+        st.dataframe(classification_table, width="stretch")
+    exports.register_dataframe(
+        key=f"{adv_key}::tables::classification",
+        section="Tablas finales ΔΔCt/FC",
+        label="Clasificación de niveles de expresión",
+        file_name="clasificacion_niveles_expresion_3_metodos.csv",
+        dataframe=classification_table,
+        description="Categorización de genes (subexpresado/estable/sobreexpresado) para los tres métodos.",
+        parameters={
+            "α": alpha_sel,
+            "Top fallback": topn_fb,
+        },
+    )
+    st.caption("Descarga disponible en el panel consolidado.")
     class_chart = build_classification_summary_chart(classification_table)
-    st.plotly_chart(class_chart, width="stretch")
+    st.plotly_chart(
+        class_chart,
+        width="stretch",
+        key=f"classification_outcome::{selected_method}",
+    )
     st.caption(
         "La gráfica resume la distribución de niveles de expresión por método, facilitando comparar "
         "si algún enfoque sesga hacia la sobreexpresión o subexpresión." 
@@ -1396,7 +1678,11 @@ def main() -> None:
         q_threshold=float(alpha_sel),
         log2fc_threshold=np.log2(2.0),
     )
-    st.plotly_chart(volcano_fig, width="stretch")
+    st.plotly_chart(
+        volcano_fig,
+        width="stretch",
+        key=f"volcano_plot::{selected_method}",
+    )
     st.caption(
         "El gráfico volcano resume magnitud (log2FC) y significancia (-log10 p). Los genes resaltados superan los umbrales de α y diferencia mínima."
     )
@@ -1420,7 +1706,11 @@ def main() -> None:
         )
         chart_df = fc_table.sort_values("max_abs_log2fc", ascending=False).head(int(top_for_chart))
         chart_fig = build_fc_methods_scatter(chart_df)
-        st.plotly_chart(chart_fig, width="stretch")
+        st.plotly_chart(
+            chart_fig,
+            width="stretch",
+            key=f"export_chart::{adv_key}::{selected_method}::{top_for_chart}",
+        )
         st.caption(
             "Color → log2FC del método de gen de referencia. Tamaño → discrepancia frente al método avanzado."
         )
@@ -1458,17 +1748,36 @@ def main() -> None:
                 disc_df = pd.DataFrame(disc)
                 st.markdown("Genes con mayor discrepancia respecto al método avanzado")
                 st.dataframe(disc_df, width="stretch", hide_index=True)
-                st.download_button(
-                    "Descargar discrepancias (CSV)",
-                    disc_df.to_csv(index=False),
+                exports.register_dataframe(
+                    key=f"{adv_key}::tables::discrepancias",
+                    section="Tablas finales ΔΔCt/FC",
+                    label="Discrepancias vs método avanzado",
                     file_name="discrepancias_vs_avanzado.csv",
-                    width="stretch",
+                    dataframe=disc_df,
+                    description="Genes cuyo log2FC difiere más respecto al método avanzado.",
+                    parameters={
+                        "α": alpha_sel,
+                        "Top fallback": topn_fb,
+                    },
                 )
+                st.caption("Descarga disponible en el panel consolidado.")
 
     st.session_state["fold_change_expression_table"] = classification_table
 
     st.divider()
-    _render_ensembl_section(expr_summary)
+    _render_ensembl_section(expr_summary, exports, adv_key)
+
+    export_context = {
+        "Archivo": f"{df_loaded.source_name} · {df_loaded.sheet_name}" if df_loaded else "Sin archivo",
+        "Tipo de cáncer": cancer_selected,
+        "Contexto biológico": context_selected,
+        "Política ND": f"{und_policy} ({und_value})" if und_policy == "value" else und_policy,
+        "Preset normalización": adv_state.get("preset", "Equilibrado"),
+        "α FDR": f"{params_used.alpha:.3f}",
+        "K refs": params_used.k_refs,
+        "Dataset principal": method_labels.get(selected_method, selected_method),
+    }
+    render_export_panel(exports, study_context=export_context)
 
 
 if __name__ == "__main__":
