@@ -52,7 +52,9 @@ from app.services.qpcr import build_long_table, summarize_extraction
 from app.state import AppSessionState
 from app.ui.components import (
     ExportRegistry,
+    Highlight,
     build_step_sequence,
+    render_highlight_pills,
     render_pipeline_progress,
     render_sidebar_progress,
     render_export_panel,
@@ -1495,7 +1497,39 @@ def main() -> None:
     fc_table = fc_table.sort_values("target").reset_index(drop=True)
 
     st.markdown("**Tabla ΔΔCt (tres métodos)**")
-    st.dataframe(ddct_table, width="stretch")
+    total_ddct = int(ddct_table["target"].notna().sum())
+    ddct_neg = int((ddct_table["delta_delta_ct_advanced"] < -0.25).sum())
+    ddct_pos = int((ddct_table["delta_delta_ct_advanced"] > 0.25).sum())
+    ddct_neutral = int(
+        (ddct_table["delta_delta_ct_advanced"].abs() <= 0.25).sum()
+    )
+    render_highlight_pills(
+        [
+            Highlight(
+                label="Genes evaluados",
+                value=total_ddct,
+                help="Total de genes presentes tras la normalización consolidada.",
+            ),
+            Highlight(
+                label="ΔΔCt < 0 (sobreexpresados)",
+                value=ddct_neg,
+                help="Genes con ΔΔCt ≤ -0.25 en el método avanzado → sobreexpresión en muestras.",
+            ),
+            Highlight(
+                label="ΔΔCt estable (±0.25)",
+                value=ddct_neutral,
+                help="Genes con variación marginal según el método avanzado (|ΔΔCt| ≤ 0.25).",
+            ),
+            Highlight(
+                label="ΔΔCt > 0 (subexpresados)",
+                value=ddct_pos,
+                help="Genes con ΔΔCt ≥ 0.25 en el método avanzado → subexpresión en muestras.",
+            ),
+        ],
+        key=f"ddct-overview::{adv_key}",
+    )
+    with st.expander("Ver tabla ΔΔCt completa"):
+        st.dataframe(ddct_table, width="stretch")
     exports.register_dataframe(
         key=f"{adv_key}::tables::ddct",
         section="Tablas finales ΔΔCt/FC",
@@ -1524,7 +1558,31 @@ def main() -> None:
     fc_table = fc_table.assign(
         max_abs_log2fc=fc_table[["log2fc_advanced", "log2fc_promedio", "log2fc_gen_ref"]].abs().max(axis=1)
     )
-    st.dataframe(fc_table, width="stretch")
+    high_abs = int((fc_table["max_abs_log2fc"].abs() >= 1).sum())
+    high_adv = int((fc_table["fold_change_advanced"].abs() >= 2).sum())
+    under_adv = int((fc_table["fold_change_advanced"] <= 0.5).sum())
+    render_highlight_pills(
+        [
+            Highlight(
+                label="|log2FC| ≥ 1 (cualquier método)",
+                value=high_abs,
+                help="Genes que alcanzan un cambio de al menos 2× en alguno de los tres métodos.",
+            ),
+            Highlight(
+                label="Sobreexpresión ≥ 2× (Avanzada)",
+                value=high_adv,
+                help="Genes con fold change ≥ 2 bajo el método avanzado.",
+            ),
+            Highlight(
+                label="Subexpresión ≤ 0.5× (Avanzada)",
+                value=under_adv,
+                help="Genes cuyo fold change avanzado sugiere al menos 50% de reducción.",
+            ),
+        ],
+        key=f"fc-overview::{adv_key}",
+    )
+    with st.expander("Ver tabla Fold Change completa"):
+        st.dataframe(fc_table, width="stretch")
     exports.register_dataframe(
         key=f"{adv_key}::tables::fold_change",
         section="Tablas finales ΔΔCt/FC",
@@ -1560,7 +1618,32 @@ def main() -> None:
         "repitiendo el criterio para los tres enfoques. Las columnas `delta_log2fc` muestran cómo difieren "
         "los log2FC entre métodos; valores altos anticipan discrepancias que merecen discusión."
     )
-    st.dataframe(classification_table.head(150), width="stretch")
+    class_counts = classification_table["clasificacion_advanced"].value_counts().reindex(
+        ["sobreexpresado", "estable", "subexpresado"],
+        fill_value=0,
+    )
+    render_highlight_pills(
+        [
+            Highlight(
+                label="Sobreexpresados (Avanzada)",
+                value=int(class_counts["sobreexpresado"]),
+                help="Genes clasificados como sobreexpresados en el método avanzado.",
+            ),
+            Highlight(
+                label="Estables (Avanzada)",
+                value=int(class_counts["estable"]),
+                help="Genes con comportamiento estable (0.5×–2×) según el método avanzado.",
+            ),
+            Highlight(
+                label="Subexpresados (Avanzada)",
+                value=int(class_counts["subexpresado"]),
+                help="Genes clasificados como subexpresados en el método avanzado.",
+            ),
+        ],
+        key=f"classification-overview::{adv_key}",
+    )
+    with st.expander("Ver tabla de clasificación por métodos"):
+        st.dataframe(classification_table, width="stretch")
     exports.register_dataframe(
         key=f"{adv_key}::tables::classification",
         section="Tablas finales ΔΔCt/FC",

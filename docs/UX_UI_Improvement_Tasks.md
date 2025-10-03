@@ -48,3 +48,4 @@ Cada tarea debe abordarse manteniendo el rigor científico del flujo, pero prior
 ### Etapa 5 — Descargas y resultados más accesibles
 - ✅ Se creó un registro centralizado de artefactos (`ExportRegistry`) y un panel de exportación consolidado que agrupa las descargas clave por sección con metadatos de contexto (`web_app/app/ui/components/exports.py`, `web_app/streamlit_app.py`).
 - ✅ Las descargas dispersas se reemplazaron por registros automáticos que capturan política de imputación, presets de normalización y método seleccionado, simplificando la trazabilidad y evitando botones repetidos (`web_app/streamlit_app.py`).
+- ✅ Las tablas extensas ahora se presentan bajo demanda acompañadas de resúmenes en formato "pills", reduciendo la carga cognitiva y destacando KPIs antes de revisar los datos completos (`web_app/app/ui/components/highlights.py`, `web_app/streamlit_app.py`).
