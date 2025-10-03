@@ -275,31 +275,6 @@ def save_gene_sets(
     return paths
 
 
-def build_expression_datasets(
-    controles: pd.DataFrame,
-    muestras: pd.DataFrame,
-    adv_result: AdvancedNormalizationResult,
-    *,
-    include_reference_ct: bool = True,
-) -> tuple[dict[str, pd.DataFrame], str]:
-    """Devuelve DataFrames normalizados (formato largo) para cada método."""
-
-    gm_norm, ref_norm, basic_ref_gene = compute_basic_normalizations(controles, muestras, adv_result)
-
-    datasets: dict[str, pd.DataFrame] = {
-        "advanced": adv_result.df_norm.copy(),
-        "global_mean": gm_norm.copy(),
-        "refgene": ref_norm.copy(),
-    }
-
-    if not include_reference_ct:
-        for df in datasets.values():
-            for col in ("ref_ct",):
-                if col in df.columns:
-                    df.drop(columns=col, inplace=True)
-
-    return datasets, basic_ref_gene
-
 
 def build_combined_ddct_fc_tables(
     adv_result: AdvancedNormalizationResult,
@@ -361,6 +336,5 @@ __all__ += [
     "detect_significant_genes_by_method",
     "build_heatmaps_by_method",
     "save_gene_sets",
-    "build_expression_datasets",
     "build_combined_ddct_fc_tables",
 ]

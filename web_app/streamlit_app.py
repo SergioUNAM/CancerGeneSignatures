@@ -33,7 +33,6 @@ from app.services.normalization import (
     AdvancedNormalizationParams,
     AdvancedNormalizationResult,
     build_combined_ddct_fc_tables,
-    build_expression_datasets,
     build_heatmaps_by_method,
     build_method_matrices,
     execute_advanced_normalization,
@@ -43,7 +42,6 @@ from app.services.fold_change_visuals import (
     build_fc_methods_scatter,
     build_expression_classification_table,
     build_classification_summary_chart,
-    build_three_way_venn,
     build_volcano_plot,
     summarize_fc_methods,
 )
@@ -58,6 +56,13 @@ from app.ui.components import (
     render_pipeline_progress,
     render_sidebar_progress,
     render_export_panel,
+    # New compact insight board
+    Badge,
+    Card,
+    render_insight_board,
+    # New generic cards
+    InfoCard,
+    render_info_cards,
 )
 from app.ui.sections import render_classification_section
 
@@ -608,7 +613,7 @@ def main() -> None:
             "1) Carga el archivo Excel y revisa pozos problemáticos u outliers.\n"
             "2) Clasifica controles y muestras (prefijos, sufijos, regex o selección manual).\n"
             "3) Elige la política para valores indeterminados y revisa las métricas de calidad.\n"
-            "4) Ejecuta la **normalización avanzada** y explora heatmaps, diagrama de Venn y volcano plot.\n"
+            "4) Ejecuta la **normalización avanzada** y explora heatmaps y volcano plot.\n"
             "5) Exporta datasets, listas de genes y las anotaciones Ensembl."
         )
 
@@ -763,16 +768,55 @@ def main() -> None:
     st.subheader("Resumen de extracción")
     try:
         extraction = summarize_extraction(df_loaded)
-        st.info(
-            f"Pruebas detectadas ({len(extraction.sample_names)}): "
-            f"{', '.join(extraction.sample_names)}"
+        tests = list(extraction.sample_names)
+        genes = list(extraction.genes)
+        wells = list(extraction.wells)
+
+        # Board 1: Pruebas y Pozos, usando la paleta del insight board
+        render_insight_board(
+            badges=[
+                Badge(label="Extracción", tone="primary"),
+                Badge(label=f"Archivo: {df_loaded.source_name}", tone="muted"),
+                Badge(label=f"Hoja: {df_loaded.sheet_name or '-'}", tone="muted"),
+            ],
+            left=Card(title="Pruebas detectadas", count=len(tests), chips=tests),
+            right=Card(title="Pozos detectados", count=len(wells), chips=wells),
+            footer_text=f"Listas detectadas → {len(tests)} pruebas · {len(wells)} pozos.",
+            variant="light",
+            key=f"extraction-board-main::{df_loaded.source_name}:{df_loaded.sheet_name}",
         )
-        st.info(
-            f"Genes objetivo ({len(extraction.genes)}): {', '.join(extraction.genes)}"
+
+        # Board 2: Targets — separa genes vs controles de máquina, muestra todos los chips
+        control_markers = ["PPC", "RTC"]
+        machine_controls = [g for g in genes if str(g).upper() in {m.upper() for m in control_markers}]
+        gene_targets = [g for g in genes if str(g).upper() not in {m.upper() for m in control_markers}]
+
+        # Single-column board: combina genes + controles, resaltando controles
+        combined = gene_targets + machine_controls
+        render_insight_board(
+            badges=[
+                Badge(label="Targets (genes + controles)", tone="success"),
+                Badge(label=f"Total: {len(combined)}", tone="muted"),
+                Badge(label=f"Controles: {len(machine_controls)}", tone="warning"),
+            ],
+            left=Card(
+                title="Listado de targets",
+                count=len(combined),
+                chips=combined,
+                chips_max=None,
+                accent_chips=machine_controls,
+                accent_tone="danger",
+            ),
+            right=None,
+            footer_text=f"Genes: {len(gene_targets)} · Controles: {len(machine_controls)}.",
+            variant="light",
+            key=f"extraction-board-targets::{df_loaded.source_name}:{df_loaded.sheet_name}",
         )
-        st.info(
-            f"Pozos detectados ({len(extraction.wells)}): {', '.join(extraction.wells)}"
-        )
+
+        with st.expander("Ver listas completas de extracción"):
+            st.markdown(f"- Pruebas ({len(tests)}): {', '.join(tests)}")
+            st.markdown(f"- Pozos ({len(wells)}): {', '.join(wells)}")
+            st.markdown(f"- Genes ({len(genes)}): {', '.join(genes)}")
     except Exception as exc:
         st.warning(f"No se pudo generar el resumen: {exc}")
 
@@ -1111,371 +1155,306 @@ def main() -> None:
     st.info(
         "Las descargas a partir de esta etapa se concentran al final en el panel de exportación consolidado."
     )
-    st.subheader("Expresión relativa comparada (3 métodos)")
+    st.subheader("Expresión y genes diferenciales (3 métodos)")
     st.markdown(
-        "Con la referencia elegida se contrastan **tres enfoques**. Cada heatmap actúa como figura de resultados: "
-        "es posible mostrar únicamente los genes significativos o todo el panel, según se busque una narrativa focalizada "
-        "o un contexto más amplio."
+        "Compara perfiles de expresión y, cuando corresponda, resalta los **genes diferencialmente expresados**. "
+        "Usa el selector para alternar entre una vista global y la vista enfocada en DE."
+    )
+    view_mode = st.radio(
+        "Vista",
+        options=["Comparativa de expresión", "Genes diferenciales"],
+        horizontal=True,
+        key=f"expr_view::{adv_key}",
     )
     st.caption(
-        "Columnas homogéneas sugieren consistencia entre muestras, mientras que bandas horizontales intensas reflejan genes con cambios robustos."
+        "Comparativa de expresión: evalúa patrones generales por método. Genes diferenciales: concentra la visualización en genes con evidencia (q)."
     )
-    genes_all = sorted(result.df_norm["target"].dropna().astype(str).unique().tolist())
-    if not genes_all:
-        st.warning("No se encontraron genes para construir el comparativo de expresión.")
-    else:
-        col_opts1, col_opts2 = st.columns([2, 1])
-        with col_opts1:
-            genes_mode = st.radio(
-                "Genes para heatmap",
-                options=["Significativos/Top-20", "Panel completo (todos)"],
-                horizontal=True,
-                help="Elige si visualizar únicamente los genes destacados o todo el panel disponible.",
-                key=f"heatmap_mode::{adv_key}",
-            )
-        with col_opts2:
-            zscore_rows = st.checkbox(
-                "Estandarizar por gen (z-score)",
-                value=True,
-                help="Normaliza cada fila para resaltar patrones relativos entre tests.",
-                key=f"heatmap_zscore::{adv_key}",
-            )
-
-        _notify_parameter_change(
-            f"heatmap_comparativo::{adv_key}",
-            (genes_mode, zscore_rows),
-            "Heatmaps recalculados con los parámetros seleccionados.",
-        )
-
-        genes_for_heatmap = genes_all if genes_mode.endswith("(todos)") else None
-        matrices, basic_ref_gene = build_method_matrices(
-            controles_df,
-            muestras_df,
-            result,
-            genes_for_heatmap=genes_for_heatmap,
-        )
-        refs_adv = ", ".join(result.reference_result.references)
-        st.caption(
-            f"Referencias avanzadas: {refs_adv or 'sin definir'}. Gen de referencia básico: {basic_ref_gene}."
-        )
-
-        heatmap_labels = {
-            "advanced": "Matriz avanzada para heatmap",
-            "global_mean": "Matriz promedio global para heatmap",
-            "refgene": f"Matriz gen de referencia ({basic_ref_gene})",
-        }
-        for method_key, label in heatmap_labels.items():
-            export_df = _prepare_heatmap_export(
-                matrices.get(method_key, pd.DataFrame()),
-                zscore=zscore_rows,
-            )
-            if not export_df.empty:
-                exports.register_dataframe(
-                    key=f"{adv_key}::heatmap::{method_key}",
-                    section="Visualizaciones comparativas",
-                    label=label,
-                    file_name=f"heatmap_{method_key}.csv",
-                    dataframe=export_df,
-                    method_label={
-                        "advanced": "Avanzada",
-                        "global_mean": "Promedio global",
-                        "refgene": f"Gen ref ({basic_ref_gene})",
-                    }.get(method_key, method_key),
-                    description="Matriz utilizada para construir el heatmap con dendrogramas.",
-                    parameters={
-                        "Genes": export_df.shape[0],
-                        "Tests": export_df.shape[1],
-                        "z-score": "Sí" if zscore_rows else "No",
-                        "Selección": genes_mode,
-                    },
+    if view_mode == "Comparativa de expresión":
+        genes_all = sorted(result.df_norm["target"].dropna().astype(str).unique().tolist())
+        if not genes_all:
+            st.warning("No se encontraron genes para construir el comparativo de expresión.")
+        else:
+            col_opts1, col_opts2 = st.columns([2, 1])
+            with col_opts1:
+                genes_mode = st.radio(
+                    "Genes para heatmap",
+                    options=["Top-20 (según score)", "Panel completo (todos)"],
+                    horizontal=True,
+                    help="Elige si visualizar únicamente un subconjunto informativo o todo el panel disponible.",
+                    key=f"heatmap_mode::{adv_key}",
+                )
+            with col_opts2:
+                zscore_rows = st.checkbox(
+                    "Estandarizar por gen (z-score)",
+                    value=True,
+                    help="Normaliza cada fila para resaltar patrones relativos entre tests.",
+                    key=f"heatmap_zscore::{adv_key}",
                 )
 
-        tab_adv, tab_gm, tab_ref = st.tabs(["Avanzada", "Promedio global", f"Gen ref básico ({basic_ref_gene})"])
-        with tab_adv:
-            fig_a = build_dendrogram_heatmap(
-                matrices.get("advanced", pd.DataFrame()),
-                title="Avanzada — z-score por gen" if zscore_rows else "Avanzada",
-                zscore_by_gene=zscore_rows,
-            )
-            st.plotly_chart(
-                fig_a,
-                width="stretch",
-                key=f"heatmap_adv::{adv_key}::{genes_mode}::{zscore_rows}",
-            )
-        with tab_gm:
-            fig_g = build_dendrogram_heatmap(
-                matrices.get("global_mean", pd.DataFrame()),
-                title="Promedio global — z-score por gen" if zscore_rows else "Promedio global",
-                zscore_by_gene=zscore_rows,
-            )
-            st.plotly_chart(
-                fig_g,
-                width="stretch",
-                key=f"heatmap_global::{adv_key}::{genes_mode}::{zscore_rows}",
-            )
-        with tab_ref:
-            fig_r = build_dendrogram_heatmap(
-                matrices.get("refgene", pd.DataFrame()),
-                title=f"Gen de referencia ({basic_ref_gene}) — z-score por gen" if zscore_rows else f"Gen de referencia ({basic_ref_gene})",
-                zscore_by_gene=zscore_rows,
-            )
-            st.plotly_chart(
-                fig_r,
-                width="stretch",
-                key=f"heatmap_ref::{adv_key}::{genes_mode}::{zscore_rows}",
+            _notify_parameter_change(
+                f"heatmap_comparativo::{adv_key}",
+                (genes_mode, zscore_rows),
+                "Heatmaps recalculados con los parámetros seleccionados.",
             )
 
-    st.divider()
-    st.subheader("Datasets de niveles de expresión por método")
-    st.markdown(
-        "Se generan los conjuntos de datos que alimentarán los análisis posteriores. Seleccionar un método equivale a fijar el **marco de referencia** "
-        "para interpretar resultados subsecuentes. Cada pestaña ofrece formato largo y matriz genes×tests."
-    )
-    st.caption(
-        "Es recomendable conservar los tres para justificar comparaciones y la elección metodológica en la discusión."
-    )
-    expression_datasets, basic_ref_gene_expr = build_expression_datasets(
-        controles_df, muestras_df, result
-    )
+            genes_for_heatmap = genes_all if genes_mode.endswith("(todos)") else None
+            matrices, basic_ref_gene = build_method_matrices(
+                controles_df,
+                muestras_df,
+                result,
+                genes_for_heatmap=genes_for_heatmap,
+            )
+            st.session_state["_basic_ref_gene"] = basic_ref_gene
+            refs_adv = ", ".join(result.reference_result.references)
+            st.caption(
+                f"Referencias avanzadas: {refs_adv or 'sin definir'}. Gen de referencia básico: {basic_ref_gene}."
+            )
+
+            heatmap_labels = {
+                "advanced": "Matriz avanzada para heatmap",
+                "global_mean": "Matriz promedio global para heatmap",
+                "refgene": f"Matriz gen de referencia ({basic_ref_gene})",
+            }
+            for method_key, label in heatmap_labels.items():
+                export_df = _prepare_heatmap_export(
+                    matrices.get(method_key, pd.DataFrame()),
+                    zscore=zscore_rows,
+                )
+                if not export_df.empty:
+                    exports.register_dataframe(
+                        key=f"{adv_key}::heatmap::{method_key}",
+                        section="Visualizaciones comparativas",
+                        label=label,
+                        file_name=f"heatmap_{method_key}.csv",
+                        dataframe=export_df,
+                        method_label={
+                            "advanced": "Avanzada",
+                            "global_mean": "Promedio global",
+                            "refgene": f"Gen ref ({basic_ref_gene})",
+                        }.get(method_key, method_key),
+                        description="Matriz utilizada para construir el heatmap con dendrogramas.",
+                        parameters={
+                            "Genes": export_df.shape[0],
+                            "Tests": export_df.shape[1],
+                            "z-score": "Sí" if zscore_rows else "No",
+                            "Selección": genes_mode,
+                        },
+                    )
+
+            tab_adv, tab_gm, tab_ref = st.tabs(["Avanzada", "Promedio global", f"Gen ref básico ({basic_ref_gene})"])
+            with tab_adv:
+                fig_a = build_dendrogram_heatmap(
+                    matrices.get("advanced", pd.DataFrame()),
+                    title="Avanzada — z-score por gen" if zscore_rows else "Avanzada",
+                    zscore_by_gene=zscore_rows,
+                )
+                st.plotly_chart(
+                    fig_a,
+                    width="stretch",
+                    key=f"heatmap_adv::{adv_key}::{genes_mode}::{zscore_rows}",
+                )
+            with tab_gm:
+                fig_g = build_dendrogram_heatmap(
+                    matrices.get("global_mean", pd.DataFrame()),
+                    title="Promedio global — z-score por gen" if zscore_rows else "Promedio global",
+                    zscore_by_gene=zscore_rows,
+                )
+                st.plotly_chart(
+                    fig_g,
+                    width="stretch",
+                    key=f"heatmap_global::{adv_key}::{genes_mode}::{zscore_rows}",
+                )
+            with tab_ref:
+                fig_r = build_dendrogram_heatmap(
+                    matrices.get("refgene", pd.DataFrame()),
+                    title=f"Gen de referencia ({basic_ref_gene}) — z-score por gen" if zscore_rows else f"Gen de referencia ({basic_ref_gene})",
+                    zscore_by_gene=zscore_rows,
+                )
+                st.plotly_chart(
+                    fig_r,
+                    width="stretch",
+                    key=f"heatmap_ref::{adv_key}::{genes_mode}::{zscore_rows}",
+                )
+
+    # Nota: Se eliminó la sección de "Datasets de niveles de expresión por método".
+    # Tomamos el gen de referencia básico desde el estado (lo setea la vista activa).
+    basic_ref_gene_expr = st.session_state.get("_basic_ref_gene", "N/A")
     method_labels = {
         "advanced": "Avanzada (referencias seleccionadas)",
         "global_mean": "Promedio global por test",
         "refgene": f"Gen de referencia básico ({basic_ref_gene_expr})",
     }
-    default_method = st.session_state.get("selected_expression_method", "advanced")
-    selected_method = st.radio(
-        "Selecciona el dataset principal para las siguientes secciones",
-        options=list(method_labels.keys()),
-        index=list(method_labels.keys()).index(default_method) if default_method in method_labels else 0,
-        format_func=lambda key: method_labels.get(key, key),
-        key=f"expr_dataset::{adv_key}",
-    )
-    _notify_parameter_change(
-        f"expr_dataset_choice::{adv_key}",
-        selected_method,
-        f"Trabajando con el dataset '{method_labels.get(selected_method, selected_method)}'.",
-    )
-    st.session_state["selected_expression_method"] = selected_method
+    alpha_sel = float(st.session_state.get(f"genes_alpha::{adv_key}", 0.05))
+    topn_fb = int(st.session_state.get(f"genes_topn::{adv_key}", 20))
+    selected_method = "advanced"
 
-    tabs_expr = st.tabs([method_labels[m] for m in method_labels])
-    for method_key, tab in zip(method_labels.keys(), tabs_expr):
-        with tab:
-            df_method = expression_datasets.get(method_key, pd.DataFrame()).copy()
-            if df_method.empty:
-                st.warning("No hay datos disponibles para este método.")
-                continue
-            st.caption(
-                f"Filas: {len(df_method)}, genes únicos: {df_method['target'].nunique()}, tests: {df_method['test'].nunique()}"
-            )
-            st.dataframe(df_method.head(100), width="stretch")
-            pivot = (
-                df_method.pivot_table(index="target", columns="test", values="log2_rel_expr", aggfunc="mean")
-                .sort_index()
-            )
-            col_long, col_pivot = st.columns(2)
-            with col_long:
-                exports.register_dataframe(
-                    key=f"{adv_key}::expression::{method_key}::long",
-                    section="Datasets de expresión",
-                    label=f"Dataset en formato largo ({method_labels[method_key]})",
-                    file_name=f"expresion_{method_key}_largo.csv",
-                    dataframe=df_method,
-                    method_label=method_labels[method_key],
-                    description="Tabla long-form con log2(expr) relativa para cada test y gen.",
-                    parameters={
-                        "Genes": df_method["target"].nunique(),
-                        "Tests": df_method["test"].nunique(),
-                    },
-                )
-                st.caption("Disponible en el panel de exportación consolidado.")
-            with col_pivot:
-                exports.register_dataframe(
-                    key=f"{adv_key}::expression::{method_key}::matrix",
-                    section="Datasets de expresión",
-                    label=f"Matriz genes×tests ({method_labels[method_key]})",
-                    file_name=f"expresion_{method_key}_matriz.csv",
-                    dataframe=pivot,
-                    method_label=method_labels[method_key],
-                    description="Matriz pivoteada para análisis estadístico adicional.",
-                    parameters={
-                        "Genes": pivot.shape[0],
-                        "Tests": pivot.shape[1],
-                    },
-                    include_index=True,
-                )
-                st.caption("Disponible en el panel de exportación consolidado.")
-
-    st.divider()
-    st.subheader("Genes diferencialmente expresados y heatmaps dedicados")
-    st.markdown(
-        "Se listan los genes que distinguen consistentemente a los grupos según cada método. "
-        "La lista unificada constituye la base para la interpretación biológica y la búsqueda bibliográfica."
-    )
-    st.caption(
-        "La intersección triple en el diagrama de Venn suele señalar candidatos robustos; los exclusivos pueden evidenciar efectos dependientes del método de normalización."
-    )
-    try:
-        col_params1, col_params2, col_params3 = st.columns([1, 1, 1])
-        with col_params1:
-            alpha_sel = st.number_input(
-                "Alpha FDR (q)",
-                min_value=0.001,
-                max_value=0.25,
-                value=0.05,
-                step=0.005,
-                format="%.3f",
-                key=f"genes_alpha::{adv_key}",
-            )
-        with col_params2:
-            topn_fb = st.number_input(
-                "Top-N fallback si no hay DE",
-                min_value=5,
-                max_value=100,
-                value=20,
-                step=5,
-                key=f"genes_topn::{adv_key}",
-            )
-        with col_params3:
-            zscore_rows_bymethod = st.checkbox(
-                "Estandarizar por gen (z-score)",
-                value=True,
-                key=f"genes_zscore::{adv_key}",
-            )
-
-        _notify_parameter_change(
-            f"genes_de_params::{adv_key}",
-            (alpha_sel, topn_fb, zscore_rows_bymethod),
-            "Recalculando genes diferencialmente expresados con los parámetros indicados… listo.",
-        )
-
-        matrices_by_method, gene_lists, stats_by_method, basic_ref_gene = build_heatmaps_by_method(
-            controles_df,
-            muestras_df,
-            result,
-            alpha=float(alpha_sel),
-            top_n_fallback=int(topn_fb),
-        )
-
-        counts_msg = (
-            f"Avanzada: {len(gene_lists.get('advanced', []))} | "
-            f"Promedio: {len(gene_lists.get('global_mean', []))} | "
-            f"Gen ref ({basic_ref_gene}): {len(gene_lists.get('refgene', []))}"
-        )
-        st.success(f"Genes diferencialmente expresados detectados → {counts_msg}")
-
-        col_dl1, col_dl2, col_dl3, col_save = st.columns([1, 1, 1, 1])
-        export_gene_labels = {
-            "advanced": ("Genes DE — método avanzado", "genes_significativos_avanzada.csv"),
-            "global_mean": ("Genes DE — promedio global", "genes_significativos_promedio.csv"),
-            "refgene": (
-                f"Genes DE — gen de referencia ({basic_ref_gene})",
-                f"genes_significativos_refgene_{basic_ref_gene}.csv",
-            ),
-        }
-        for method_key, (label, filename) in export_gene_labels.items():
-            genes = gene_lists.get(method_key, [])
-            if genes:
-                exports.register_dataframe(
-                    key=f"{adv_key}::genes::{method_key}",
-                    section="Genes diferencialmente expresados",
-                    label=label,
-                    file_name=filename,
-                    dataframe=pd.DataFrame({"gene": genes}),
-                    method_label={
-                        "advanced": "Avanzada",
-                        "global_mean": "Promedio global",
-                        "refgene": f"Gen ref ({basic_ref_gene})",
-                    }.get(method_key, method_key),
-                    description="Lista priorizada según el método de normalización seleccionado.",
-                    parameters={"α": alpha_sel, "Top fallback": topn_fb},
-                )
-        with col_dl1:
-            st.metric("Genes DE (avanzada)", len(gene_lists.get("advanced", [])))
-            st.caption("Descarga disponible en el panel consolidado.")
-        with col_dl2:
-            st.metric("Genes DE (promedio)", len(gene_lists.get("global_mean", [])))
-            st.caption("Descarga disponible en el panel consolidado.")
-        with col_dl3:
-            st.metric(
-                f"Genes DE (gen ref {basic_ref_gene})",
-                len(gene_lists.get("refgene", [])),
-            )
-            st.caption("Descarga disponible en el panel consolidado.")
-        with col_save:
-            do_save = st.checkbox("Guardar conjuntos en resultados/", value=False, key=f"genes_save::{adv_key}")
-            if do_save:
-                paths = save_gene_sets(gene_lists, basic_ref_gene=str(basic_ref_gene))
-                st.caption("Guardado: " + ", ".join(f"{k}: {v}" for k, v in paths.items()))
-
-        union_genes = sorted(set().union(*gene_lists.values())) if gene_lists else []
-        st.session_state["genes_heatmap_union"] = union_genes
-        with st.expander("Lista completa de genes a priorizar en etapas posteriores"):
-            union_df = pd.DataFrame({"gene": union_genes})
-            st.dataframe(union_df, width="stretch", hide_index=True)
-            if not union_df.empty:
-                exports.register_dataframe(
-                    key=f"{adv_key}::genes::union",
-                    section="Genes diferencialmente expresados",
-                    label="Lista unificada de genes DE",
-                    file_name="genes_diferenciales_unificados.csv",
-                    dataframe=union_df,
-                    description="Unión de genes significativos detectados por los tres métodos.",
-                    parameters={"α": alpha_sel, "Top fallback": topn_fb},
-                )
-            st.caption("Descarga disponible en el panel consolidado.")
-
-        venn_fig = build_three_way_venn(
-            gene_lists,
-            labels=("Avanzada", "Promedio", f"Gen ref ({basic_ref_gene})"),
-        )
-        st.plotly_chart(
-            venn_fig,
-            width="stretch",
-            key=f"venn_diagram::{adv_key}::{selected_method}",
+    if view_mode == "Genes diferenciales":
+        st.divider()
+        st.markdown(
+            "Se listan los genes que distinguen consistentemente a los grupos según cada método. "
+            "La lista unificada constituye la base para la interpretación biológica y la búsqueda bibliográfica."
         )
         st.caption(
-            "El diagrama de Venn resume cuántos genes son exclusivos o compartidos por los métodos; "
-            "puedes priorizar aquellos en la intersección triple para discusiones posteriores."
+            "La concordancia entre métodos suele señalar candidatos robustos; los exclusivos pueden evidenciar efectos dependientes del método de normalización."
         )
+        try:
+            col_params1, col_params2, col_params3 = st.columns([1, 1, 1])
+            with col_params1:
+                alpha_sel = st.number_input(
+                    "Alpha FDR (q)",
+                    min_value=0.001,
+                    max_value=0.25,
+                    value=0.05,
+                    step=0.005,
+                    format="%.3f",
+                    key=f"genes_alpha::{adv_key}",
+                )
+            with col_params2:
+                topn_fb = st.number_input(
+                    "Top-N fallback si no hay DE",
+                    min_value=5,
+                    max_value=100,
+                    value=20,
+                    step=5,
+                    key=f"genes_topn::{adv_key}",
+                )
+            with col_params3:
+                zscore_rows_bymethod = st.checkbox(
+                    "Estandarizar por gen (z-score)",
+                    value=True,
+                    key=f"genes_zscore::{adv_key}",
+                )
 
-        st.write("Heatmaps por método con sus propios genes DE")
-        tab_a2, tab_g2, tab_r2 = st.tabs(["Avanzada (DE)", "Promedio (DE)", f"Gen ref (DE: {basic_ref_gene})"])
-        with tab_a2:
-            fig_a2 = build_dendrogram_heatmap(
-                matrices_by_method.get("advanced", pd.DataFrame()),
-                title="Avanzada — genes DE (z-score)" if zscore_rows_bymethod else "Avanzada — genes DE",
-                zscore_by_gene=zscore_rows_bymethod,
+            _notify_parameter_change(
+                f"genes_de_params::{adv_key}",
+                (alpha_sel, topn_fb, zscore_rows_bymethod),
+                "Recalculando genes diferencialmente expresados con los parámetros indicados… listo.",
             )
-            st.plotly_chart(
-                fig_a2,
-                width="stretch",
-                key=f"heatmap_focus_adv::{adv_key}::{selected_method}",
-            )
-        with tab_g2:
-            fig_g2 = build_dendrogram_heatmap(
-                matrices_by_method.get("global_mean", pd.DataFrame()),
-                title="Promedio global — genes DE (z-score)" if zscore_rows_bymethod else "Promedio global — genes DE",
-                zscore_by_gene=zscore_rows_bymethod,
-            )
-            st.plotly_chart(
-                fig_g2,
-                width="stretch",
-                key=f"heatmap_focus_global::{adv_key}::{selected_method}",
-            )
-        with tab_r2:
-            fig_r2 = build_dendrogram_heatmap(
-                matrices_by_method.get("refgene", pd.DataFrame()),
-                title=f"Gen de referencia ({basic_ref_gene}) — genes DE (z-score)" if zscore_rows_bymethod else f"Gen de referencia ({basic_ref_gene}) — genes DE",
-                zscore_by_gene=zscore_rows_bymethod,
-            )
-            st.plotly_chart(
-                fig_r2,
-                width="stretch",
-                key=f"heatmap_focus_ref::{adv_key}::{selected_method}",
-            )
-    except Exception as exc:
-        st.info(f"No se pudo calcular la selección por método: {exc}")
 
+            matrices_by_method, gene_lists, stats_by_method, basic_ref_gene = build_heatmaps_by_method(
+                controles_df,
+                muestras_df,
+                result,
+                alpha=float(alpha_sel),
+                top_n_fallback=int(topn_fb),
+            )
+            st.session_state["_basic_ref_gene"] = basic_ref_gene
+
+            counts_msg = (
+                f"Avanzada: {len(gene_lists.get('advanced', []))} | "
+                f"Promedio: {len(gene_lists.get('global_mean', []))} | "
+                f"Gen ref ({basic_ref_gene}): {len(gene_lists.get('refgene', []))}"
+            )
+            st.success(f"Genes diferencialmente expresados detectados → {counts_msg}")
+
+            col_dl1, col_dl2, col_dl3, col_save = st.columns([1, 1, 1, 1])
+            export_gene_labels = {
+                "advanced": ("Genes DE — método avanzado", "genes_significativos_avanzada.csv"),
+                "global_mean": ("Genes DE — promedio global", "genes_significativos_promedio.csv"),
+                "refgene": (
+                    f"Genes DE — gen de referencia ({basic_ref_gene})",
+                    f"genes_significativos_refgene_{basic_ref_gene}.csv",
+                ),
+            }
+            for method_key, (label, filename) in export_gene_labels.items():
+                genes = gene_lists.get(method_key, [])
+                if genes:
+                    exports.register_dataframe(
+                        key=f"{adv_key}::genes::{method_key}",
+                        section="Genes diferencialmente expresados",
+                        label=label,
+                        file_name=filename,
+                        dataframe=pd.DataFrame({"gene": genes}),
+                        method_label={
+                            "advanced": "Avanzada",
+                            "global_mean": "Promedio global",
+                            "refgene": f"Gen ref ({basic_ref_gene})",
+                        }.get(method_key, method_key),
+                        description="Lista priorizada según el método de normalización seleccionado.",
+                        parameters={"α": alpha_sel, "Top fallback": topn_fb},
+                    )
+            with col_dl1:
+                st.metric("Genes DE (avanzada)", len(gene_lists.get("advanced", [])))
+                st.caption("Descarga disponible en el panel consolidado.")
+            with col_dl2:
+                st.metric("Genes DE (promedio)", len(gene_lists.get("global_mean", [])))
+                st.caption("Descarga disponible en el panel consolidado.")
+            with col_dl3:
+                st.metric(
+                    f"Genes DE (gen ref {basic_ref_gene})",
+                    len(gene_lists.get("refgene", [])),
+                )
+                st.caption("Descarga disponible en el panel consolidado.")
+            with col_save:
+                do_save = st.checkbox("Guardar conjuntos en resultados/", value=False, key=f"genes_save::{adv_key}")
+                if do_save:
+                    paths = save_gene_sets(gene_lists, basic_ref_gene=str(basic_ref_gene))
+                    st.caption("Guardado: " + ", ".join(f"{k}: {v}" for k, v in paths.items()))
+
+            union_genes = sorted(set().union(*gene_lists.values())) if gene_lists else []
+            st.session_state["genes_heatmap_union"] = union_genes
+            with st.expander("Lista completa de genes a priorizar en etapas posteriores"):
+                union_df = pd.DataFrame({"gene": union_genes})
+                st.dataframe(union_df, width="stretch", hide_index=True)
+                if not union_df.empty:
+                    exports.register_dataframe(
+                        key=f"{adv_key}::genes::union",
+                        section="Genes diferencialmente expresados",
+                        label="Lista unificada de genes DE",
+                        file_name="genes_diferenciales_unificados.csv",
+                        dataframe=union_df,
+                        description="Unión de genes significativos detectados por los tres métodos.",
+                        parameters={"α": alpha_sel, "Top fallback": topn_fb},
+                    )
+                st.caption("Descarga disponible en el panel consolidado.")
+
+            # Venn diagram eliminado por simplificación de la sección.
+
+            st.write("Heatmaps por método con sus propios genes DE")
+            tab_a2, tab_g2, tab_r2 = st.tabs(["Avanzada (DE)", "Promedio (DE)", f"Gen ref (DE: {basic_ref_gene})"])
+            with tab_a2:
+                fig_a2 = build_dendrogram_heatmap(
+                    matrices_by_method.get("advanced", pd.DataFrame()),
+                    title="Avanzada — genes DE (z-score)" if zscore_rows_bymethod else "Avanzada — genes DE",
+                    zscore_by_gene=zscore_rows_bymethod,
+                )
+                st.plotly_chart(
+                    fig_a2,
+                    width="stretch",
+                    key=f"heatmap_focus_adv::{adv_key}::{selected_method}",
+                )
+            with tab_g2:
+                fig_g2 = build_dendrogram_heatmap(
+                    matrices_by_method.get("global_mean", pd.DataFrame()),
+                    title="Promedio global — genes DE (z-score)" if zscore_rows_bymethod else "Promedio global — genes DE",
+                    zscore_by_gene=zscore_rows_bymethod,
+                )
+                st.plotly_chart(
+                    fig_g2,
+                    width="stretch",
+                    key=f"heatmap_focus_global::{adv_key}::{selected_method}",
+                )
+            with tab_r2:
+                fig_r2 = build_dendrogram_heatmap(
+                    matrices_by_method.get("refgene", pd.DataFrame()),
+                    title=f"Gen de referencia ({basic_ref_gene}) — genes DE (z-score)" if zscore_rows_bymethod else f"Gen de referencia ({basic_ref_gene}) — genes DE",
+                    zscore_by_gene=zscore_rows_bymethod,
+                )
+                st.plotly_chart(
+                    fig_r2,
+                    width="stretch",
+                    key=f"heatmap_focus_ref::{adv_key}::{selected_method}",
+                )
+        except Exception as exc:
+            st.info(f"No se pudo calcular la selección por método: {exc}")
+
+    # Recalcular etiquetas con el gen básico más reciente (según vista usada)
+    basic_ref_gene_expr = st.session_state.get("_basic_ref_gene", basic_ref_gene_expr)
+    method_labels = {
+        "advanced": "Avanzada (referencias seleccionadas)",
+        "global_mean": "Promedio global por test",
+        "refgene": f"Gen de referencia básico ({basic_ref_gene_expr})",
+    }
     st.divider()
     st.subheader("Tablas finales: ΔΔCt y Fold Change (3 métodos integrados)")
     st.markdown(
@@ -1497,38 +1476,89 @@ def main() -> None:
     fc_table = fc_table.sort_values("target").reset_index(drop=True)
 
     st.markdown("**Tabla ΔΔCt (tres métodos)**")
-    total_ddct = int(ddct_table["target"].notna().sum())
-    ddct_neg = int((ddct_table["delta_delta_ct_advanced"] < -0.25).sum())
-    ddct_pos = int((ddct_table["delta_delta_ct_advanced"] > 0.25).sum())
-    ddct_neutral = int(
-        (ddct_table["delta_delta_ct_advanced"].abs() <= 0.25).sum()
-    )
-    render_highlight_pills(
-        [
-            Highlight(
-                label="Genes evaluados",
-                value=total_ddct,
-                help="Total de genes presentes tras la normalización consolidada.",
-            ),
-            Highlight(
-                label="ΔΔCt < 0 (sobreexpresados)",
-                value=ddct_neg,
-                help="Genes con ΔΔCt ≤ -0.25 en el método avanzado → sobreexpresión en muestras.",
-            ),
-            Highlight(
-                label="ΔΔCt estable (±0.25)",
-                value=ddct_neutral,
-                help="Genes con variación marginal según el método avanzado (|ΔΔCt| ≤ 0.25).",
-            ),
-            Highlight(
-                label="ΔΔCt > 0 (subexpresados)",
-                value=ddct_pos,
-                help="Genes con ΔΔCt ≥ 0.25 en el método avanzado → subexpresión en muestras.",
-            ),
+    ddct_cols = {
+        "advanced": ("Avanzada", "delta_delta_ct_advanced"),
+        "promedio": ("Promedio", "delta_delta_ct_promedio"),
+        "gen_ref": ("Gen ref", "delta_delta_ct_gen_ref"),
+    }
+    # Per-method insight boards
+    for m_key, (m_label, col) in ddct_cols.items():
+        series = ddct_table[col]
+        n_eval = int(series.notna().sum())
+        coverage = float(series.notna().mean())
+        neg = int((series < -0.25).sum())
+        pos = int((series > 0.25).sum())
+        neutral = int((series.abs() <= 0.25).sum())
+        over_list = (
+            ddct_table.sort_values(col, ascending=True)["target"].head(6).tolist()
+        )
+        under_list = (
+            ddct_table.sort_values(col, ascending=False)["target"].head(6).tolist()
+        )
+        render_insight_board(
+            badges=[
+                Badge(label=f"ΔΔCt · {m_label}", tone="primary"),
+                Badge(label=f"Cobertura {coverage:.0%}", tone="success"),
+                Badge(label=f"Genes evaluados: {n_eval}", tone="muted"),
+            ],
+            left=Card(title="Sobreexpresados (ΔΔCt < 0)", count=neg, chips=over_list),
+            right=Card(title="Subexpresados (ΔΔCt > 0)", count=pos, chips=under_list),
+            footer_text=f"Clasificación aplicada → {neg} sobreexpresados · {neutral} estables · {pos} subexpresados.",
+            key=f"ddct-board::{adv_key}::{m_key}",
+        )
+
+    # Comparative insight (sign agreement across methods)
+    try:
+        _dd = ddct_table[[
+            "delta_delta_ct_advanced",
+            "delta_delta_ct_promedio",
+            "delta_delta_ct_gen_ref",
+        ]].copy()
+        ddct_coverage = float(_dd.notna().all(axis=1).mean())
+        def _sgn(x: float) -> int:
+            try:
+                if x is None or np.isnan(float(x)):
+                    return 0
+            except Exception:
+                return 0
+            if abs(float(x)) < 1e-9:
+                return 0
+            return 1 if float(x) > 0 else -1
+        adv_s = _dd["delta_delta_ct_advanced"].apply(_sgn)
+        prom_s = _dd["delta_delta_ct_promedio"].apply(_sgn)
+        ref_s = _dd["delta_delta_ct_gen_ref"].apply(_sgn)
+        mismatch_mask = ((adv_s != prom_s) | (adv_s != ref_s)) & (adv_s != 0)
+        ddct_mismatch = int(mismatch_mask.sum())
+        ddct_match = int((((adv_s == prom_s) & (adv_s == ref_s)) & (adv_s != 0)).sum())
+        # Top discrepancies by spread across methods
+        _dd2 = ddct_table[["target", "delta_delta_ct_advanced", "delta_delta_ct_promedio", "delta_delta_ct_gen_ref"]].copy()
+        _dd2 = _dd2.assign(spread=_dd2[["delta_delta_ct_advanced", "delta_delta_ct_promedio", "delta_delta_ct_gen_ref"]].max(axis=1) - _dd2[["delta_delta_ct_advanced", "delta_delta_ct_promedio", "delta_delta_ct_gen_ref"]].min(axis=1))
+        disc_chips = _dd2.loc[mismatch_mask.values].sort_values("spread", ascending=False)["target"].head(6).tolist()
+        # Stable chips (small spread and agreement)
+        stable_chips = _dd2.loc[((adv_s == prom_s) & (adv_s == ref_s)).values].sort_values("spread")["target"].head(6).tolist()
+    except Exception:
+        ddct_coverage = 0.0
+        ddct_mismatch = 0
+        ddct_match = 0
+        stable_chips, disc_chips = [], []
+
+    render_insight_board(
+        badges=[
+            Badge(label="Comparativo ΔΔCt", tone="primary"),
+            Badge(label=f"Cobertura {ddct_coverage:.0%}", tone="success"),
+            Badge(label=f"Discrepancias de signo: {ddct_mismatch}", tone=("warning" if ddct_mismatch else "success")),
         ],
-        key=f"ddct-overview::{adv_key}",
+        left=Card(title="Coinciden (signo)", count=ddct_match, chips=stable_chips),
+        right=Card(title="Discrepan (signo)", count=ddct_mismatch, chips=disc_chips),
+        banner_text=(
+            "Sin discrepancias detectadas entre métodos en ΔΔCt." if ddct_mismatch == 0 else None
+        ),
+        banner_tone="success",
+        key=f"ddct-board::comparative::{adv_key}",
     )
-    with st.expander("Ver tabla ΔΔCt completa"):
+
+    # Solo bajo demanda: mostrar tabla consolidada
+    with st.expander("Mostrar tabla ΔΔCt (3 métodos)"):
         st.dataframe(ddct_table, width="stretch")
     exports.register_dataframe(
         key=f"{adv_key}::tables::ddct",
@@ -1558,30 +1588,81 @@ def main() -> None:
     fc_table = fc_table.assign(
         max_abs_log2fc=fc_table[["log2fc_advanced", "log2fc_promedio", "log2fc_gen_ref"]].abs().max(axis=1)
     )
-    high_abs = int((fc_table["max_abs_log2fc"].abs() >= 1).sum())
-    high_adv = int((fc_table["fold_change_advanced"].abs() >= 2).sum())
-    under_adv = int((fc_table["fold_change_advanced"] <= 0.5).sum())
-    render_highlight_pills(
-        [
-            Highlight(
-                label="|log2FC| ≥ 1 (cualquier método)",
-                value=high_abs,
-                help="Genes que alcanzan un cambio de al menos 2× en alguno de los tres métodos.",
-            ),
-            Highlight(
-                label="Sobreexpresión ≥ 2× (Avanzada)",
-                value=high_adv,
-                help="Genes con fold change ≥ 2 bajo el método avanzado.",
-            ),
-            Highlight(
-                label="Subexpresión ≤ 0.5× (Avanzada)",
-                value=under_adv,
-                help="Genes cuyo fold change avanzado sugiere al menos 50% de reducción.",
-            ),
+
+    # Per-method FC boards
+    fc_cols = {
+        "advanced": ("Avanzada", "fold_change_advanced", "log2fc_advanced"),
+        "promedio": ("Promedio", "fold_change_promedio", "log2fc_promedio"),
+        "gen_ref": ("Gen ref", "fold_change_gen_ref", "log2fc_gen_ref"),
+    }
+    for m_key, (m_label, fc_col, l2_col) in fc_cols.items():
+        fc_s = fc_table[fc_col]
+        l2_s = fc_table[l2_col]
+        n_eval = int(fc_s.notna().sum())
+        coverage = float(fc_s.notna().mean())
+        over2 = int((fc_s >= 2.0).sum())
+        under05 = int((fc_s <= 0.5).sum())
+        above1 = int((l2_s.abs() >= 1.0).sum())
+        top_over_fc = fc_table.sort_values(fc_col, ascending=False)["target"].head(6).tolist()
+        top_under_fc = fc_table.sort_values(fc_col, ascending=True)["target"].head(6).tolist()
+        render_insight_board(
+            badges=[
+                Badge(label=f"Fold Change · {m_label}", tone="primary"),
+                Badge(label=f"Cobertura {coverage:.0%}", tone="success"),
+                Badge(label=f"Genes evaluados: {n_eval}", tone="muted"),
+            ],
+            left=Card(title="Sobreexpresión (≥ 2×)", count=over2, chips=top_over_fc),
+            right=Card(title="Subexpresión (≤ 0.5×)", count=under05, chips=top_under_fc),
+            footer_text=f"Umbral rápido: |log2FC| ≥ 1 → {above1} genes ({m_label}).",
+            key=f"fc-board::{adv_key}::{m_key}",
+        )
+
+    # Comparative FC insight (sign agreement across methods)
+    try:
+        _fc = fc_table[["log2fc_advanced", "log2fc_promedio", "log2fc_gen_ref"]].copy()
+        fc_coverage = float(_fc.notna().all(axis=1).mean())
+        def _sgn2(x: float) -> int:
+            try:
+                if x is None or np.isnan(float(x)):
+                    return 0
+            except Exception:
+                return 0
+            if abs(float(x)) < 1e-9:
+                return 0
+            return 1 if float(x) > 0 else -1
+        a_s = _fc["log2fc_advanced"].apply(_sgn2)
+        p_s = _fc["log2fc_promedio"].apply(_sgn2)
+        r_s = _fc["log2fc_gen_ref"].apply(_sgn2)
+        mismatch_mask_fc = ((a_s != p_s) | (a_s != r_s)) & (a_s != 0)
+        fc_mismatch = int(mismatch_mask_fc.sum())
+        fc_match = int((((a_s == p_s) & (a_s == r_s)) & (a_s != 0)).sum())
+        _fc2 = fc_table[["target", "log2fc_advanced", "log2fc_promedio", "log2fc_gen_ref"]].copy()
+        _fc2 = _fc2.assign(spread=_fc2[["log2fc_advanced", "log2fc_promedio", "log2fc_gen_ref"]].max(axis=1) - _fc2[["log2fc_advanced", "log2fc_promedio", "log2fc_gen_ref"]].min(axis=1))
+        disc_chips_fc = _fc2.loc[mismatch_mask_fc.values].sort_values("spread", ascending=False)["target"].head(6).tolist()
+        stable_chips_fc = _fc2.loc[((a_s == p_s) & (a_s == r_s)).values].sort_values("spread")["target"].head(6).tolist()
+    except Exception:
+        fc_coverage = 0.0
+        fc_mismatch = 0
+        fc_match = 0
+        disc_chips_fc, stable_chips_fc = [], []
+
+    render_insight_board(
+        badges=[
+            Badge(label="Comparativo log2FC", tone="primary"),
+            Badge(label=f"Cobertura {fc_coverage:.0%}", tone="success"),
+            Badge(label=f"Discrepancias de signo: {fc_mismatch}", tone=("warning" if fc_mismatch else "success")),
         ],
-        key=f"fc-overview::{adv_key}",
+        left=Card(title="Coinciden (signo)", count=fc_match, chips=stable_chips_fc),
+        right=Card(title="Discrepan (signo)", count=fc_mismatch, chips=disc_chips_fc),
+        banner_text=(
+            "Sin discrepancias detectadas entre métodos en log2FC." if fc_mismatch == 0 else None
+        ),
+        banner_tone="success",
+        key=f"fc-board::comparative::{adv_key}",
     )
-    with st.expander("Ver tabla Fold Change completa"):
+
+    # Solo bajo demanda: mostrar tabla consolidada
+    with st.expander("Mostrar tabla Fold Change (3 métodos)"):
         st.dataframe(fc_table, width="stretch")
     exports.register_dataframe(
         key=f"{adv_key}::tables::fold_change",
@@ -1668,24 +1749,28 @@ def main() -> None:
         "si algún enfoque sesga hacia la sobreexpresión o subexpresión." 
     )
 
-    volcano_fig = build_volcano_plot(
-        stats_by_method,
-        labels={
-            "advanced": "Avanzada",
-            "global_mean": "Promedio",
-            "refgene": f"Gen ref ({basic_ref_gene})",
-        },
-        q_threshold=float(alpha_sel),
-        log2fc_threshold=np.log2(2.0),
-    )
-    st.plotly_chart(
-        volcano_fig,
-        width="stretch",
-        key=f"volcano_plot::{selected_method}",
-    )
-    st.caption(
-        "El gráfico volcano resume magnitud (log2FC) y significancia (-log10 p). Los genes resaltados superan los umbrales de α y diferencia mínima."
-    )
+    if view_mode == "Genes diferenciales":
+        try:
+            volcano_fig = build_volcano_plot(
+                stats_by_method,
+                labels={
+                    "advanced": "Avanzada",
+                    "global_mean": "Promedio",
+                    "refgene": f"Gen ref ({basic_ref_gene})",
+                },
+                q_threshold=float(alpha_sel),
+                log2fc_threshold=np.log2(2.0),
+            )
+            st.plotly_chart(
+                volcano_fig,
+                width="stretch",
+                key=f"volcano_plot::{selected_method}",
+            )
+            st.caption(
+                "El gráfico volcano resume magnitud (log2FC) y significancia (-log10 p). Los genes resaltados superan los umbrales de α y diferencia mínima."
+            )
+        except Exception:
+            pass
 
     total_genes = int(fc_table["target"].notna().sum())
     if total_genes > 0:

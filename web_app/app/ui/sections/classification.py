@@ -193,11 +193,12 @@ def _render_sticky_preview(
         #{preview_id} {{
             position: sticky;
             top: 5.8rem;
-            background: linear-gradient(180deg, rgba(30, 41, 59, 0.95), rgba(15, 23, 42, 0.95));
-            border-radius: 1rem;
-            padding: 1.1rem 1.2rem;
-            border: 1px solid rgba(148, 163, 184, 0.28);
-            box-shadow: 0 18px 40px rgba(15, 23, 42, 0.42);
+            background: radial-gradient(1200px 400px at 0% 0%, rgba(148,163,184,0.15), transparent),
+                        linear-gradient(180deg, rgba(245,247,250,0.98), rgba(235,238,243,0.92));
+            border-radius: 22px;
+            padding: 14px 16px;
+            border: 1px solid rgba(15, 23, 42, 0.10);
+            box-shadow: 0 18px 38px rgba(15, 23, 42, 0.12);
         }}
         #{preview_id} .meta {{
             display: flex;
@@ -212,24 +213,24 @@ def _render_sticky_preview(
             padding: 0.2rem 0.65rem;
             border-radius: 999px;
             font-size: 0.72rem;
-            background: rgba(148, 163, 184, 0.16);
-            border: 1px solid rgba(148, 163, 184, 0.28);
-            color: #e2e8f0;
+            background: rgba(148, 163, 184, 0.25);
+            border: 1px solid rgba(148, 163, 184, 0.35);
+            color: #0f172a;
         }}
         #{preview_id} .badge.mode.auto {{
-            background: rgba(34, 197, 94, 0.22);
-            border-color: rgba(34, 197, 94, 0.35);
-            color: #bbf7d0;
+            background: rgba(16, 185, 129, 0.18);
+            border-color: rgba(16, 185, 129, 0.35);
+            color: #065f46;
         }}
         #{preview_id} .badge.mode.manual {{
-            background: rgba(249, 115, 22, 0.22);
-            border-color: rgba(249, 115, 22, 0.4);
-            color: #fed7aa;
+            background: rgba(245, 158, 11, 0.18);
+            border-color: rgba(245, 158, 11, 0.35);
+            color: #7c2d12;
         }}
         #{preview_id} .badge.manual {{
-            background: rgba(249, 115, 22, 0.18);
-            border-color: rgba(249, 115, 22, 0.38);
-            color: #fed7aa;
+            background: rgba(245, 158, 11, 0.16);
+            border-color: rgba(245, 158, 11, 0.32);
+            color: #7c2d12;
         }}
         #{preview_id} .cards {{
             display: grid;
@@ -237,39 +238,39 @@ def _render_sticky_preview(
             gap: 0.85rem;
         }}
         #{preview_id} .card {{
-            background: rgba(148, 163, 184, 0.12);
-            border-radius: 0.85rem;
-            padding: 0.85rem;
-            border: 1px solid rgba(148, 163, 184, 0.25);
+            background: rgba(248, 250, 252, 0.98);
+            border-radius: 18px;
+            padding: 12px 14px;
+            border: 1px solid rgba(15, 23, 42, 0.10);
         }}
         #{preview_id} .card h5 {{
             margin: 0;
             font-size: 0.82rem;
             text-transform: uppercase;
             letter-spacing: 0.08em;
-            color: rgba(226, 232, 240, 0.78);
+            color: #334155;
         }}
         #{preview_id} .count {{
-            font-size: 1.6rem;
-            font-weight: 600;
+            font-size: 1.7rem;
+            font-weight: 700;
             margin: 0.35rem 0 0.55rem 0;
-            color: #f8fafc;
+            color: #0f172a;
         }}
         #{preview_id} .chip {{
             display: inline-flex;
             align-items: center;
             padding: 0.18rem 0.55rem;
             border-radius: 999px;
-            background: rgba(59, 130, 246, 0.18);
-            color: #bfdbfe;
+            background: rgba(59, 130, 246, 0.12);
+            color: #0b1220;
             font-size: 0.7rem;
             margin: 0.12rem;
-            border: 1px solid rgba(59, 130, 246, 0.32);
+            border: 1px solid rgba(59, 130, 246, 0.28);
         }}
         #{preview_id} .chip.empty {{
-            background: rgba(148, 163, 184, 0.18);
-            color: rgba(148, 163, 184, 0.88);
-            border-color: rgba(148, 163, 184, 0.3);
+            background: rgba(148, 163, 184, 0.16);
+            color: rgba(15, 23, 42, 0.7);
+            border-color: rgba(148, 163, 184, 0.28);
         }}
         #{preview_id} .status {{
             margin-top: 0.8rem;
@@ -278,19 +279,19 @@ def _render_sticky_preview(
             font-size: 0.8rem;
         }}
         #{preview_id} .status.ok {{
-            background: rgba(34, 197, 94, 0.14);
-            border: 1px solid rgba(34, 197, 94, 0.35);
-            color: #bbf7d0;
+            background: rgba(16, 185, 129, 0.14);
+            border: 1px solid rgba(16, 185, 129, 0.30);
+            color: #065f46;
         }}
         #{preview_id} .status.warn {{
-            background: rgba(248, 113, 113, 0.12);
-            border: 1px solid rgba(248, 113, 113, 0.32);
-            color: #fecaca;
+            background: rgba(225, 29, 29, 0.12);
+            border: 1px solid rgba(225, 29, 29, 0.38);
+            color: #7f1d1d;
         }}
         #{preview_id} .applied {{
             margin-top: 0.8rem;
             font-size: 0.78rem;
-            color: rgba(226, 232, 240, 0.82);
+            color: #334155;
         }}
     </style>
     <div id="{preview_id}">
