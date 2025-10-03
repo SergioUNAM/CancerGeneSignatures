@@ -6,6 +6,7 @@ Generador de firmas genéticas asociadas a tipos de cáncer mediante análisis d
 - Servicios especializados desacoplados de Streamlit (`web_app/app/services/*`) para favorecer pruebas y reutilización.
 - UI modular multipágina en construcción, apoyada en secciones reutilizables (`web_app/app/ui/sections.py`).
 - Configuración centralizada (`AppConfig`, `ServicesConfig`) con soporte para distintos entornos y credenciales externas.
+- Panel de exportación consolidado que registra automáticamente datasets, heatmaps y listas de genes con metadatos del análisis.
 
 ## Flujo funcional
 1. **Ingesta qPCR** (`app/services/qpcr.py`): limpieza, clasificación de muestras/controles, imputación de Ct y panel de calidad.

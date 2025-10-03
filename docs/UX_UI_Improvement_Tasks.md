@@ -44,3 +44,7 @@ Cada tarea debe abordarse manteniendo el rigor científico del flujo, pero prior
 
 ### Etapa 4 — Parámetros avanzados con jerarquía clara
 - ✅ Los parámetros de normalización avanzada se agruparon en bloques "Sensibilidad" y "Robustez", con presets rápidos/equilibrados/exhaustivos, tooltips y un expander de referencia que reemplaza el texto plano extenso (`web_app/streamlit_app.py`).
+
+### Etapa 5 — Descargas y resultados más accesibles
+- ✅ Se creó un registro centralizado de artefactos (`ExportRegistry`) y un panel de exportación consolidado que agrupa las descargas clave por sección con metadatos de contexto (`web_app/app/ui/components/exports.py`, `web_app/streamlit_app.py`).
+- ✅ Las descargas dispersas se reemplazaron por registros automáticos que capturan política de imputación, presets de normalización y método seleccionado, simplificando la trazabilidad y evitando botones repetidos (`web_app/streamlit_app.py`).

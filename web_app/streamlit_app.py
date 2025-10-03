@@ -51,9 +51,11 @@ from app.services.heatmap_visuals import build_dendrogram_heatmap
 from app.services.qpcr import build_long_table, summarize_extraction
 from app.state import AppSessionState
 from app.ui.components import (
+    ExportRegistry,
     build_step_sequence,
     render_pipeline_progress,
     render_sidebar_progress,
+    render_export_panel,
 )
 from app.ui.sections import render_classification_section
 
@@ -272,6 +274,8 @@ def _build_expression_summary(
 def _render_advanced_results(
     result: AdvancedNormalizationResult,
     params: AdvancedNormalizationParams,
+    exports: ExportRegistry,
+    export_prefix: str,
 ) -> pd.DataFrame:
     st.subheader("Resultados de la normalización avanzada")
     summary = result.summary()
@@ -288,31 +292,54 @@ def _render_advanced_results(
         candidates["refs"] = candidates["refs"].apply(lambda ref: ", ".join(ref))
         st.markdown("**Ranking de combinaciones candidata**")
         st.dataframe(candidates[["refs", "score"]].head(30), width="stretch")
-        st.download_button(
-            "Descargar ranking (CSV)",
-            candidates.to_csv(index=False),
+        exports.register_dataframe(
+            key=f"{export_prefix}::advanced_ranking",
+            section="Normalización avanzada",
+            label="Ranking de combinaciones candidata",
             file_name="normalizacion_avanzada_candidatos.csv",
-            width="stretch",
+            dataframe=candidates,
+            method_label="Avanzada",
+            description="Score de combinaciones evaluadas durante la búsqueda de referencias.",
+            parameters={
+                "α": params.alpha,
+                "K": params.k_refs,
+                "Bootstrap": params.bootstrap_iter,
+                "Permutaciones": params.permutation_iter,
+            },
         )
 
     st.markdown("**Tabla normalizada (df_norm)**")
     st.dataframe(result.df_norm.head(100), width="stretch")
-    st.download_button(
-        "Descargar df_norm (CSV)",
-        result.df_norm.to_csv(index=False),
+    exports.register_dataframe(
+        key=f"{export_prefix}::advanced_df_norm",
+        section="Normalización avanzada",
+        label="Tabla normalizada (df_norm)",
         file_name="normalizacion_avanzada_df_norm.csv",
-        width="stretch",
+        dataframe=result.df_norm,
+        method_label="Avanzada",
+        description="Resultados de ΔCt ajustados con la combinación óptima de referencias.",
+        parameters={
+            "α": params.alpha,
+            "Refs": ", ".join(ref_res.references),
+        },
     )
 
     stats_df = result.differential.stats.copy()
     if not stats_df.empty:
         st.markdown("**Estadísticas diferenciales**")
         st.dataframe(stats_df.head(50), width="stretch")
-        st.download_button(
-            "Descargar estadísticas (CSV)",
-            stats_df.to_csv(index=False),
+        exports.register_dataframe(
+            key=f"{export_prefix}::advanced_stats",
+            section="Normalización avanzada",
+            label="Estadísticas diferenciales",
             file_name="normalizacion_avanzada_stats.csv",
-            width="stretch",
+            dataframe=stats_df,
+            method_label="Avanzada",
+            description="Resultados completos de pruebas de significancia tras la normalización avanzada.",
+            parameters={
+                "α": params.alpha,
+                "Refs": ", ".join(ref_res.references),
+            },
         )
     else:
         st.info("No se obtuvieron estadísticas significativas con los parámetros actuales.")
@@ -333,11 +360,18 @@ def _render_advanced_results(
     else:
         st.markdown("**Resumen de expresión diferenciada**")
         st.dataframe(expr_summary.head(50), width="stretch")
-        st.download_button(
-            "Descargar resumen (CSV)",
-            expr_summary.to_csv(index=False),
+        exports.register_dataframe(
+            key=f"{export_prefix}::advanced_expr_summary",
+            section="Normalización avanzada",
+            label="Resumen de expresión diferenciada",
             file_name="normalizacion_avanzada_resumen_expresion.csv",
-            width="stretch",
+            dataframe=expr_summary,
+            method_label="Avanzada",
+            description="Síntesis de genes con ΔΔCt y fold change tras la normalización avanzada.",
+            parameters={
+                "α": params.alpha,
+                "Top candidatos": params.n_candidates,
+            },
         )
         counts = expr_summary["nivel_expresion"].value_counts()
         st.success(
@@ -349,7 +383,25 @@ def _render_advanced_results(
     return expr_summary
 
 
-def _render_ensembl_section(expr_summary: pd.DataFrame) -> None:
+def _prepare_heatmap_export(matrix: pd.DataFrame, *, zscore: bool) -> pd.DataFrame:
+    if not isinstance(matrix, pd.DataFrame) or matrix.empty:
+        return pd.DataFrame()
+    export_df = matrix.copy()
+    if zscore:
+        arr = export_df.values.astype(float)
+        means = np.nanmean(arr, axis=1, keepdims=True)
+        stds = np.nanstd(arr, axis=1, keepdims=True)
+        stds[stds == 0] = 1.0
+        export_df = pd.DataFrame(arr - means, index=export_df.index, columns=export_df.columns)
+        export_df = export_df.divide(stds, axis=0)
+    return export_df
+
+
+def _render_ensembl_section(
+    expr_summary: pd.DataFrame,
+    exports: ExportRegistry,
+    export_prefix: str,
+) -> None:
     st.subheader("Anotación Ensembl (IDs génicos)")
     if expr_summary is None or expr_summary.empty:
         st.info("Ejecuta la normalización avanzada para generar un listado de genes.")
@@ -418,11 +470,18 @@ def _render_ensembl_section(expr_summary: pd.DataFrame) -> None:
             st.metric("Con descripción", int(annotated["has_desc"].sum()))
 
         st.dataframe(annotated, width="stretch")
-        st.download_button(
-            "Descargar anotaciones (CSV)",
-            annotated.to_csv(index=False),
+        exports.register_dataframe(
+            key=f"{export_prefix}::ensembl",
+            section="Anotación Ensembl",
+            label="Listado anotado Ensembl",
             file_name="ensembl_anotado.csv",
-            width="stretch",
+            dataframe=annotated,
+            method_label="Consulta API Ensembl",
+            description="Tabla con IDs, descripciones y niveles de expresión para la lista priorizada de genes.",
+            parameters={
+                "Genes": tot,
+                "Hilos": int(workers),
+            },
         )
 
         st.markdown("**Enlaces rápidos**")
@@ -479,6 +538,7 @@ def main() -> None:
 
     app_state = AppSessionState.load()
     df_loaded = app_state.df_loaded
+    exports = ExportRegistry()
 
     # Definimos llaves compartidas para los selectores ubicados en el cuerpo principal.
     UND_POLICY_KEY = "_und_policy"
@@ -817,11 +877,17 @@ def main() -> None:
     if not imputation.summary.empty:
         st.markdown("**Detalle de imputaciones**")
         st.dataframe(imputation.summary.head(50), width="stretch")
-        st.download_button(
-            "Descargar imputaciones (CSV)",
-            imputation.summary.to_csv(index=False),
+        exports.register_dataframe(
+            key=f"{file_key}::imputaciones",
+            section="Preparación e imputación",
+            label="Detalle de imputaciones",
             file_name="detalle_imputaciones.csv",
-            width="stretch",
+            dataframe=imputation.summary,
+            description="Registro de Ct reemplazados al aplicar la política de valores indeterminados.",
+            parameters={
+                "Política": und_policy,
+                "Valor fijo": und_value if und_policy == "value" else "N/A",
+            },
         )
 
     st.divider()
@@ -1032,10 +1098,13 @@ def main() -> None:
         f"Resultados vigentes con α={params_used.alpha:.3f}, candidatos={params_used.n_candidates} y K={params_used.k_refs}.",
     )
 
-    expr_summary = _render_advanced_results(result, params_used)
+    expr_summary = _render_advanced_results(result, params_used, exports, adv_key)
     st.session_state["_expression_summary"] = expr_summary
 
     st.divider()
+    st.info(
+        "Las descargas a partir de esta etapa se concentran al final en el panel de exportación consolidado."
+    )
     st.subheader("Expresión relativa comparada (3 métodos)")
     st.markdown(
         "Con la referencia elegida se contrastan **tres enfoques**. Cada heatmap actúa como figura de resultados: "
@@ -1084,6 +1153,37 @@ def main() -> None:
             f"Referencias avanzadas: {refs_adv or 'sin definir'}. Gen de referencia básico: {basic_ref_gene}."
         )
 
+        heatmap_labels = {
+            "advanced": "Matriz avanzada para heatmap",
+            "global_mean": "Matriz promedio global para heatmap",
+            "refgene": f"Matriz gen de referencia ({basic_ref_gene})",
+        }
+        for method_key, label in heatmap_labels.items():
+            export_df = _prepare_heatmap_export(
+                matrices.get(method_key, pd.DataFrame()),
+                zscore=zscore_rows,
+            )
+            if not export_df.empty:
+                exports.register_dataframe(
+                    key=f"{adv_key}::heatmap::{method_key}",
+                    section="Visualizaciones comparativas",
+                    label=label,
+                    file_name=f"heatmap_{method_key}.csv",
+                    dataframe=export_df,
+                    method_label={
+                        "advanced": "Avanzada",
+                        "global_mean": "Promedio global",
+                        "refgene": f"Gen ref ({basic_ref_gene})",
+                    }.get(method_key, method_key),
+                    description="Matriz utilizada para construir el heatmap con dendrogramas.",
+                    parameters={
+                        "Genes": export_df.shape[0],
+                        "Tests": export_df.shape[1],
+                        "z-score": "Sí" if zscore_rows else "No",
+                        "Selección": genes_mode,
+                    },
+                )
+
         tab_adv, tab_gm, tab_ref = st.tabs(["Avanzada", "Promedio global", f"Gen ref básico ({basic_ref_gene})"])
         with tab_adv:
             fig_a = build_dendrogram_heatmap(
@@ -1092,12 +1192,6 @@ def main() -> None:
                 zscore_by_gene=zscore_rows,
             )
             st.plotly_chart(fig_a, width="stretch")
-            st.download_button(
-                "Descargar matriz avanzada (CSV)",
-                matrices.get("advanced", pd.DataFrame()).to_csv(),
-                file_name="heatmap_avanzada.csv",
-                width="stretch",
-            )
         with tab_gm:
             fig_g = build_dendrogram_heatmap(
                 matrices.get("global_mean", pd.DataFrame()),
@@ -1105,12 +1199,6 @@ def main() -> None:
                 zscore_by_gene=zscore_rows,
             )
             st.plotly_chart(fig_g, width="stretch")
-            st.download_button(
-                "Descargar matriz promedio global (CSV)",
-                matrices.get("global_mean", pd.DataFrame()).to_csv(),
-                file_name="heatmap_promedio_global.csv",
-                width="stretch",
-            )
         with tab_ref:
             fig_r = build_dendrogram_heatmap(
                 matrices.get("refgene", pd.DataFrame()),
@@ -1118,12 +1206,6 @@ def main() -> None:
                 zscore_by_gene=zscore_rows,
             )
             st.plotly_chart(fig_r, width="stretch")
-            st.download_button(
-                "Descargar matriz gen de referencia (CSV)",
-                matrices.get("refgene", pd.DataFrame()).to_csv(),
-                file_name="heatmap_gen_referencia.csv",
-                width="stretch",
-            )
 
     st.divider()
     st.subheader("Datasets de niveles de expresión por método")
@@ -1174,19 +1256,36 @@ def main() -> None:
             )
             col_long, col_pivot = st.columns(2)
             with col_long:
-                st.download_button(
-                    "Descargar formato largo (CSV)",
-                    df_method.to_csv(index=False),
+                exports.register_dataframe(
+                    key=f"{adv_key}::expression::{method_key}::long",
+                    section="Datasets de expresión",
+                    label=f"Dataset en formato largo ({method_labels[method_key]})",
                     file_name=f"expresion_{method_key}_largo.csv",
-                    width="stretch",
+                    dataframe=df_method,
+                    method_label=method_labels[method_key],
+                    description="Tabla long-form con log2(expr) relativa para cada test y gen.",
+                    parameters={
+                        "Genes": df_method["target"].nunique(),
+                        "Tests": df_method["test"].nunique(),
+                    },
                 )
+                st.caption("Disponible en el panel de exportación consolidado.")
             with col_pivot:
-                st.download_button(
-                    "Descargar matriz genes×tests (CSV)",
-                    pivot.to_csv(),
+                exports.register_dataframe(
+                    key=f"{adv_key}::expression::{method_key}::matrix",
+                    section="Datasets de expresión",
+                    label=f"Matriz genes×tests ({method_labels[method_key]})",
                     file_name=f"expresion_{method_key}_matriz.csv",
-                    width="stretch",
+                    dataframe=pivot,
+                    method_label=method_labels[method_key],
+                    description="Matriz pivoteada para análisis estadístico adicional.",
+                    parameters={
+                        "Genes": pivot.shape[0],
+                        "Tests": pivot.shape[1],
+                    },
+                    include_index=True,
                 )
+                st.caption("Disponible en el panel de exportación consolidado.")
 
     st.divider()
     st.subheader("Genes diferencialmente expresados y heatmaps dedicados")
@@ -1247,27 +1346,43 @@ def main() -> None:
         st.success(f"Genes diferencialmente expresados detectados → {counts_msg}")
 
         col_dl1, col_dl2, col_dl3, col_save = st.columns([1, 1, 1, 1])
+        export_gene_labels = {
+            "advanced": ("Genes DE — método avanzado", "genes_significativos_avanzada.csv"),
+            "global_mean": ("Genes DE — promedio global", "genes_significativos_promedio.csv"),
+            "refgene": (
+                f"Genes DE — gen de referencia ({basic_ref_gene})",
+                f"genes_significativos_refgene_{basic_ref_gene}.csv",
+            ),
+        }
+        for method_key, (label, filename) in export_gene_labels.items():
+            genes = gene_lists.get(method_key, [])
+            if genes:
+                exports.register_dataframe(
+                    key=f"{adv_key}::genes::{method_key}",
+                    section="Genes diferencialmente expresados",
+                    label=label,
+                    file_name=filename,
+                    dataframe=pd.DataFrame({"gene": genes}),
+                    method_label={
+                        "advanced": "Avanzada",
+                        "global_mean": "Promedio global",
+                        "refgene": f"Gen ref ({basic_ref_gene})",
+                    }.get(method_key, method_key),
+                    description="Lista priorizada según el método de normalización seleccionado.",
+                    parameters={"α": alpha_sel, "Top fallback": topn_fb},
+                )
         with col_dl1:
-            st.download_button(
-                "Descargar genes DE (avanzada)",
-                pd.DataFrame({"gene": gene_lists.get("advanced", [])}).to_csv(index=False),
-                file_name="genes_significativos_avanzada.csv",
-                width="stretch",
-            )
+            st.metric("Genes DE (avanzada)", len(gene_lists.get("advanced", [])))
+            st.caption("Descarga disponible en el panel consolidado.")
         with col_dl2:
-            st.download_button(
-                "Descargar genes DE (promedio)",
-                pd.DataFrame({"gene": gene_lists.get("global_mean", [])}).to_csv(index=False),
-                file_name="genes_significativos_promedio.csv",
-                width="stretch",
-            )
+            st.metric("Genes DE (promedio)", len(gene_lists.get("global_mean", [])))
+            st.caption("Descarga disponible en el panel consolidado.")
         with col_dl3:
-            st.download_button(
-                f"Descargar genes DE (gen ref: {basic_ref_gene})",
-                pd.DataFrame({"gene": gene_lists.get("refgene", [])}).to_csv(index=False),
-                file_name=f"genes_significativos_refgene_{basic_ref_gene}.csv",
-                width="stretch",
+            st.metric(
+                f"Genes DE (gen ref {basic_ref_gene})",
+                len(gene_lists.get("refgene", [])),
             )
+            st.caption("Descarga disponible en el panel consolidado.")
         with col_save:
             do_save = st.checkbox("Guardar conjuntos en resultados/", value=False, key=f"genes_save::{adv_key}")
             if do_save:
@@ -1279,12 +1394,17 @@ def main() -> None:
         with st.expander("Lista completa de genes a priorizar en etapas posteriores"):
             union_df = pd.DataFrame({"gene": union_genes})
             st.dataframe(union_df, width="stretch", hide_index=True)
-            st.download_button(
-                "Descargar lista unificada (CSV)",
-                union_df.to_csv(index=False),
-                file_name="genes_diferenciales_unificados.csv",
-                width="stretch",
-            )
+            if not union_df.empty:
+                exports.register_dataframe(
+                    key=f"{adv_key}::genes::union",
+                    section="Genes diferencialmente expresados",
+                    label="Lista unificada de genes DE",
+                    file_name="genes_diferenciales_unificados.csv",
+                    dataframe=union_df,
+                    description="Unión de genes significativos detectados por los tres métodos.",
+                    parameters={"α": alpha_sel, "Top fallback": topn_fb},
+                )
+            st.caption("Descarga disponible en el panel consolidado.")
 
         venn_fig = build_three_way_venn(
             gene_lists,
@@ -1344,12 +1464,19 @@ def main() -> None:
 
     st.markdown("**Tabla ΔΔCt (tres métodos)**")
     st.dataframe(ddct_table, width="stretch")
-    st.download_button(
-        "Descargar tabla ΔΔCt (CSV)",
-        ddct_table.to_csv(index=False),
+    exports.register_dataframe(
+        key=f"{adv_key}::tables::ddct",
+        section="Tablas finales ΔΔCt/FC",
+        label="Tabla ΔΔCt (3 métodos)",
         file_name="tabla_delta_delta_ct_3_metodos.csv",
-        width="stretch",
+        dataframe=ddct_table,
+        description="ΔΔCt comparativo para los métodos avanzado, promedio y gen de referencia.",
+        parameters={
+            "α": alpha_sel,
+            "Método expresión": method_labels.get(selected_method, selected_method),
+        },
     )
+    st.caption("Descarga disponible en el panel consolidado.")
 
     ddct_help = {
         "target": "Nombre del gen evaluado.",
@@ -1366,12 +1493,19 @@ def main() -> None:
         max_abs_log2fc=fc_table[["log2fc_advanced", "log2fc_promedio", "log2fc_gen_ref"]].abs().max(axis=1)
     )
     st.dataframe(fc_table, width="stretch")
-    st.download_button(
-        "Descargar tabla Fold Change (CSV)",
-        fc_table.to_csv(index=False),
+    exports.register_dataframe(
+        key=f"{adv_key}::tables::fold_change",
+        section="Tablas finales ΔΔCt/FC",
+        label="Tabla Fold Change (3 métodos)",
         file_name="tabla_fold_change_3_metodos.csv",
-        width="stretch",
+        dataframe=fc_table,
+        description="Fold change y log2FC comparables entre los tres enfoques de normalización.",
+        parameters={
+            "α": alpha_sel,
+            "Top fallback": topn_fb,
+        },
     )
+    st.caption("Descarga disponible en el panel consolidado.")
 
     fc_help = {
         "target": "Nombre del gen evaluado.",
@@ -1395,12 +1529,19 @@ def main() -> None:
         "los log2FC entre métodos; valores altos anticipan discrepancias que merecen discusión."
     )
     st.dataframe(classification_table.head(150), width="stretch")
-    st.download_button(
-        "Descargar clasificaciones (CSV)",
-        classification_table.to_csv(index=False),
+    exports.register_dataframe(
+        key=f"{adv_key}::tables::classification",
+        section="Tablas finales ΔΔCt/FC",
+        label="Clasificación de niveles de expresión",
         file_name="clasificacion_niveles_expresion_3_metodos.csv",
-        width="stretch",
+        dataframe=classification_table,
+        description="Categorización de genes (subexpresado/estable/sobreexpresado) para los tres métodos.",
+        parameters={
+            "α": alpha_sel,
+            "Top fallback": topn_fb,
+        },
     )
+    st.caption("Descarga disponible en el panel consolidado.")
     class_chart = build_classification_summary_chart(classification_table)
     st.plotly_chart(class_chart, width="stretch")
     st.caption(
@@ -1480,17 +1621,36 @@ def main() -> None:
                 disc_df = pd.DataFrame(disc)
                 st.markdown("Genes con mayor discrepancia respecto al método avanzado")
                 st.dataframe(disc_df, width="stretch", hide_index=True)
-                st.download_button(
-                    "Descargar discrepancias (CSV)",
-                    disc_df.to_csv(index=False),
+                exports.register_dataframe(
+                    key=f"{adv_key}::tables::discrepancias",
+                    section="Tablas finales ΔΔCt/FC",
+                    label="Discrepancias vs método avanzado",
                     file_name="discrepancias_vs_avanzado.csv",
-                    width="stretch",
+                    dataframe=disc_df,
+                    description="Genes cuyo log2FC difiere más respecto al método avanzado.",
+                    parameters={
+                        "α": alpha_sel,
+                        "Top fallback": topn_fb,
+                    },
                 )
+                st.caption("Descarga disponible en el panel consolidado.")
 
     st.session_state["fold_change_expression_table"] = classification_table
 
     st.divider()
-    _render_ensembl_section(expr_summary)
+    _render_ensembl_section(expr_summary, exports, adv_key)
+
+    export_context = {
+        "Archivo": f"{df_loaded.source_name} · {df_loaded.sheet_name}" if df_loaded else "Sin archivo",
+        "Tipo de cáncer": cancer_selected,
+        "Contexto biológico": context_selected,
+        "Política ND": f"{und_policy} ({und_value})" if und_policy == "value" else und_policy,
+        "Preset normalización": adv_state.get("preset", "Equilibrado"),
+        "α FDR": f"{params_used.alpha:.3f}",
+        "K refs": params_used.k_refs,
+        "Dataset principal": method_labels.get(selected_method, selected_method),
+    }
+    render_export_panel(exports, study_context=export_context)
 
 
 if __name__ == "__main__":
