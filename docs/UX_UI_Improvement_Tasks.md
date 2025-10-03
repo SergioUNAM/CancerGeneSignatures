@@ -39,5 +39,5 @@ Cada tarea debe abordarse manteniendo el rigor científico del flujo, pero prior
 - ✅ La carga del archivo también se movió al flujo principal, dejando la barra lateral exclusivamente como tablero de seguimiento del pipeline (`web_app/streamlit_app.py`).
 
 ### Etapa 3 — Clasificación de controles/muestras más visual
-- ✅ La sección de clasificación ahora combina buscador, tabla resumen y selectores en tarjetas paralelas, mostrando badges de conteo por prefijo y reorganizando las asignaciones manuales para reducir el scroll (`web_app/app/ui/sections/classification.py`).
+- ✅ La sección de clasificación ahora muestra un catálogo compacto con tabla resumen y selectores en tarjetas paralelas, mostrando badges de conteo por prefijo y reorganizando las asignaciones manuales para reducir el scroll (`web_app/app/ui/sections/classification.py`).
 - ✅ Se incorporó un panel de vista previa sticky con métricas vivas y chips de ejemplos por grupo, sustituyendo los expanders por tabs directas para revisar los dataframes aplicados (`web_app/app/ui/sections/classification.py`).

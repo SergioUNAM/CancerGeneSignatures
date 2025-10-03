@@ -109,22 +109,21 @@ def clear_classification_state(state: Dict[str, object]) -> None:
     for ui_key in list(st.session_state.keys()):
         if any(
             ui_key.startswith(prefix)
-            for prefix in (
-                "ctrl_prefix_input::",
-                "samp_prefix_input::",
-                "ctrl_suffix_input::",
-                "samp_suffix_input::",
-                "pref_ctrl_suggest::",
-                "pref_samp_suggest::",
-                "suff_ctrl_suggest::",
-                "suff_samp_suggest::",
-                "ctrl_prefixes::",
-                "samp_prefixes::",
-                "ctrl_unassigned::",
-                "samp_unassigned::",
-                "auto_apply::",
-                "prefix_filter::",
-            )
+        for prefix in (
+            "ctrl_prefix_input::",
+            "samp_prefix_input::",
+            "ctrl_suffix_input::",
+            "samp_suffix_input::",
+            "pref_ctrl_suggest::",
+            "pref_samp_suggest::",
+            "suff_ctrl_suggest::",
+            "suff_samp_suggest::",
+            "ctrl_prefixes::",
+            "samp_prefixes::",
+            "ctrl_unassigned::",
+            "samp_unassigned::",
+            "auto_apply::",
+        )
         ):
             st.session_state.pop(ui_key, None)
 
@@ -394,29 +393,15 @@ def render_classification_section(long_df: pd.DataFrame, file_key: str) -> Tuple
     with main_col:
         st.markdown("#### 1. Explora los prefijos detectados")
         st.caption(
-            "Use el buscador para validar rápidamente prefijos y ejemplos de pozos antes de asignarlos."
-        )
-        filter_key = f"prefix_filter::{file_key}"
-        filter_value = st.text_input(
-            "Buscar prefijo o ID de pozo",
-            key=filter_key,
-            placeholder="Ej.: CTRL, P1",
+            "Revisa el catálogo de prefijos detectados con ejemplos representativos antes de asignarlos."
         )
 
         if not prefix_summary.empty:
-            filtered_summary = prefix_summary
-            if filter_value:
-                filtered_summary = prefix_summary[
-                    prefix_summary["Prefijo"].str.contains(filter_value, case=False, na=False)
-                    | prefix_summary["Ejemplos"].str.contains(filter_value, case=False, na=False)
-                ]
             st.dataframe(
-                filtered_summary,
+                prefix_summary,
                 use_container_width=True,
                 hide_index=True,
             )
-            if filter_value and filtered_summary.empty:
-                st.info("No se encontraron prefijos que coincidan con la búsqueda actual.")
         else:
             st.info("La tabla de prefijos aparecerá cuando se detecten patrones alfanuméricos.")
 
