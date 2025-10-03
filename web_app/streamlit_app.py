@@ -521,11 +521,17 @@ def main() -> None:
 
     pipeline_steps: Sequence[object] = []
 
-    with st.sidebar:
-        status_placeholder = st.container()
-        st.divider()
-        st.subheader("Paso 1 · Datos de entrada")
-        st.caption("Sube tu Excel qPCR y confirma su estructura antes de avanzar.")
+    st.subheader("Paso 1 · Carga de datos")
+    st.caption(
+        "Sube tu Excel qPCR, valida su estructura y procesa la tabla base antes de avanzar al siguiente paso."
+    )
+
+    load_feedback: Optional[str] = None
+    load_error: Optional[str] = None
+    load_success = False
+
+    upload_cols = st.columns((2, 1))
+    with upload_cols[0]:
         uploaded = st.file_uploader("Archivo Excel", type=["xlsx", "xls"])
         sheet: Optional[str] = None
         if uploaded is not None:
@@ -537,85 +543,89 @@ def main() -> None:
                 sheets = []
             if sheets:
                 sheet = st.selectbox("Hoja", options=sheets, index=0)
-        process_disabled = uploaded is None
-        run_btn = st.button("Procesar archivo", type="primary", disabled=process_disabled)
+    with upload_cols[1]:
+        st.markdown(
+            "**Consejos**\n"
+            "- Prefiere archivos con cabeceras en filas 1–4 y pozos en la primera columna.\n"
+            "- Si cambias la política de imputación deberás reprocesar el archivo para reflejar los ajustes."
+        )
 
-        has_data = df_loaded is not None
+    current_und_policy = str(st.session_state.get(UND_POLICY_KEY, policy_default))
+    current_und_value = float(st.session_state.get(UND_VALUE_KEY, value_default))
 
-        load_feedback: Optional[str] = None
-        load_error: Optional[str] = None
-        load_success = False
-        current_und_policy = str(st.session_state.get(UND_POLICY_KEY, policy_default))
-        current_und_value = float(st.session_state.get(UND_VALUE_KEY, value_default))
+    process_disabled = uploaded is None
+    run_btn = st.button("Procesar archivo", type="primary", disabled=process_disabled)
 
-        if uploaded is not None and run_btn:
-            candidate: Optional[LoadResult] = None
+    if uploaded is not None and run_btn:
+        candidate: Optional[LoadResult] = None
+        uploaded.seek(0)
+        try:
+            candidate = parse_qpcr_wide(
+                uploaded,
+                sheet_name=sheet,
+                header_mode="coords",
+                header_row_idx=3,
+                well_col_idx=0,
+                target_col_idx=1,
+                undetermined_policy=current_und_policy,
+                undetermined_value=current_und_value,
+            )
+        except Exception as exc:
+            load_feedback = (
+                f"Cabecera esperada no encontrada ({exc}); intentando detección automática…"
+            )
             uploaded.seek(0)
             try:
                 candidate = parse_qpcr_wide(
                     uploaded,
                     sheet_name=sheet,
-                    header_mode="coords",
-                    header_row_idx=3,
-                    well_col_idx=0,
-                    target_col_idx=1,
+                    header_mode="auto",
                     undetermined_policy=current_und_policy,
                     undetermined_value=current_und_value,
                 )
-            except Exception as exc:
-                load_feedback = (
-                    f"Cabecera esperada no encontrada ({exc}); intentando detección automática…"
-                )
-                uploaded.seek(0)
-                try:
-                    candidate = parse_qpcr_wide(
-                        uploaded,
-                        sheet_name=sheet,
-                        header_mode="auto",
-                        undetermined_policy=current_und_policy,
-                        undetermined_value=current_und_value,
-                    )
-                except Exception as exc_auto:
-                    load_error = f"No se pudo leer el archivo: {exc_auto}"
-                    logger.exception("Fallo al parsear archivo", exc_info=exc_auto)
-                    candidate = None
-                else:
-                    df_loaded = candidate
-                    load_success = True
+            except Exception as exc_auto:
+                load_error = f"No se pudo leer el archivo: {exc_auto}"
+                logger.exception("Fallo al parsear archivo", exc_info=exc_auto)
+                candidate = None
             else:
                 df_loaded = candidate
                 load_success = True
-
-            if load_success and df_loaded is not None:
-                app_state.df_loaded = df_loaded
-                logger.info(
-                    "Archivo cargado: %s | hoja=%s | forma=%s",
-                    df_loaded.source_name,
-                    df_loaded.sheet_name,
-                    df_loaded.df.shape,
-                )
-
-        has_data = df_loaded is not None
-
-        if load_error:
-            st.error(load_error)
-
-        if has_data and df_loaded is not None:
-            st.success(
-                "Archivo activo: "
-                f"{df_loaded.source_name} · {df_loaded.df.shape[0]} filas × {df_loaded.df.shape[1]} columnas."
-            )
-            if load_feedback:
-                st.caption(load_feedback)
         else:
-            st.info(
-                "Carga un archivo Excel de qPCR y pulsa 'Procesar archivo' para habilitar el resto de pasos."
+            df_loaded = candidate
+            load_success = True
+
+        if load_success and df_loaded is not None:
+            app_state.df_loaded = df_loaded
+            logger.info(
+                "Archivo cargado: %s | hoja=%s | forma=%s",
+                df_loaded.source_name,
+                df_loaded.sheet_name,
+                df_loaded.df.shape,
             )
 
-        pipeline_steps, _ = _build_pipeline_steps(df_loaded)
-        with status_placeholder:
-            st.markdown("### Estado del flujo")
-            render_sidebar_progress(pipeline_steps)
+    has_data = df_loaded is not None
+
+    if load_error:
+        st.error(load_error)
+
+    if has_data and df_loaded is not None:
+        st.success(
+            "Archivo activo: "
+            f"{df_loaded.source_name} · {df_loaded.df.shape[0]} filas × {df_loaded.df.shape[1]} columnas."
+        )
+        if load_feedback:
+            st.caption(load_feedback)
+    else:
+        st.info(
+            "Carga un archivo Excel de qPCR y pulsa 'Procesar archivo' para habilitar el resto de pasos."
+        )
+
+    pipeline_steps, _ = _build_pipeline_steps(df_loaded)
+
+    with st.sidebar:
+        st.markdown("### Estado del flujo")
+        render_sidebar_progress(pipeline_steps)
+        st.caption("Usa la vista principal para completar cada etapa y observarás aquí el progreso consolidado.")
 
     # Recuperamos los valores vigentes tras posibles interacciones en el cuerpo principal.
     und_policy = str(st.session_state.get(UND_POLICY_KEY, policy_default))
@@ -634,8 +644,8 @@ def main() -> None:
         render_pipeline_progress(pipeline_steps)
 
     st.markdown(
-        "La barra lateral queda enfocada en la carga de datos y el estado general; las decisiones analíticas "
-        "se gestionan ahora en el cuerpo principal para ofrecer más contexto al configurarlas."
+        "La barra lateral funciona como monitor de progreso; la carga de archivos y las decisiones analíticas "
+        "se gestionan dentro de los pasos guiados del cuerpo principal para ofrecer contexto inmediato."
     )
 
     if df_loaded is None:

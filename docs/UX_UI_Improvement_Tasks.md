@@ -36,3 +36,4 @@ Cada tarea debe abordarse manteniendo el rigor científico del flujo, pero prior
 ### Etapa 2 — Sidebar con estados y acciones dependientes
 - ✅ La barra lateral ahora renderiza el estado de cada etapa con indicadores compactos, bloquea selectores dependientes hasta que la carga de datos se completa y confirma visualmente el dataset activo tras cada procesamiento (`web_app/streamlit_app.py`).
 - ✅ Los controles de imputación y etiquetado del estudio se trasladaron al cuerpo principal para configurarse con contexto y explicación inmediata, manteniendo la barra lateral enfocada en carga y estado global (`web_app/streamlit_app.py`).
+- ✅ La carga del archivo también se movió al flujo principal, dejando la barra lateral exclusivamente como tablero de seguimiento del pipeline (`web_app/streamlit_app.py`).
