@@ -445,6 +445,55 @@ def main() -> None:
     app_state = AppSessionState.load()
     df_loaded = app_state.df_loaded
 
+    # Definimos llaves compartidas para los selectores ubicados en el cuerpo principal.
+    UND_POLICY_KEY = "_und_policy"
+    UND_VALUE_KEY = "_und_value"
+    STUDY_CANCER_KEY = "_study_cancer"
+    STUDY_CONTEXT_KEY = "_study_context"
+
+    und_defaults = {"nan", "ctmax", "value"}
+    policy_default = (
+        app_state.undetermined.policy
+        if app_state.undetermined.policy in und_defaults
+        else "nan"
+    )
+    value_default = float(app_state.undetermined.value)
+
+    if UND_POLICY_KEY not in st.session_state:
+        st.session_state[UND_POLICY_KEY] = policy_default
+    elif st.session_state[UND_POLICY_KEY] not in und_defaults:
+        st.session_state[UND_POLICY_KEY] = policy_default
+
+    if UND_VALUE_KEY not in st.session_state:
+        st.session_state[UND_VALUE_KEY] = value_default
+
+    cancer_types = app_config.menu.cancer_types
+    if not cancer_types:
+        st.error("El menú de configuración no define tipos de cáncer disponibles.")
+        cancer_types = ["Sin definir"]
+    cancer_default = (
+        app_state.cancer_type
+        if app_state.cancer_type in cancer_types
+        else cancer_types[0]
+    )
+    if STUDY_CANCER_KEY not in st.session_state:
+        st.session_state[STUDY_CANCER_KEY] = cancer_default
+    elif st.session_state[STUDY_CANCER_KEY] not in cancer_types:
+        st.session_state[STUDY_CANCER_KEY] = cancer_default
+
+    context_options = [ctx.label for ctx in app_config.menu.contexts]
+    if not context_options:
+        context_options = ["Sin contexto"]
+    context_default = (
+        app_state.context_label
+        if app_state.context_label in context_options
+        else context_options[0]
+    )
+    if STUDY_CONTEXT_KEY not in st.session_state:
+        st.session_state[STUDY_CONTEXT_KEY] = context_default
+    elif st.session_state[STUDY_CONTEXT_KEY] not in context_options:
+        st.session_state[STUDY_CONTEXT_KEY] = context_default
+
     st.title("Flujo qPCR → Normalización avanzada → Anotación Ensembl")
     st.caption(
         "Sigue las etapas guiadas para pasar de Ct crudos a resultados exportables con anotación genética."
@@ -493,69 +542,12 @@ def main() -> None:
 
         has_data = df_loaded is not None
 
-        st.divider()
-        st.subheader("Paso 2 · Valores 'Undetermined/ND'")
-        st.caption("Define la política de imputación que se aplicará al recargar y durante el análisis.")
-        und_policy = st.selectbox(
-            "Política",
-            options=["nan", "ctmax", "value"],
-            index=["nan", "ctmax", "value"].index(app_state.undetermined.policy)
-            if app_state.undetermined.policy in {"nan", "ctmax", "value"}
-            else 0,
-            disabled=not has_data,
-        )
-        und_value = st.number_input(
-            "Valor fijo (si aplica)",
-            value=float(app_state.undetermined.value),
-            min_value=0.0,
-            max_value=100.0,
-            step=0.5,
-            disabled=not has_data,
-        )
-        st.caption(
-            "Política de imputación: `nan` conserva el Ct sin determinar, `ctmax` sustituye por el máximo Ct válido del grupo "
-            "y `value` utiliza el número especificado. Ajuste la opción según la sensibilidad del ensayo."
-        )
-        if not has_data:
-            st.info("Este paso se habilita una vez que el archivo se procesa correctamente.")
-
-        st.divider()
-        st.subheader("Paso 3 · Opciones del estudio")
-        st.caption("Selecciona las etiquetas con las que se documentará el experimento.")
-        cancer_types = app_config.menu.cancer_types
-        if not cancer_types:
-            st.error("El menú de configuración no define tipos de cáncer disponibles.")
-            cancer_types = ["Sin definir"]
-        default_cancer = (
-            cancer_types.index(app_state.cancer_type)
-            if app_state.cancer_type in cancer_types
-            else 0
-        )
-        cancer_selected = st.selectbox(
-            "Tipo de cáncer",
-            options=cancer_types,
-            index=default_cancer,
-            disabled=not has_data,
-        )
-
-        context_options = [ctx.label for ctx in app_config.menu.contexts]
-        default_context_idx = (
-            context_options.index(app_state.context_label)
-            if app_state.context_label in context_options
-            else 0
-        )
-        context_selected = st.selectbox(
-            "Contexto biológico",
-            options=context_options,
-            index=default_context_idx,
-            disabled=not has_data,
-        )
-        if not has_data:
-            st.info("Selecciona un archivo válido para habilitar las opciones del estudio.")
-
         load_feedback: Optional[str] = None
         load_error: Optional[str] = None
         load_success = False
+        current_und_policy = str(st.session_state.get(UND_POLICY_KEY, policy_default))
+        current_und_value = float(st.session_state.get(UND_VALUE_KEY, value_default))
+
         if uploaded is not None and run_btn:
             candidate: Optional[LoadResult] = None
             uploaded.seek(0)
@@ -567,8 +559,8 @@ def main() -> None:
                     header_row_idx=3,
                     well_col_idx=0,
                     target_col_idx=1,
-                    undetermined_policy=und_policy,
-                    undetermined_value=float(und_value),
+                    undetermined_policy=current_und_policy,
+                    undetermined_value=current_und_value,
                 )
             except Exception as exc:
                 load_feedback = (
@@ -580,8 +572,8 @@ def main() -> None:
                         uploaded,
                         sheet_name=sheet,
                         header_mode="auto",
-                        undetermined_policy=und_policy,
-                        undetermined_value=float(und_value),
+                        undetermined_policy=current_und_policy,
+                        undetermined_value=current_und_value,
                     )
                 except Exception as exc_auto:
                     load_error = f"No se pudo leer el archivo: {exc_auto}"
@@ -625,6 +617,12 @@ def main() -> None:
             st.markdown("### Estado del flujo")
             render_sidebar_progress(pipeline_steps)
 
+    # Recuperamos los valores vigentes tras posibles interacciones en el cuerpo principal.
+    und_policy = str(st.session_state.get(UND_POLICY_KEY, policy_default))
+    und_value = float(st.session_state.get(UND_VALUE_KEY, value_default))
+    cancer_selected = str(st.session_state.get(STUDY_CANCER_KEY, cancer_default))
+    context_selected = str(st.session_state.get(STUDY_CONTEXT_KEY, context_default))
+
     app_state.undetermined.policy = und_policy
     app_state.undetermined.value = float(und_value)
     app_state.cancer_type = str(cancer_selected)
@@ -636,7 +634,8 @@ def main() -> None:
         render_pipeline_progress(pipeline_steps)
 
     st.markdown(
-        "La barra lateral funciona como panel de etapas: cada bloque se habilita automáticamente al completar el anterior."
+        "La barra lateral queda enfocada en la carga de datos y el estado general; las decisiones analíticas "
+        "se gestionan ahora en el cuerpo principal para ofrecer más contexto al configurarlas."
     )
 
     if df_loaded is None:
@@ -666,18 +665,73 @@ def main() -> None:
     except Exception as exc:
         st.warning(f"No se pudo generar el resumen: {exc}")
 
-    long_df, controls_warning = build_long_table(df_loaded)
-    if controls_warning:
-        st.warning(f"No se filtraron los controles de máquina: {controls_warning}")
+    st.subheader("Política de imputación de Ct indeterminados")
+    st.caption(
+        "Define cómo se reemplazan los valores 'Undetermined/ND' al volver a procesar el archivo. "
+        "Los cambios requieren pulsar nuevamente **Procesar archivo** para aplicarse a la tabla base."
+    )
+    imp_cols = st.columns((2, 1))
+    with imp_cols[0]:
+        st.selectbox(
+            "Política",
+            options=["nan", "ctmax", "value"],
+            key=UND_POLICY_KEY,
+            disabled=df_loaded is None,
+        )
+    with imp_cols[1]:
+        st.number_input(
+            "Valor fijo (si aplica)",
+            min_value=0.0,
+            max_value=100.0,
+            step=0.5,
+            key=UND_VALUE_KEY,
+            disabled=df_loaded is None,
+        )
+    st.caption(
+        "• `nan`: conserva el Ct sin determinar; útil para visualizar huecos reales.\n"
+        "• `ctmax`: sustituye por el Ct máximo válido observado en el grupo.\n"
+        "• `value`: aplica un Ct constante (p. ej. 40) para penalizar indetectables."
+        )
+
+    st.divider()
+
+    st.subheader("Etiquetas del estudio")
+    st.caption("Selecciona cómo se documentará el contexto biológico del análisis.")
+    study_cols = st.columns(2)
+    with study_cols[0]:
+        st.selectbox(
+            "Tipo de cáncer",
+            options=cancer_types,
+            key=STUDY_CANCER_KEY,
+            disabled=df_loaded is None,
+        )
+    with study_cols[1]:
+        st.selectbox(
+            "Contexto biológico",
+            options=context_options,
+            key=STUDY_CONTEXT_KEY,
+            disabled=df_loaded is None,
+        )
+
+    # Actualizamos las variables locales tras posibles cambios de los widgets.
+    und_policy = str(st.session_state.get(UND_POLICY_KEY, policy_default))
+    und_value = float(st.session_state.get(UND_VALUE_KEY, value_default))
+    cancer_selected = str(st.session_state.get(STUDY_CANCER_KEY, cancer_default))
+    context_selected = str(st.session_state.get(STUDY_CONTEXT_KEY, context_default))
 
     st.markdown("**Configuración actual del estudio**")
     col_conf1, col_conf2 = st.columns(2)
     with col_conf1:
-        st.info(f"Tipo de cáncer: {app_state.cancer_type or app_config.menu.cancer_types[0]}")
+        st.info(f"Tipo de cáncer: {cancer_selected}")
     with col_conf2:
-        st.info(f"Contexto biológico: {app_state.context_label or app_config.menu.contexts[0].label}")
+        st.info(f"Contexto biológico: {context_selected}")
 
     st.divider()
+
+    long_df, controls_warning = build_long_table(df_loaded)
+    if controls_warning:
+        st.warning(f"No se filtraron los controles de máquina: {controls_warning}")
+
     st.subheader("Clasificación de controles vs muestras")
     st.markdown(
         "El primer paso es definir con precisión **qué pozos corresponden a controles y cuáles a muestras**. "
