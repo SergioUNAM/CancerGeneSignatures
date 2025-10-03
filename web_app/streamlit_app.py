@@ -348,7 +348,11 @@ def _render_advanced_results(
     if isinstance(heat_df, pd.DataFrame) and not heat_df.empty:
         try:
             fig_heat = build_dendrogram_heatmap(heat_df, title="Avanzada — Heatmap con dendrogramas")
-            st.plotly_chart(fig_heat, width="stretch")
+            st.plotly_chart(
+                fig_heat,
+                width="stretch",
+                key=f"classification_heatmap::{export_prefix}",
+            )
         except Exception:
             st.dataframe(heat_df, width="stretch")
 
@@ -1191,21 +1195,33 @@ def main() -> None:
                 title="Avanzada — z-score por gen" if zscore_rows else "Avanzada",
                 zscore_by_gene=zscore_rows,
             )
-            st.plotly_chart(fig_a, width="stretch")
+            st.plotly_chart(
+                fig_a,
+                width="stretch",
+                key=f"heatmap_adv::{adv_key}::{genes_mode}::{zscore_rows}",
+            )
         with tab_gm:
             fig_g = build_dendrogram_heatmap(
                 matrices.get("global_mean", pd.DataFrame()),
                 title="Promedio global — z-score por gen" if zscore_rows else "Promedio global",
                 zscore_by_gene=zscore_rows,
             )
-            st.plotly_chart(fig_g, width="stretch")
+            st.plotly_chart(
+                fig_g,
+                width="stretch",
+                key=f"heatmap_global::{adv_key}::{genes_mode}::{zscore_rows}",
+            )
         with tab_ref:
             fig_r = build_dendrogram_heatmap(
                 matrices.get("refgene", pd.DataFrame()),
                 title=f"Gen de referencia ({basic_ref_gene}) — z-score por gen" if zscore_rows else f"Gen de referencia ({basic_ref_gene})",
                 zscore_by_gene=zscore_rows,
             )
-            st.plotly_chart(fig_r, width="stretch")
+            st.plotly_chart(
+                fig_r,
+                width="stretch",
+                key=f"heatmap_ref::{adv_key}::{genes_mode}::{zscore_rows}",
+            )
 
     st.divider()
     st.subheader("Datasets de niveles de expresión por método")
@@ -1410,7 +1426,11 @@ def main() -> None:
             gene_lists,
             labels=("Avanzada", "Promedio", f"Gen ref ({basic_ref_gene})"),
         )
-        st.plotly_chart(venn_fig, width="stretch")
+        st.plotly_chart(
+            venn_fig,
+            width="stretch",
+            key=f"venn_diagram::{adv_key}::{selected_method}",
+        )
         st.caption(
             "El diagrama de Venn resume cuántos genes son exclusivos o compartidos por los métodos; "
             "puedes priorizar aquellos en la intersección triple para discusiones posteriores."
@@ -1424,21 +1444,33 @@ def main() -> None:
                 title="Avanzada — genes DE (z-score)" if zscore_rows_bymethod else "Avanzada — genes DE",
                 zscore_by_gene=zscore_rows_bymethod,
             )
-            st.plotly_chart(fig_a2, width="stretch")
+            st.plotly_chart(
+                fig_a2,
+                width="stretch",
+                key=f"heatmap_focus_adv::{adv_key}::{selected_method}",
+            )
         with tab_g2:
             fig_g2 = build_dendrogram_heatmap(
                 matrices_by_method.get("global_mean", pd.DataFrame()),
                 title="Promedio global — genes DE (z-score)" if zscore_rows_bymethod else "Promedio global — genes DE",
                 zscore_by_gene=zscore_rows_bymethod,
             )
-            st.plotly_chart(fig_g2, width="stretch")
+            st.plotly_chart(
+                fig_g2,
+                width="stretch",
+                key=f"heatmap_focus_global::{adv_key}::{selected_method}",
+            )
         with tab_r2:
             fig_r2 = build_dendrogram_heatmap(
                 matrices_by_method.get("refgene", pd.DataFrame()),
                 title=f"Gen de referencia ({basic_ref_gene}) — genes DE (z-score)" if zscore_rows_bymethod else f"Gen de referencia ({basic_ref_gene}) — genes DE",
                 zscore_by_gene=zscore_rows_bymethod,
             )
-            st.plotly_chart(fig_r2, width="stretch")
+            st.plotly_chart(
+                fig_r2,
+                width="stretch",
+                key=f"heatmap_focus_ref::{adv_key}::{selected_method}",
+            )
     except Exception as exc:
         st.info(f"No se pudo calcular la selección por método: {exc}")
 
@@ -1543,7 +1575,11 @@ def main() -> None:
     )
     st.caption("Descarga disponible en el panel consolidado.")
     class_chart = build_classification_summary_chart(classification_table)
-    st.plotly_chart(class_chart, width="stretch")
+    st.plotly_chart(
+        class_chart,
+        width="stretch",
+        key=f"classification_outcome::{selected_method}",
+    )
     st.caption(
         "La gráfica resume la distribución de niveles de expresión por método, facilitando comparar "
         "si algún enfoque sesga hacia la sobreexpresión o subexpresión." 
@@ -1559,7 +1595,11 @@ def main() -> None:
         q_threshold=float(alpha_sel),
         log2fc_threshold=np.log2(2.0),
     )
-    st.plotly_chart(volcano_fig, width="stretch")
+    st.plotly_chart(
+        volcano_fig,
+        width="stretch",
+        key=f"volcano_plot::{selected_method}",
+    )
     st.caption(
         "El gráfico volcano resume magnitud (log2FC) y significancia (-log10 p). Los genes resaltados superan los umbrales de α y diferencia mínima."
     )
@@ -1583,7 +1623,11 @@ def main() -> None:
         )
         chart_df = fc_table.sort_values("max_abs_log2fc", ascending=False).head(int(top_for_chart))
         chart_fig = build_fc_methods_scatter(chart_df)
-        st.plotly_chart(chart_fig, width="stretch")
+        st.plotly_chart(
+            chart_fig,
+            width="stretch",
+            key=f"export_chart::{adv_key}::{selected_method}::{top_for_chart}",
+        )
         st.caption(
             "Color → log2FC del método de gen de referencia. Tamaño → discrepancia frente al método avanzado."
         )
