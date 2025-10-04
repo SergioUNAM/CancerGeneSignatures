@@ -64,6 +64,12 @@ from app.ui.components import (
     InfoCard,
     render_info_cards,
 )
+from app.ui.components.insights_overview import (
+    InsightsData,
+    build_default_insight_specs,
+    render_insights_overview,
+)
+from app.ui.components import render_gene_methods_view
 from app.ui.sections import render_classification_section
 
 
@@ -772,45 +778,25 @@ def main() -> None:
         genes = list(extraction.genes)
         wells = list(extraction.wells)
 
-        # Board 1: Pruebas y Pozos, usando la paleta del insight board
-        render_insight_board(
-            badges=[
-                Badge(label="Extracción", tone="primary"),
-                Badge(label=f"Archivo: {df_loaded.source_name}", tone="muted"),
-                Badge(label=f"Hoja: {df_loaded.sheet_name or '-'}", tone="muted"),
-            ],
-            left=Card(title="Pruebas detectadas", count=len(tests), chips=tests),
-            right=Card(title="Pozos detectados", count=len(wells), chips=wells),
-            footer_text=f"Listas detectadas → {len(tests)} pruebas · {len(wells)} pozos.",
-            variant="light",
-            key=f"extraction-board-main::{df_loaded.source_name}:{df_loaded.sheet_name}",
+        # Nuevo: usar el componente de overview para los 2 boards de extracción
+        data_ov = InsightsData(
+            source_name=df_loaded.source_name,
+            sheet_name=df_loaded.sheet_name,
+            tests=tests,
+            wells=wells,
+            genes=genes,
         )
-
-        # Board 2: Targets — separa genes vs controles de máquina, muestra todos los chips
-        control_markers = ["PPC", "RTC"]
-        machine_controls = [g for g in genes if str(g).upper() in {m.upper() for m in control_markers}]
-        gene_targets = [g for g in genes if str(g).upper() not in {m.upper() for m in control_markers}]
-
-        # Single-column board: combina genes + controles, resaltando controles
-        combined = gene_targets + machine_controls
-        render_insight_board(
-            badges=[
-                Badge(label="Targets (genes + controles)", tone="success"),
-                Badge(label=f"Total: {len(combined)}", tone="muted"),
-                Badge(label=f"Controles: {len(machine_controls)}", tone="warning"),
-            ],
-            left=Card(
-                title="Listado de targets",
-                count=len(combined),
-                chips=combined,
-                chips_max=None,
-                accent_chips=machine_controls,
-                accent_tone="danger",
+        specs_ov = build_default_insight_specs(
+            data_ov,
+            include=(
+                "extraction_main",
+                "extraction_targets",
             ),
-            right=None,
-            footer_text=f"Genes: {len(gene_targets)} · Controles: {len(machine_controls)}.",
-            variant="light",
-            key=f"extraction-board-targets::{df_loaded.source_name}:{df_loaded.sheet_name}",
+        )
+        render_insights_overview(
+            specs_ov,
+            layout="stack",
+            key_prefix=f"overview-extraction::{df_loaded.source_name}:{df_loaded.sheet_name}",
         )
 
         with st.expander("Ver listas completas de extracción"):
@@ -839,6 +825,7 @@ def main() -> None:
             min_value=0.0,
             max_value=100.0,
             step=0.5,
+            value=40.0,
             key=UND_VALUE_KEY,
             disabled=df_loaded is None,
         )
@@ -1476,85 +1463,21 @@ def main() -> None:
     fc_table = fc_table.sort_values("target").reset_index(drop=True)
 
     st.markdown("**Tabla ΔΔCt (tres métodos)**")
-    ddct_cols = {
-        "advanced": ("Avanzada", "delta_delta_ct_advanced"),
-        "promedio": ("Promedio", "delta_delta_ct_promedio"),
-        "gen_ref": ("Gen ref", "delta_delta_ct_gen_ref"),
-    }
-    # Per-method insight boards
-    for m_key, (m_label, col) in ddct_cols.items():
-        series = ddct_table[col]
-        n_eval = int(series.notna().sum())
-        coverage = float(series.notna().mean())
-        neg = int((series < -0.25).sum())
-        pos = int((series > 0.25).sum())
-        neutral = int((series.abs() <= 0.25).sum())
-        over_list = (
-            ddct_table.sort_values(col, ascending=True)["target"].head(6).tolist()
-        )
-        under_list = (
-            ddct_table.sort_values(col, ascending=False)["target"].head(6).tolist()
-        )
-        render_insight_board(
-            badges=[
-                Badge(label=f"ΔΔCt · {m_label}", tone="primary"),
-                Badge(label=f"Cobertura {coverage:.0%}", tone="success"),
-                Badge(label=f"Genes evaluados: {n_eval}", tone="muted"),
-            ],
-            left=Card(title="Sobreexpresados (ΔΔCt < 0)", count=neg, chips=over_list),
-            right=Card(title="Subexpresados (ΔΔCt > 0)", count=pos, chips=under_list),
-            footer_text=f"Clasificación aplicada → {neg} sobreexpresados · {neutral} estables · {pos} subexpresados.",
-            key=f"ddct-board::{adv_key}::{m_key}",
-        )
-
-    # Comparative insight (sign agreement across methods)
-    try:
-        _dd = ddct_table[[
-            "delta_delta_ct_advanced",
-            "delta_delta_ct_promedio",
-            "delta_delta_ct_gen_ref",
-        ]].copy()
-        ddct_coverage = float(_dd.notna().all(axis=1).mean())
-        def _sgn(x: float) -> int:
-            try:
-                if x is None or np.isnan(float(x)):
-                    return 0
-            except Exception:
-                return 0
-            if abs(float(x)) < 1e-9:
-                return 0
-            return 1 if float(x) > 0 else -1
-        adv_s = _dd["delta_delta_ct_advanced"].apply(_sgn)
-        prom_s = _dd["delta_delta_ct_promedio"].apply(_sgn)
-        ref_s = _dd["delta_delta_ct_gen_ref"].apply(_sgn)
-        mismatch_mask = ((adv_s != prom_s) | (adv_s != ref_s)) & (adv_s != 0)
-        ddct_mismatch = int(mismatch_mask.sum())
-        ddct_match = int((((adv_s == prom_s) & (adv_s == ref_s)) & (adv_s != 0)).sum())
-        # Top discrepancies by spread across methods
-        _dd2 = ddct_table[["target", "delta_delta_ct_advanced", "delta_delta_ct_promedio", "delta_delta_ct_gen_ref"]].copy()
-        _dd2 = _dd2.assign(spread=_dd2[["delta_delta_ct_advanced", "delta_delta_ct_promedio", "delta_delta_ct_gen_ref"]].max(axis=1) - _dd2[["delta_delta_ct_advanced", "delta_delta_ct_promedio", "delta_delta_ct_gen_ref"]].min(axis=1))
-        disc_chips = _dd2.loc[mismatch_mask.values].sort_values("spread", ascending=False)["target"].head(6).tolist()
-        # Stable chips (small spread and agreement)
-        stable_chips = _dd2.loc[((adv_s == prom_s) & (adv_s == ref_s)).values].sort_values("spread")["target"].head(6).tolist()
-    except Exception:
-        ddct_coverage = 0.0
-        ddct_mismatch = 0
-        ddct_match = 0
-        stable_chips, disc_chips = [], []
-
-    render_insight_board(
-        badges=[
-            Badge(label="Comparativo ΔΔCt", tone="primary"),
-            Badge(label=f"Cobertura {ddct_coverage:.0%}", tone="success"),
-            Badge(label=f"Discrepancias de signo: {ddct_mismatch}", tone=("warning" if ddct_mismatch else "success")),
-        ],
-        left=Card(title="Coinciden (signo)", count=ddct_match, chips=stable_chips),
-        right=Card(title="Discrepan (signo)", count=ddct_mismatch, chips=disc_chips),
-        banner_text=(
-            "Sin discrepancias detectadas entre métodos en ΔΔCt." if ddct_mismatch == 0 else None
-        ),
-        banner_tone="success",
-        key=f"ddct-board::comparative::{adv_key}",
+    # Nuevo: usar el componente de overview para ΔΔCt por método + comparativo
+    data_ddct = InsightsData(
+        source_name=df_loaded.source_name,
+        sheet_name=df_loaded.sheet_name,
+        context_key=adv_key,
+        ddct_table=ddct_table,
+    )
+    specs_ddct = build_default_insight_specs(
+        data_ddct,
+        include=("ddct_per_method", "ddct_comparative"),
+    )
+    render_insights_overview(
+        specs_ddct,
+        layout="stack",
+        key_prefix=f"overview-ddct::{adv_key}",
     )
 
     # Solo bajo demanda: mostrar tabla consolidada
@@ -1588,78 +1511,26 @@ def main() -> None:
     fc_table = fc_table.assign(
         max_abs_log2fc=fc_table[["log2fc_advanced", "log2fc_promedio", "log2fc_gen_ref"]].abs().max(axis=1)
     )
-
-    # Per-method FC boards
-    fc_cols = {
-        "advanced": ("Avanzada", "fold_change_advanced", "log2fc_advanced"),
-        "promedio": ("Promedio", "fold_change_promedio", "log2fc_promedio"),
-        "gen_ref": ("Gen ref", "fold_change_gen_ref", "log2fc_gen_ref"),
-    }
-    for m_key, (m_label, fc_col, l2_col) in fc_cols.items():
-        fc_s = fc_table[fc_col]
-        l2_s = fc_table[l2_col]
-        n_eval = int(fc_s.notna().sum())
-        coverage = float(fc_s.notna().mean())
-        over2 = int((fc_s >= 2.0).sum())
-        under05 = int((fc_s <= 0.5).sum())
-        above1 = int((l2_s.abs() >= 1.0).sum())
-        top_over_fc = fc_table.sort_values(fc_col, ascending=False)["target"].head(6).tolist()
-        top_under_fc = fc_table.sort_values(fc_col, ascending=True)["target"].head(6).tolist()
-        render_insight_board(
-            badges=[
-                Badge(label=f"Fold Change · {m_label}", tone="primary"),
-                Badge(label=f"Cobertura {coverage:.0%}", tone="success"),
-                Badge(label=f"Genes evaluados: {n_eval}", tone="muted"),
-            ],
-            left=Card(title="Sobreexpresión (≥ 2×)", count=over2, chips=top_over_fc),
-            right=Card(title="Subexpresión (≤ 0.5×)", count=under05, chips=top_under_fc),
-            footer_text=f"Umbral rápido: |log2FC| ≥ 1 → {above1} genes ({m_label}).",
-            key=f"fc-board::{adv_key}::{m_key}",
-        )
-
-    # Comparative FC insight (sign agreement across methods)
-    try:
-        _fc = fc_table[["log2fc_advanced", "log2fc_promedio", "log2fc_gen_ref"]].copy()
-        fc_coverage = float(_fc.notna().all(axis=1).mean())
-        def _sgn2(x: float) -> int:
-            try:
-                if x is None or np.isnan(float(x)):
-                    return 0
-            except Exception:
-                return 0
-            if abs(float(x)) < 1e-9:
-                return 0
-            return 1 if float(x) > 0 else -1
-        a_s = _fc["log2fc_advanced"].apply(_sgn2)
-        p_s = _fc["log2fc_promedio"].apply(_sgn2)
-        r_s = _fc["log2fc_gen_ref"].apply(_sgn2)
-        mismatch_mask_fc = ((a_s != p_s) | (a_s != r_s)) & (a_s != 0)
-        fc_mismatch = int(mismatch_mask_fc.sum())
-        fc_match = int((((a_s == p_s) & (a_s == r_s)) & (a_s != 0)).sum())
-        _fc2 = fc_table[["target", "log2fc_advanced", "log2fc_promedio", "log2fc_gen_ref"]].copy()
-        _fc2 = _fc2.assign(spread=_fc2[["log2fc_advanced", "log2fc_promedio", "log2fc_gen_ref"]].max(axis=1) - _fc2[["log2fc_advanced", "log2fc_promedio", "log2fc_gen_ref"]].min(axis=1))
-        disc_chips_fc = _fc2.loc[mismatch_mask_fc.values].sort_values("spread", ascending=False)["target"].head(6).tolist()
-        stable_chips_fc = _fc2.loc[((a_s == p_s) & (a_s == r_s)).values].sort_values("spread")["target"].head(6).tolist()
-    except Exception:
-        fc_coverage = 0.0
-        fc_mismatch = 0
-        fc_match = 0
-        disc_chips_fc, stable_chips_fc = [], []
-
-    render_insight_board(
-        badges=[
-            Badge(label="Comparativo log2FC", tone="primary"),
-            Badge(label=f"Cobertura {fc_coverage:.0%}", tone="success"),
-            Badge(label=f"Discrepancias de signo: {fc_mismatch}", tone=("warning" if fc_mismatch else "success")),
-        ],
-        left=Card(title="Coinciden (signo)", count=fc_match, chips=stable_chips_fc),
-        right=Card(title="Discrepan (signo)", count=fc_mismatch, chips=disc_chips_fc),
-        banner_text=(
-            "Sin discrepancias detectadas entre métodos en log2FC." if fc_mismatch == 0 else None
-        ),
-        banner_tone="success",
-        key=f"fc-board::comparative::{adv_key}",
+    # Nuevo: usar el componente de overview para FC por método + comparativo
+    data_fc = InsightsData(
+        source_name=df_loaded.source_name,
+        sheet_name=df_loaded.sheet_name,
+        context_key=adv_key,
+        fc_table=fc_table,
     )
+    specs_fc = build_default_insight_specs(
+        data_fc,
+        include=("fc_per_method", "fc_comparative"),
+    )
+    render_insights_overview(
+        specs_fc,
+        layout="stack",
+        key_prefix=f"overview-fc::{adv_key}",
+    )
+
+    # Visor simple de expresión por método (sin filtros)
+    st.markdown("**Visor de expresión por método (log2FC)**")
+    render_gene_methods_view(fc_table, key=f"gene-view::{adv_key}")
 
     # Solo bajo demanda: mostrar tabla consolidada
     with st.expander("Mostrar tabla Fold Change (3 métodos)"):
@@ -1801,37 +1672,18 @@ def main() -> None:
         )
 
         summary = summarize_fc_methods(fc_table)
-        with st.expander("Resumen cuantitativo de concordancia"):
-            pair_labels = {
-                ("advanced", "promedio"): "Avanzada vs Promedio",
-                ("advanced", "gen_ref"): "Avanzada vs Gen ref",
-                ("promedio", "gen_ref"): "Promedio vs Gen ref",
-            }
-            st.markdown(
-                """
-                Este panel resume cuán alineados están los tres métodos cuando miramos los log2FC por gen:
+        # Nuevo: insight board de "Resumen cuantitativo de concordancia"
+        from app.ui.components import build_concordance_spec_from_summary
+        concord_specs = build_concordance_spec_from_summary(
+            summary, context_key=adv_key, key_prefix="concordance"
+        )
+        render_insights_overview(concord_specs, layout="stack", key_prefix=f"overview-concord::{adv_key}")
 
-                * **r, RMSE, MAE** cuantifican la similitud entre pares de métodos. r≈1 implica ordenamientos casi idénticos;
-                  RMSE y MAE bajos indican magnitudes homogéneas. N especifica cuántos genes entraron en el cálculo.
-                * **Umbrales ≥1.5x, ≥2x** muestran cuántos genes superan esos fold change mínimos en cada método, cuántos coinciden todos
-                  y cuántos al menos uno. Útil para detectar métodos más conservadores o liberales.
-                * **Genes con mayor discrepancia** lista los casos donde la diferencia en log2FC respecto al método avanzado es más alta;
-                  revisa estos genes antes de sacar conclusiones.
-                """
-            )
-            for pair, metrics in summary.get("pairwise_metrics", {}).items():
-                label = pair_labels.get(pair, f"{pair[0]} vs {pair[1]}")
-                st.write(
-                    f"{label}: r={metrics['pearson_r']:.3f} | RMSE={metrics['rmse']:.3f} | MAE={metrics['mae']:.3f} (N={metrics['n']})"
-                )
-            for label, counts in summary.get("counts", {}).items():
-                st.write(
-                    f"Umbral {label}: Avanzada={counts['advanced']}, Promedio={counts['promedio']}, Gen ref={counts['gen_ref']}, Todos={counts['todos']}, Alguno={counts['alguno']}"
-                )
-            disc = summary.get("top_discrepancies", [])
-            if disc:
-                disc_df = pd.DataFrame(disc)
-                st.markdown("Genes con mayor discrepancia respecto al método avanzado")
+        # Detalle opcional: tabla de discrepancias
+        disc = summary.get("top_discrepancies", [])
+        if disc:
+            disc_df = pd.DataFrame(disc)
+            with st.expander("Ver tabla de mayores discrepancias vs método avanzado"):
                 st.dataframe(disc_df, width="stretch", hide_index=True)
                 exports.register_dataframe(
                     key=f"{adv_key}::tables::discrepancias",

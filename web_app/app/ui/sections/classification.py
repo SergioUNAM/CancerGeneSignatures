@@ -10,6 +10,7 @@ from typing import Dict, Iterable, List, Tuple
 import pandas as pd
 import streamlit as st
 from streamlit.components.v1 import html as st_html
+from app.ui.components import render_classification_preview
 
 from app.services.qpcr import (
     PrefixGrouping,
@@ -155,170 +156,24 @@ def _render_sticky_preview(
     applied_samp_count: int,
     prefix_count: int,
 ) -> None:
-    """Renderiza el panel de vista previa sticky con métricas clave."""
+    """Renderiza el panel de vista previa sticky con el componente reusable."""
 
-    preview_id = f"classification-preview-{md5(file_key.encode('utf-8')).hexdigest()}"
-    coverage_pct = f"{coverage:.0%}"
-    ctrl_chips_html = "".join(
-        f"<span class='chip'>{escape(test)}</span>" for test in ctrl_preview[:6]
-    ) or "<span class='chip empty'>sin selección</span>"
-    samp_chips_html = "".join(
-        f"<span class='chip'>{escape(test)}</span>" for test in samp_preview[:6]
-    ) or "<span class='chip empty'>sin selección</span>"
-
-    warnings_html = ""
-    if overlap_prefixes:
-        overlaps = ", ".join(sorted({str(prefix) for prefix in overlap_prefixes}))
-        warnings_html += (
-            "<div class='status warn'>Los prefijos se solapan entre grupos: "
-            f"{escape(overlaps)}</div>"
-        )
-    if overlap_tests:
-        warnings_html += (
-            "<div class='status warn'>Algunas pruebas coinciden en ambos grupos: "
-            f"{escape(format_list_preview(sorted(set(overlap_tests)), limit=8))}</div>"
-        )
-    if not warnings_html:
-        warnings_html = "<div class='status ok'>Sin colisiones detectadas entre prefijos ni tests.</div>"
-
-    applied_html = ""
-    if applied_ctrl_count or applied_samp_count:
-        applied_html = (
-            "<div class='applied'>Clasificación aplicada → "
-            f"{applied_ctrl_count} controles · {applied_samp_count} muestras.</div>"
-        )
-
-    html = f"""
-    <style>
-        #{preview_id} {{
-            position: sticky;
-            top: 5.8rem;
-            background: radial-gradient(1200px 400px at 0% 0%, rgba(148,163,184,0.15), transparent),
-                        linear-gradient(180deg, rgba(245,247,250,0.98), rgba(235,238,243,0.92));
-            border-radius: 22px;
-            padding: 14px 16px;
-            border: 1px solid rgba(15, 23, 42, 0.10);
-            box-shadow: 0 18px 38px rgba(15, 23, 42, 0.12);
-        }}
-        #{preview_id} .meta {{
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.45rem;
-            margin-bottom: 0.85rem;
-        }}
-        #{preview_id} .badge {{
-            display: inline-flex;
-            align-items: center;
-            gap: 0.35rem;
-            padding: 0.2rem 0.65rem;
-            border-radius: 999px;
-            font-size: 0.72rem;
-            background: rgba(148, 163, 184, 0.25);
-            border: 1px solid rgba(148, 163, 184, 0.35);
-            color: #0f172a;
-        }}
-        #{preview_id} .badge.mode.auto {{
-            background: rgba(16, 185, 129, 0.18);
-            border-color: rgba(16, 185, 129, 0.35);
-            color: #065f46;
-        }}
-        #{preview_id} .badge.mode.manual {{
-            background: rgba(245, 158, 11, 0.18);
-            border-color: rgba(245, 158, 11, 0.35);
-            color: #7c2d12;
-        }}
-        #{preview_id} .badge.manual {{
-            background: rgba(245, 158, 11, 0.16);
-            border-color: rgba(245, 158, 11, 0.32);
-            color: #7c2d12;
-        }}
-        #{preview_id} .cards {{
-            display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 0.85rem;
-        }}
-        #{preview_id} .card {{
-            background: rgba(248, 250, 252, 0.98);
-            border-radius: 18px;
-            padding: 12px 14px;
-            border: 1px solid rgba(15, 23, 42, 0.10);
-        }}
-        #{preview_id} .card h5 {{
-            margin: 0;
-            font-size: 0.82rem;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-            color: #334155;
-        }}
-        #{preview_id} .count {{
-            font-size: 1.7rem;
-            font-weight: 700;
-            margin: 0.35rem 0 0.55rem 0;
-            color: #0f172a;
-        }}
-        #{preview_id} .chip {{
-            display: inline-flex;
-            align-items: center;
-            padding: 0.18rem 0.55rem;
-            border-radius: 999px;
-            background: rgba(59, 130, 246, 0.12);
-            color: #0b1220;
-            font-size: 0.7rem;
-            margin: 0.12rem;
-            border: 1px solid rgba(59, 130, 246, 0.28);
-        }}
-        #{preview_id} .chip.empty {{
-            background: rgba(148, 163, 184, 0.16);
-            color: rgba(15, 23, 42, 0.7);
-            border-color: rgba(148, 163, 184, 0.28);
-        }}
-        #{preview_id} .status {{
-            margin-top: 0.8rem;
-            border-radius: 0.7rem;
-            padding: 0.6rem 0.75rem;
-            font-size: 0.8rem;
-        }}
-        #{preview_id} .status.ok {{
-            background: rgba(16, 185, 129, 0.14);
-            border: 1px solid rgba(16, 185, 129, 0.30);
-            color: #065f46;
-        }}
-        #{preview_id} .status.warn {{
-            background: rgba(225, 29, 29, 0.12);
-            border: 1px solid rgba(225, 29, 29, 0.38);
-            color: #7f1d1d;
-        }}
-        #{preview_id} .applied {{
-            margin-top: 0.8rem;
-            font-size: 0.78rem;
-            color: #334155;
-        }}
-    </style>
-    <div id="{preview_id}">
-        <div class="meta">
-            <span class="badge mode {'auto' if auto_apply else 'manual'}">{'Auto' if auto_apply else 'Manual'} · aplicación</span>
-            <span class="badge">{assigned_tests} / {total_tests} tests asignados</span>
-            <span class="badge">Cobertura {coverage_pct}</span>
-            <span class="badge">Prefijos detectados: {prefix_count}</span>
-            <span class="badge manual">Asignaciones manuales: {manual_ctrl_count + manual_samp_count}</span>
-        </div>
-        <div class="cards">
-            <div class="card">
-                <h5>Controles</h5>
-                <div class="count">{len(ctrl_preview)}</div>
-                <div>{ctrl_chips_html}</div>
-            </div>
-            <div class="card">
-                <h5>Muestras</h5>
-                <div class="count">{len(samp_preview)}</div>
-                <div>{samp_chips_html}</div>
-            </div>
-        </div>
-        {applied_html}
-        {warnings_html}
-    </div>
-    """
-    st_html(html, height=420)
+    render_classification_preview(
+        file_key=file_key,
+        total_tests=total_tests,
+        ctrl_preview=ctrl_preview,
+        samp_preview=samp_preview,
+        assigned_tests=assigned_tests,
+        coverage=coverage,
+        overlap_prefixes=overlap_prefixes,
+        overlap_tests=overlap_tests,
+        auto_apply=auto_apply,
+        manual_ctrl_count=manual_ctrl_count,
+        manual_samp_count=manual_samp_count,
+        applied_ctrl_count=applied_ctrl_count,
+        applied_samp_count=applied_samp_count,
+        prefix_count=prefix_count,
+    )
 
 
 def render_classification_section(long_df: pd.DataFrame, file_key: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
